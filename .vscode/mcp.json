@@ -1,0 +1,12 @@
+{
+	"servers": {
+		"Bears": {
+			"type": "stdio",
+			"command": "bea",
+			"args": [
+				"mcp"
+			]
+		}
+	},
+	"inputs": []
+}

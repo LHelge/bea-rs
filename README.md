@@ -142,6 +142,13 @@ bea search "oauth"
 bea search "oauth" --all
 ```
 
+### `bea edit`
+Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$VISUAL`, then `vi`. After the editor exits, the file is re-parsed and validated.
+
+```sh
+bea edit <id>
+```
+
 ---
 
 ## JSON output

@@ -225,3 +225,88 @@ fn test_list_json() {
     assert!(v.is_array());
     assert_eq!(v.as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn test_edit_modifies_body() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "create", "Edit me", "--body", "original body"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // Use sed as $EDITOR to append a line to the file
+    bea(&tmp)
+        .env("EDITOR", "sed -i '$ a\\appended line'")
+        .args(["edit", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Edited task"));
+
+    // Verify the body changed
+    let out = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v["body"].as_str().unwrap().contains("appended line"));
+}
+
+#[test]
+fn test_edit_no_changes() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "create", "No change task"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // Use 'true' as $EDITOR — does nothing
+    bea(&tmp)
+        .env("EDITOR", "true")
+        .args(["edit", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No changes"));
+}
+
+#[test]
+fn test_edit_invalid_task_id() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    bea(&tmp)
+        .env("EDITOR", "true")
+        .args(["edit", "xxxx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_edit_bad_frontmatter() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "create", "Break me"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // Use sed to corrupt the frontmatter (replace status line with invalid yaml)
+    bea(&tmp)
+        .env("EDITOR", "sed -i 's/^status:.*/status: [invalid/'")
+        .args(["edit", &id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Invalid frontmatter"));
+}

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::process::Command as ProcessCommand;
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -170,6 +171,12 @@ pub enum Command {
         all: bool,
     },
 
+    /// Open a task in $EDITOR for editing
+    Edit {
+        /// Task ID
+        id: String,
+    },
+
     /// Start MCP server on stdio
     Mcp,
 }
@@ -247,6 +254,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Graph { all } => cmd_graph(base, all, cli.json).await,
         Command::Delete { id } => cmd_delete(base, &id, cli.json),
         Command::Search { query, all } => cmd_search(base, &query, all, cli.json).await,
+        Command::Edit { id } => cmd_edit(base, &id, cli.json),
         Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
 }
@@ -769,6 +777,60 @@ async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_edit(base: &Path, id: &str, json: bool) -> Result<()> {
+    // Validate task exists
+    let original = store::load_one(base, id)?;
+    let path = store::find_task_path(base, &original.id)?;
+
+    // Resolve editor
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".into());
+
+    // Open editor — use sh -c so $EDITOR can contain arguments
+    let path_str = path.to_string_lossy();
+    let status = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{path_str}\""))
+        .status()
+        .map_err(Error::Io)?;
+
+    if !status.success() {
+        eprintln!("Editor exited with non-zero status, aborting.");
+        return Ok(());
+    }
+
+    // Re-read and validate
+    let content = std::fs::read_to_string(&path).map_err(Error::Io)?;
+    let edited = match task::parse_task(&content) {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!("Invalid frontmatter after edit. File left on disk — fix and retry.");
+            return Ok(());
+        }
+    };
+
+    // Check if anything changed
+    if task::render_task(&original) == task::render_task(&edited) {
+        if !json {
+            println!("No changes.");
+        }
+        return Ok(());
+    }
+
+    // Save with updated timestamp (and handle slug rename if title changed)
+    let mut edited = edited;
+    edited.updated = Utc::now();
+    store::save(base, &edited)?;
+
+    if json {
+        output(&task_summary(&edited), true)?;
+    } else {
+        println!("Edited task {} — {}", edited.id, edited.title);
     }
     Ok(())
 }
