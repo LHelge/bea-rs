@@ -1,0 +1,601 @@
+use std::collections::HashSet;
+use std::path::Path;
+
+use chrono::Utc;
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+
+use crate::error::{Error, Result};
+use crate::graph::{DepNodeJson, Graph};
+use crate::store;
+use crate::task::{self, Priority, Status, Task};
+
+#[derive(Parser)]
+#[command(name = "bea", about = "bears — file-based task tracker")]
+pub struct Args {
+    #[command(subcommand)]
+    pub command: Command,
+
+    /// Output JSON instead of human-readable text
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, PartialEq)]
+pub enum Command {
+    /// Initialize a new .tasks/ directory
+    Init {
+        /// Project name
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Create a new task
+    Create {
+        /// Task title
+        title: String,
+
+        /// Priority (P0-P3)
+        #[arg(long, default_value = "P2")]
+        priority: Priority,
+
+        /// Tags (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        tag: Vec<String>,
+
+        /// Task IDs this depends on
+        #[arg(long = "depends-on", value_delimiter = ',')]
+        depends_on: Vec<String>,
+
+        /// Parent task ID
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Task body
+        #[arg(long)]
+        body: Option<String>,
+    },
+
+    /// List tasks with optional filters
+    List {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<Status>,
+
+        /// Filter by priority
+        #[arg(long)]
+        priority: Option<Priority>,
+
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+
+    /// Show tasks that are ready to work on
+    Ready {
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Show a single task in detail
+    Show {
+        /// Task ID
+        id: String,
+    },
+
+    /// Update task fields
+    Update {
+        /// Task ID
+        id: String,
+
+        /// New status
+        #[arg(long)]
+        status: Option<Status>,
+
+        /// New priority
+        #[arg(long)]
+        priority: Option<Priority>,
+
+        /// Set tags (comma-separated, replaces existing)
+        #[arg(long, value_delimiter = ',')]
+        tag: Option<Vec<String>>,
+
+        /// Set assignee
+        #[arg(long)]
+        assignee: Option<String>,
+
+        /// Set body
+        #[arg(long)]
+        body: Option<String>,
+
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+    },
+
+    /// Set task status
+    Status {
+        /// Task ID
+        id: String,
+        /// New status
+        status: Status,
+    },
+
+    /// Start a task (set status to in_progress)
+    Start {
+        /// Task ID
+        id: String,
+    },
+
+    /// Complete a task (set status to done)
+    Done {
+        /// Task ID
+        id: String,
+    },
+
+    /// Manage dependencies
+    Dep {
+        #[command(subcommand)]
+        command: DepCommand,
+    },
+
+    /// Show dependency graph
+    Graph,
+
+    /// Search tasks by text
+    Search {
+        /// Search query
+        query: String,
+    },
+
+    /// Start MCP server on stdio
+    Mcp,
+}
+
+#[derive(Subcommand, PartialEq)]
+pub enum DepCommand {
+    /// Add a dependency
+    Add {
+        /// Task ID
+        id: String,
+        /// ID of task to depend on
+        depends_on: String,
+    },
+    /// Remove a dependency
+    Remove {
+        /// Task ID
+        id: String,
+        /// ID of dependency to remove
+        depends_on: String,
+    },
+    /// Show dependency tree
+    Tree {
+        /// Task ID
+        id: String,
+    },
+}
+
+pub fn run(cli: Args, base: &Path) -> Result<()> {
+    match cli.command {
+        Command::Init { name } => cmd_init(base, name.as_deref(), cli.json),
+        Command::Create {
+            title,
+            priority,
+            tag,
+            depends_on,
+            parent,
+            body,
+        } => cmd_create(
+            base, title, priority, tag, depends_on, parent, body, cli.json,
+        ),
+        Command::List {
+            status,
+            priority,
+            tag,
+        } => cmd_list(base, status, priority, tag, cli.json),
+        Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json),
+        Command::Show { id } => cmd_show(base, &id, cli.json),
+        Command::Update {
+            id,
+            status,
+            priority,
+            tag,
+            assignee,
+            body,
+            title,
+        } => cmd_update(
+            base, &id, status, priority, tag, assignee, body, title, cli.json,
+        ),
+        Command::Status { id, status } => cmd_status(base, &id, status, cli.json),
+        Command::Start { id } => cmd_status(base, &id, Status::InProgress, cli.json),
+        Command::Done { id } => cmd_status(base, &id, Status::Done, cli.json),
+        Command::Dep { command } => match command {
+            DepCommand::Add { id, depends_on } => cmd_dep_add(base, &id, &depends_on, cli.json),
+            DepCommand::Remove { id, depends_on } => {
+                cmd_dep_remove(base, &id, &depends_on, cli.json)
+            }
+            DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json),
+        },
+        Command::Graph => cmd_graph(base, cli.json),
+        Command::Search { query } => cmd_search(base, &query, cli.json),
+        Command::Mcp => crate::mcp::run(base),
+    }
+}
+
+fn output<T: Serialize>(value: &T, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
+}
+
+fn cmd_init(base: &Path, name: Option<&str>, json: bool) -> Result<()> {
+    let dir = store::init(base, name)?;
+    if json {
+        output(
+            &serde_json::json!({ "path": dir.display().to_string() }),
+            true,
+        )?;
+    } else {
+        println!("Initialized .tasks/ directory at {}", dir.display());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_create(
+    base: &Path,
+    title: String,
+    priority: Priority,
+    tags: Vec<String>,
+    depends_on: Vec<String>,
+    parent: Option<String>,
+    body: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
+    let id = task::generate_id(&existing_ids);
+
+    let mut t = Task::new(id, title, priority);
+    t.tags = tags;
+    t.depends_on = depends_on;
+    t.parent = parent;
+    if let Some(body) = body {
+        t.body = body;
+    }
+
+    store::save(base, &t)?;
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("Created task {} — {}", t.id, t.title);
+    }
+    Ok(())
+}
+
+fn cmd_list(
+    base: &Path,
+    status: Option<Status>,
+    priority: Option<Priority>,
+    tag: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let mut filtered: Vec<&Task> = tasks
+        .values()
+        .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
+        .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
+        .filter(|t| {
+            tag.as_ref()
+                .is_none_or(|tag| t.tags.iter().any(|tt| tt == tag))
+        })
+        .collect();
+    filtered.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+    if json {
+        let summaries: Vec<_> = filtered.iter().map(|t| task_summary(t)).collect();
+        output(&summaries, true)?;
+    } else {
+        if filtered.is_empty() {
+            println!("No tasks found.");
+        } else {
+            for t in &filtered {
+                println!(
+                    "[{}] {} {} — {} [{}]",
+                    t.id,
+                    t.priority,
+                    t.status,
+                    t.title,
+                    t.tags.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_ready(base: &Path, tag: Option<String>, limit: Option<usize>, json: bool) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let graph = Graph::build(&tasks);
+    let ready = graph.ready(&tasks, tag.as_deref(), limit);
+
+    if json {
+        let summaries: Vec<_> = ready.iter().map(|t| task_summary(t)).collect();
+        output(&summaries, true)?;
+    } else {
+        if ready.is_empty() {
+            println!("No tasks ready.");
+        } else {
+            for t in &ready {
+                println!(
+                    "[{}] {} — {} [{}]",
+                    t.id,
+                    t.priority,
+                    t.title,
+                    t.tags.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
+    let t = store::load_one(base, id)?;
+
+    if json {
+        let mut s = task_summary(&t);
+        s["body"] = serde_json::Value::String(t.body.clone());
+        s["depends_on"] = serde_json::json!(t.depends_on);
+        s["parent"] = serde_json::json!(t.parent);
+        s["assignee"] = serde_json::json!(t.assignee);
+        s["created"] = serde_json::json!(t.created);
+        s["updated"] = serde_json::json!(t.updated);
+        output(&s, true)?;
+    } else {
+        println!("[{}] {}", t.id, t.title);
+        println!("Status:   {}", t.status);
+        println!("Priority: {}", t.priority);
+        println!(
+            "Tags:     {}",
+            if t.tags.is_empty() {
+                "—".into()
+            } else {
+                t.tags.join(", ")
+            }
+        );
+        if !t.depends_on.is_empty() {
+            println!("Deps:     {}", t.depends_on.join(", "));
+        }
+        if let Some(ref parent) = t.parent {
+            println!("Parent:   {parent}");
+        }
+        if !t.assignee.is_empty() {
+            println!("Assignee: {}", t.assignee);
+        }
+        println!("Created:  {}", t.created);
+        println!("Updated:  {}", t.updated);
+        if !t.body.is_empty() {
+            println!("\n{}", t.body);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_update(
+    base: &Path,
+    id: &str,
+    status: Option<Status>,
+    priority: Option<Priority>,
+    tags: Option<Vec<String>>,
+    assignee: Option<String>,
+    body: Option<String>,
+    title: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let mut t = store::load_one(base, id)?;
+
+    if let Some(s) = status {
+        t.status = s;
+    }
+    if let Some(p) = priority {
+        t.priority = p;
+    }
+    if let Some(tags) = tags {
+        t.tags = tags;
+    }
+    if let Some(a) = assignee {
+        t.assignee = a;
+    }
+    if let Some(b) = body {
+        t.body = b;
+    }
+    if let Some(title) = title {
+        t.title = title;
+    }
+    t.updated = Utc::now();
+
+    store::save(base, &t)?;
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("Updated task {} — {}", t.id, t.title);
+    }
+    Ok(())
+}
+
+fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
+    let mut t = store::load_one(base, id)?;
+    t.status = status;
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("[{}] {} → {}", t.id, t.title, t.status);
+    }
+    Ok(())
+}
+
+fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
+    // Verify both tasks exist
+    let _ = store::load_one(base, depends_on)?;
+    let mut t = store::load_one(base, id)?;
+
+    // Check for cycles
+    let tasks = store::load_all(base)?;
+    let graph = Graph::build(&tasks);
+    if graph.would_cycle(id, depends_on) {
+        return Err(Error::CycleDetected {
+            from: id.into(),
+            to: depends_on.into(),
+        });
+    }
+
+    if !t.depends_on.contains(&depends_on.to_string()) {
+        t.depends_on.push(depends_on.to_string());
+        t.updated = Utc::now();
+        store::save(base, &t)?;
+    }
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("[{}] now depends on [{}]", id, depends_on);
+    }
+    Ok(())
+}
+
+fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
+    let mut t = store::load_one(base, id)?;
+    t.depends_on.retain(|d| d != depends_on);
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("[{}] no longer depends on [{}]", id, depends_on);
+    }
+    Ok(())
+}
+
+fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let graph = Graph::build(&tasks);
+    let tree = graph
+        .dep_tree(&tasks, id)
+        .ok_or_else(|| Error::TaskNotFound(id.into()))?;
+
+    if json {
+        let json_tree = DepNodeJson::from_dep_node(&tree);
+        output(&json_tree, true)?;
+    } else {
+        print_tree(&tree, "", true);
+    }
+    Ok(())
+}
+
+fn print_tree(node: &crate::graph::DepNode<'_>, prefix: &str, is_last: bool) {
+    let connector = if prefix.is_empty() {
+        ""
+    } else if is_last {
+        "└── "
+    } else {
+        "├── "
+    };
+    println!(
+        "{prefix}{connector}[{}] {} ({})",
+        node.task.id, node.task.title, node.task.status
+    );
+    let child_prefix = if prefix.is_empty() {
+        String::new()
+    } else if is_last {
+        format!("{prefix}    ")
+    } else {
+        format!("{prefix}│   ")
+    };
+    for (i, child) in node.children.iter().enumerate() {
+        print_tree(child, &child_prefix, i == node.children.len() - 1);
+    }
+}
+
+fn cmd_graph(base: &Path, json: bool) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let graph = Graph::build(&tasks);
+
+    if json {
+        let adj = graph.adjacency_list();
+        output(&adj, true)?;
+    } else {
+        for (id, deps) in &graph.edges {
+            if let Some(t) = tasks.get(id) {
+                if deps.is_empty() {
+                    println!("[{}] {}", t.id, t.title);
+                } else {
+                    let dep_strs: Vec<String> = deps.iter().map(|d| format!("[{d}]")).collect();
+                    println!("[{}] {} → {}", t.id, t.title, dep_strs.join(", "));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_search(base: &Path, query: &str, json: bool) -> Result<()> {
+    let tasks = store::load_all(base)?;
+    let query_lower = query.to_lowercase();
+    let mut results: Vec<&Task> = tasks
+        .values()
+        .filter(|t| {
+            t.title.to_lowercase().contains(&query_lower)
+                || t.body.to_lowercase().contains(&query_lower)
+                || t.tags
+                    .iter()
+                    .any(|tag| tag.to_lowercase().contains(&query_lower))
+                || t.id.contains(&query_lower)
+        })
+        .collect();
+    results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+    if json {
+        let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
+        output(&summaries, true)?;
+    } else {
+        if results.is_empty() {
+            println!("No tasks matching \"{query}\".");
+        } else {
+            for t in &results {
+                println!(
+                    "[{}] {} {} — {} [{}]",
+                    t.id,
+                    t.priority,
+                    t.status,
+                    t.title,
+                    t.tags.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn task_summary(t: &Task) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "title": t.title,
+        "status": t.status,
+        "priority": t.priority,
+        "tags": t.tags,
+    })
+}
