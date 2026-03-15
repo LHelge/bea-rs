@@ -184,6 +184,9 @@ pub enum Command {
         shell: Shell,
     },
 
+    /// Print version information
+    Version,
+
     /// Start MCP server on stdio
     Mcp,
 }
@@ -264,6 +267,15 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Edit { id } => cmd_edit(base, &id, cli.json),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Args::command(), "bea", &mut std::io::stdout());
+            Ok(())
+        }
+        Command::Version => {
+            let version = env!("CARGO_PKG_VERSION");
+            if cli.json {
+                output(&serde_json::json!({ "version": version }), true)?;
+            } else {
+                println!("Bears {version}");
+            }
             Ok(())
         }
         Command::Mcp => unreachable!("MCP mode is handled in main"),
