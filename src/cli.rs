@@ -24,11 +24,7 @@ pub struct Args {
 #[derive(Subcommand, PartialEq)]
 pub enum Command {
     /// Initialize a new .tasks/ directory
-    Init {
-        /// Project name
-        #[arg(long)]
-        name: Option<String>,
-    },
+    Init,
 
     /// Create a new task
     Create {
@@ -180,9 +176,9 @@ pub enum DepCommand {
     },
 }
 
-pub fn run(cli: Args, base: &Path) -> Result<()> {
+pub async fn run(cli: Args, base: &Path) -> Result<()> {
     match cli.command {
-        Command::Init { name } => cmd_init(base, name.as_deref(), cli.json),
+        Command::Init => cmd_init(base, cli.json),
         Command::Create {
             title,
             priority,
@@ -190,15 +186,18 @@ pub fn run(cli: Args, base: &Path) -> Result<()> {
             depends_on,
             parent,
             body,
-        } => cmd_create(
-            base, title, priority, tag, depends_on, parent, body, cli.json,
-        ),
+        } => {
+            cmd_create(
+                base, title, priority, tag, depends_on, parent, body, cli.json,
+            )
+            .await
+        }
         Command::List {
             status,
             priority,
             tag,
-        } => cmd_list(base, status, priority, tag, cli.json),
-        Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json),
+        } => cmd_list(base, status, priority, tag, cli.json).await,
+        Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json).await,
         Command::Show { id } => cmd_show(base, &id, cli.json),
         Command::Update {
             id,
@@ -215,15 +214,17 @@ pub fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Start { id } => cmd_status(base, &id, Status::InProgress, cli.json),
         Command::Done { id } => cmd_status(base, &id, Status::Done, cli.json),
         Command::Dep { command } => match command {
-            DepCommand::Add { id, depends_on } => cmd_dep_add(base, &id, &depends_on, cli.json),
+            DepCommand::Add { id, depends_on } => {
+                cmd_dep_add(base, &id, &depends_on, cli.json).await
+            }
             DepCommand::Remove { id, depends_on } => {
                 cmd_dep_remove(base, &id, &depends_on, cli.json)
             }
-            DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json),
+            DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json).await,
         },
-        Command::Graph => cmd_graph(base, cli.json),
-        Command::Search { query } => cmd_search(base, &query, cli.json),
-        Command::Mcp => crate::mcp::run(base),
+        Command::Graph => cmd_graph(base, cli.json).await,
+        Command::Search { query } => cmd_search(base, &query, cli.json).await,
+        Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
 }
 
@@ -234,8 +235,8 @@ fn output<T: Serialize>(value: &T, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(base: &Path, name: Option<&str>, json: bool) -> Result<()> {
-    let dir = store::init(base, name)?;
+fn cmd_init(base: &Path, json: bool) -> Result<()> {
+    let dir = store::init(base)?;
     if json {
         output(
             &serde_json::json!({ "path": dir.display().to_string() }),
@@ -248,7 +249,7 @@ fn cmd_init(base: &Path, name: Option<&str>, json: bool) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cmd_create(
+async fn cmd_create(
     base: &Path,
     title: String,
     priority: Priority,
@@ -258,7 +259,7 @@ fn cmd_create(
     body: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let tasks = store::load_all(base)?;
+    let tasks = store::load_all(base).await?;
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
     let id = task::generate_id(&existing_ids);
 
@@ -280,14 +281,14 @@ fn cmd_create(
     Ok(())
 }
 
-fn cmd_list(
+async fn cmd_list(
     base: &Path,
     status: Option<Status>,
     priority: Option<Priority>,
     tag: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let tasks = store::load_all(base)?;
+    let tasks = store::load_all(base).await?;
     let mut filtered: Vec<&Task> = tasks
         .values()
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
@@ -321,8 +322,13 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_ready(base: &Path, tag: Option<String>, limit: Option<usize>, json: bool) -> Result<()> {
-    let tasks = store::load_all(base)?;
+async fn cmd_ready(
+    base: &Path,
+    tag: Option<String>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let tasks = store::load_all(base).await?;
     let graph = Graph::build(&tasks);
     let ready = graph.ready(&tasks, tag.as_deref(), limit);
 
@@ -447,13 +453,13 @@ fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
+async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
     // Verify both tasks exist
     let _ = store::load_one(base, depends_on)?;
     let mut t = store::load_one(base, id)?;
 
     // Check for cycles
-    let tasks = store::load_all(base)?;
+    let tasks = store::load_all(base).await?;
     let graph = Graph::build(&tasks);
     if graph.would_cycle(id, depends_on) {
         return Err(Error::CycleDetected {
@@ -490,8 +496,8 @@ fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result
     Ok(())
 }
 
-fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
-    let tasks = store::load_all(base)?;
+async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
+    let tasks = store::load_all(base).await?;
     let graph = Graph::build(&tasks);
     let tree = graph
         .dep_tree(&tasks, id)
@@ -530,8 +536,8 @@ fn print_tree(node: &crate::graph::DepNode<'_>, prefix: &str, is_last: bool) {
     }
 }
 
-fn cmd_graph(base: &Path, json: bool) -> Result<()> {
-    let tasks = store::load_all(base)?;
+async fn cmd_graph(base: &Path, json: bool) -> Result<()> {
+    let tasks = store::load_all(base).await?;
     let graph = Graph::build(&tasks);
 
     if json {
@@ -552,8 +558,8 @@ fn cmd_graph(base: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_search(base: &Path, query: &str, json: bool) -> Result<()> {
-    let tasks = store::load_all(base)?;
+async fn cmd_search(base: &Path, query: &str, json: bool) -> Result<()> {
+    let tasks = store::load_all(base).await?;
     let query_lower = query.to_lowercase();
     let mut results: Vec<&Task> = tasks
         .values()

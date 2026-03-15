@@ -10,14 +10,15 @@ use clap::Parser;
 use cli::Args;
 use std::path::Path;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     let base = Path::new(".");
 
     let result = if args.command == Command::Mcp {
-        mcp::run(base)
+        mcp::run(base).await
     } else {
-        cli::run(args, base)
+        cli::run(args, base).await
     };
 
     if let Err(e) = result {

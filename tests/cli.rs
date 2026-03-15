@@ -12,7 +12,7 @@ fn bea(dir: &TempDir) -> Command {
 fn test_init() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp)
-        .args(["init", "--name", "test-project"])
+        .args(["init"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Initialized .tasks/"));
