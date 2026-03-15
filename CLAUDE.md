@@ -22,6 +22,10 @@ cargo fmt                    # Format code
 cargo add <crate>            # Add a new dependency (always use this, not manual Cargo.toml edits)
 ```
 
+## Task tracking
+
+This project uses `bears` itself to manage its own tasks. The bears MCP server is registered with Claude Code — use the MCP tools (`list_ready`, `create_task`, `complete_task`, etc.) to check and update tasks rather than running `bea` CLI commands directly.
+
 ## Development workflow
 
 Work test-driven: write tests before or alongside implementation. After finishing any task, always run:
@@ -37,8 +41,8 @@ All three must pass cleanly before considering a task done.
 ```
 src/
   main.rs     # Entry point: dispatch to CLI or MCP server
-  args.rs     # clap command definitions and handlers (CLI frontend)
-  mcp.rs      # MCP server: stdio JSON-RPC loop, tool dispatch
+  cli.rs      # clap command definitions and handlers (CLI frontend)
+  mcp.rs      # MCP server: rmcp-based tool dispatch over stdio
   store.rs    # Core: parse .tasks/ dir, read/write task files
   task.rs     # Task struct, frontmatter serde, ID generation
   graph.rs    # Dependency graph: build, query ready, cycle detection
@@ -92,7 +96,7 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 | Tool | Key params |
 |------|------------|
 | `list_ready` | `limit?`, `tag?` |
-| `list_tasks` | `status?`, `priority?`, `tag?` |
+| `list_all_tasks` | `status?`, `priority?`, `tag?` |
 | `get_task` | `id` |
 | `create_task` | `title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?` |
 | `update_task` | `id`, `status?`, `priority?`, `tags?`, `assignee?`, `body?` |
@@ -110,7 +114,9 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 - `chrono` — timestamps
 - `uuid` — ID generation
 - `thiserror` — error types
-- `tokio` only if async is needed for the MCP stdio loop
+- `tokio` — async runtime used for MCP server, parallel file loading in `store::load_all`
+- `rmcp` — MCP SDK (server, macros, transport-io features)
+- `schemars` — JSON Schema generation for MCP tool parameter types
 
 Keep the dependency tree small. Compilation should be fast.
 
@@ -120,11 +126,11 @@ Keep the dependency tree small. Compilation should be fast.
 - Task ID not found → clear error
 - Cycle detected → reject with explanation
 - Invalid frontmatter → warn and skip (don't crash), report which file
-- Library code uses `Result` with `?`. CLI formats errors for humans. MCP formats errors as JSON-RPC error responses.
+- Library code uses `Result` with `?`. CLI formats errors for humans. MCP returns `rmcp::ErrorData` from tool methods.
 
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed)
 - Integration tests: create a temp `.tasks/` dir, run commands, verify file output
-- MCP tests: test JSON-RPC request/response cycle with mock stdio
+- MCP tools verified end-to-end via live MCP session (no unit tests for MCP layer currently)

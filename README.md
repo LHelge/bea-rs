@@ -58,11 +58,10 @@ Any Markdown body goes here.
 ## Commands
 
 ### `bea init`
-Create the `.tasks/` directory and config file in the current directory.
+Create the `.tasks/` directory in the current directory.
 
 ```sh
 bea init
-bea init --name my-project
 ```
 
 ### `bea create`
@@ -143,7 +142,7 @@ bea --json create "New task" --priority P1
 `bears` can run as an [MCP](https://modelcontextprotocol.io) server, exposing all task operations as tools for AI coding agents.
 
 ```sh
-bea mcp   # reads JSON-RPC 2.0 from stdin, writes to stdout
+bea mcp   # starts MCP server over stdio
 ```
 
 ### Available MCP tools
@@ -151,7 +150,7 @@ bea mcp   # reads JSON-RPC 2.0 from stdin, writes to stdout
 | Tool | Description |
 |---|---|
 | `list_ready` | Tasks ready to work on (`limit?`, `tag?`) |
-| `list_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`) |
+| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`) |
 | `get_task` | Full task details (`id`) |
 | `create_task` | Create a task (`title`, `priority?`, `tags?`, `depends_on?`, `body?`) |
 | `update_task` | Update fields (`id`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`) |
@@ -197,7 +196,7 @@ All three of `fmt`, `clippy`, and `test` must pass cleanly before committing.
 ```
 src/
   main.rs    Entry point — dispatch to CLI or MCP server
-  args.rs    CLI commands (clap)
+  cli.rs     CLI commands (clap)
   mcp.rs     MCP server — JSON-RPC 2.0 over stdio
   store.rs   Read/write .tasks/ directory
   task.rs    Task struct, frontmatter parse/render, ID & slug
