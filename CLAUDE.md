@@ -36,6 +36,10 @@ cargo fmt && cargo clippy && cargo test
 
 All three must pass cleanly before considering a task done.
 
+## Commit style
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`. Common types: `feat`, `fix`, `ci`, `docs`, `chore`, `refactor`, `test`. Release notes are generated from commit messages, so keep them accurate and descriptive.
+
 ## Architecture
 
 ```

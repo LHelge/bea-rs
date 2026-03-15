@@ -1,10 +1,10 @@
 ---
 id: 5dcc
 title: Add release workflow triggered by git tags
-status: open
+status: done
 priority: P2
 created: 2026-03-15T22:01:02.907677996Z
-updated: 2026-03-15T22:01:02.907677996Z
+updated: 2026-03-15T22:19:29.063298138Z
 tags:
 - ci
 - infra
