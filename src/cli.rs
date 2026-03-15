@@ -143,6 +143,12 @@ pub enum Command {
     /// Show dependency graph
     Graph,
 
+    /// Delete a task permanently
+    Delete {
+        /// Task ID
+        id: String,
+    },
+
     /// Search tasks by text
     Search {
         /// Search query
@@ -223,6 +229,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json).await,
         },
         Command::Graph => cmd_graph(base, cli.json).await,
+        Command::Delete { id } => cmd_delete(base, &id, cli.json),
         Command::Search { query } => cmd_search(base, &query, cli.json).await,
         Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
@@ -554,6 +561,18 @@ async fn cmd_graph(base: &Path, json: bool) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
+    let t = store::load_one(base, id)?;
+    store::delete(base, id)?;
+
+    if json {
+        output(&task_summary(&t), true)?;
+    } else {
+        println!("Deleted task {} — {}", t.id, t.title);
     }
     Ok(())
 }

@@ -114,7 +114,6 @@ pub fn save(base: &Path, t: &Task) -> Result<()> {
 }
 
 /// Delete a task file by ID.
-#[allow(dead_code)]
 pub fn delete(base: &Path, id: &str) -> Result<()> {
     let path = find_task_path(base, id)?;
     fs::remove_file(&path)?;

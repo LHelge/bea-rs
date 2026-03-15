@@ -1,10 +1,10 @@
 ---
 id: 8b7e
 title: Add bea delete command
-status: open
+status: in_progress
 priority: P1
 created: 2026-03-15T20:47:44.199213646Z
-updated: 2026-03-15T20:47:44.199213646Z
+updated: 2026-03-15T22:32:43.372473165Z
 tags:
 - cli
 ---

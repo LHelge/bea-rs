@@ -1,10 +1,10 @@
 ---
 id: '9554'
 title: Publish bea to crates.io on release
-status: open
+status: done
 priority: P2
 created: 2026-03-15T22:01:08.235521128Z
-updated: 2026-03-15T22:01:08.235521128Z
+updated: 2026-03-15T22:31:27.190989032Z
 tags:
 - ci
 - infra

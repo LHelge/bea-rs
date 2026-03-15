@@ -1,10 +1,10 @@
 ---
 id: b64f
 title: Publish to crates.io
-status: open
+status: done
 priority: P1
 created: 2026-03-15T20:47:09.761816456Z
-updated: 2026-03-15T20:48:39.822001879Z
+updated: 2026-03-15T22:31:27.544789685Z
 tags:
 - release
 depends_on:

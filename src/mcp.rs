@@ -344,6 +344,16 @@ impl BeaMcp {
         ok_json(serde_json::json!(summaries))
     }
 
+    #[tool(description = "Permanently delete a task by ID")]
+    async fn delete_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let t = try_tool!(store::load_one(&self.base, &params.id));
+        try_tool!(store::delete(&self.base, &params.id));
+        ok_json(task_summary(&t))
+    }
+
     #[tool(description = "Get the full dependency graph as an adjacency list")]
     async fn get_graph(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let tasks = try_tool!(store::load_all(&self.base).await);
@@ -613,6 +623,33 @@ mod tests {
         let arr = arr.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["title"], "Implement OAuth");
+    }
+
+    #[tokio::test]
+    async fn test_tool_delete_task() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "To be deleted".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        let deleted = mcp
+            .delete_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&deleted)["id"], id);
+
+        // Should no longer be findable
+        let not_found = mcp.get_task(Parameters(TaskIdParams { id })).await.unwrap();
+        assert_eq!(not_found.is_error, Some(true));
     }
 
     #[tokio::test]

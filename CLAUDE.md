@@ -108,6 +108,7 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 | `complete_task` | `id` |
 | `add_dependency` | `id`, `depends_on` |
 | `remove_dependency` | `id`, `depends_on` |
+| `delete_task` | `id` |
 | `search_tasks` | `query` |
 | `get_graph` | — |
 
