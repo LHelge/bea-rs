@@ -1,12 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use owo_colors::OwoColorize;
+use owo_colors::Stream::Stdout;
+use owo_colors::Style;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::graph::{DepNodeJson, Graph};
+use crate::graph::{DepNode, DepNodeJson, Graph};
 use crate::store;
 use crate::task::{self, Priority, Status, Task};
 
@@ -65,6 +68,10 @@ pub enum Command {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+
+        /// Include done and cancelled tasks
+        #[arg(long, short = 'a')]
+        all: bool,
     },
 
     /// Show tasks that are ready to work on
@@ -141,7 +148,11 @@ pub enum Command {
     },
 
     /// Show dependency graph
-    Graph,
+    Graph {
+        /// Include done and cancelled tasks
+        #[arg(long, short = 'a')]
+        all: bool,
+    },
 
     /// Delete a task permanently
     Delete {
@@ -153,6 +164,10 @@ pub enum Command {
     Search {
         /// Search query
         query: String,
+
+        /// Include done and cancelled tasks
+        #[arg(long, short = 'a')]
+        all: bool,
     },
 
     /// Start MCP server on stdio
@@ -202,7 +217,8 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             status,
             priority,
             tag,
-        } => cmd_list(base, status, priority, tag, cli.json).await,
+            all,
+        } => cmd_list(base, status, priority, tag, all, cli.json).await,
         Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json).await,
         Command::Show { id } => cmd_show(base, &id, cli.json),
         Command::Update {
@@ -228,11 +244,42 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             }
             DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json).await,
         },
-        Command::Graph => cmd_graph(base, cli.json).await,
+        Command::Graph { all } => cmd_graph(base, all, cli.json).await,
         Command::Delete { id } => cmd_delete(base, &id, cli.json),
-        Command::Search { query } => cmd_search(base, &query, cli.json).await,
+        Command::Search { query, all } => cmd_search(base, &query, all, cli.json).await,
         Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
+}
+
+fn color_priority(p: &Priority) -> String {
+    match p {
+        Priority::P0 => {
+            let style = Style::new().bold().red();
+            p.if_supports_color(Stdout, |t| t.style(style)).to_string()
+        }
+        Priority::P1 => p.if_supports_color(Stdout, |t| t.red()).to_string(),
+        Priority::P2 => p.if_supports_color(Stdout, |t| t.yellow()).to_string(),
+        Priority::P3 => p.to_string(),
+    }
+}
+
+fn color_status(s: &Status) -> String {
+    match s {
+        Status::Open => s.to_string(),
+        Status::InProgress => s.if_supports_color(Stdout, |t| t.cyan()).to_string(),
+        Status::Done => s.if_supports_color(Stdout, |t| t.green()).to_string(),
+        Status::Blocked => s.if_supports_color(Stdout, |t| t.red()).to_string(),
+        Status::Cancelled => s.if_supports_color(Stdout, |t| t.dimmed()).to_string(),
+    }
+}
+
+fn color_id(id: &str) -> String {
+    id.if_supports_color(Stdout, |t| t.dimmed()).to_string()
+}
+
+fn color_tags(tags: &[String]) -> String {
+    let joined = tags.join(", ");
+    joined.if_supports_color(Stdout, |t| t.dimmed()).to_string()
 }
 
 fn output<T: Serialize>(value: &T, json: bool) -> Result<()> {
@@ -293,11 +340,19 @@ async fn cmd_list(
     status: Option<Status>,
     priority: Option<Priority>,
     tag: Option<String>,
+    all: bool,
     json: bool,
 ) -> Result<()> {
     let tasks = store::load_all(base).await?;
     let mut filtered: Vec<&Task> = tasks
         .values()
+        .filter(|t| {
+            if status.is_some() || all {
+                true
+            } else {
+                !matches!(t.status, Status::Done | Status::Cancelled)
+            }
+        })
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
         .filter(|t| {
@@ -317,11 +372,11 @@ async fn cmd_list(
             for t in &filtered {
                 println!(
                     "[{}] {} {} — {} [{}]",
-                    t.id,
-                    t.priority,
-                    t.status,
+                    color_id(&t.id),
+                    color_priority(&t.priority),
+                    color_status(&t.status),
                     t.title,
-                    t.tags.join(", ")
+                    color_tags(&t.tags)
                 );
             }
         }
@@ -349,10 +404,10 @@ async fn cmd_ready(
             for t in &ready {
                 println!(
                     "[{}] {} — {} [{}]",
-                    t.id,
-                    t.priority,
+                    color_id(&t.id),
+                    color_priority(&t.priority),
                     t.title,
-                    t.tags.join(", ")
+                    color_tags(&t.tags)
                 );
             }
         }
@@ -373,28 +428,65 @@ fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
         s["updated"] = serde_json::json!(t.updated);
         output(&s, true)?;
     } else {
-        println!("[{}] {}", t.id, t.title);
-        println!("Status:   {}", t.status);
-        println!("Priority: {}", t.priority);
         println!(
-            "Tags:     {}",
+            "[{}] {}",
+            color_id(&t.id),
+            t.title.if_supports_color(Stdout, |t| t.bold())
+        );
+        println!(
+            "{} {}",
+            "Status:  ".if_supports_color(Stdout, |t| t.bold()),
+            color_status(&t.status)
+        );
+        println!(
+            "{} {}",
+            "Priority:".if_supports_color(Stdout, |t| t.bold()),
+            color_priority(&t.priority)
+        );
+        println!(
+            "{} {}",
+            "Tags:    ".if_supports_color(Stdout, |t| t.bold()),
             if t.tags.is_empty() {
-                "—".into()
+                "—".to_string()
             } else {
-                t.tags.join(", ")
+                color_tags(&t.tags)
             }
         );
         if !t.depends_on.is_empty() {
-            println!("Deps:     {}", t.depends_on.join(", "));
+            println!(
+                "{} {}",
+                "Deps:    ".if_supports_color(Stdout, |t| t.bold()),
+                t.depends_on
+                    .iter()
+                    .map(|d| color_id(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         if let Some(ref parent) = t.parent {
-            println!("Parent:   {parent}");
+            println!(
+                "{} {}",
+                "Parent:  ".if_supports_color(Stdout, |t| t.bold()),
+                color_id(parent)
+            );
         }
         if !t.assignee.is_empty() {
-            println!("Assignee: {}", t.assignee);
+            println!(
+                "{} {}",
+                "Assignee:".if_supports_color(Stdout, |t| t.bold()),
+                t.assignee
+            );
         }
-        println!("Created:  {}", t.created);
-        println!("Updated:  {}", t.updated);
+        println!(
+            "{} {}",
+            "Created: ".if_supports_color(Stdout, |t| t.bold()),
+            t.created
+        );
+        println!(
+            "{} {}",
+            "Updated: ".if_supports_color(Stdout, |t| t.bold()),
+            t.updated
+        );
         if !t.body.is_empty() {
             println!("\n{}", t.body);
         }
@@ -455,7 +547,12 @@ fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
     if json {
         output(&task_summary(&t), true)?;
     } else {
-        println!("[{}] {} → {}", t.id, t.title, t.status);
+        println!(
+            "[{}] {} → {}",
+            color_id(&t.id),
+            t.title,
+            color_status(&t.status)
+        );
     }
     Ok(())
 }
@@ -514,12 +611,22 @@ async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
         let json_tree = DepNodeJson::from_dep_node(&tree);
         output(&json_tree, true)?;
     } else {
-        print_tree(&tree, "", true);
+        println!(
+            "Dependency tree for {}:\n",
+            tree.task.title.if_supports_color(Stdout, |t| t.bold())
+        );
+        print_tree(&tree, "", true, &tasks, true);
     }
     Ok(())
 }
 
-fn print_tree(node: &crate::graph::DepNode<'_>, prefix: &str, is_last: bool) {
+fn print_tree(
+    node: &DepNode<'_>,
+    prefix: &str,
+    is_last: bool,
+    tasks: &HashMap<String, Task>,
+    all: bool,
+) {
     let connector = if prefix.is_empty() {
         ""
     } else if is_last {
@@ -527,39 +634,89 @@ fn print_tree(node: &crate::graph::DepNode<'_>, prefix: &str, is_last: bool) {
     } else {
         "├── "
     };
-    println!(
-        "{prefix}{connector}[{}] {} ({})",
-        node.task.id, node.task.title, node.task.status
-    );
-    let child_prefix = if prefix.is_empty() {
+
+    let t = node.task;
+    let blocked = matches!(t.status, Status::Open | Status::InProgress)
+        && t.depends_on.iter().any(|dep_id| {
+            tasks
+                .get(dep_id)
+                .is_some_and(|dep| dep.status != Status::Done)
+        });
+    let blocked_suffix = if blocked {
+        let style = Style::new().bold().red();
+        format!(
+            " {}",
+            "[BLOCKED]".if_supports_color(Stdout, |s| s.style(style))
+        )
+    } else {
         String::new()
-    } else if is_last {
+    };
+
+    println!(
+        "{prefix}{connector}[{}] {} [{}] ({}){blocked_suffix}",
+        color_id(&t.id),
+        t.title,
+        color_priority(&t.priority),
+        color_status(&t.status),
+    );
+
+    let child_prefix = if is_last {
         format!("{prefix}    ")
     } else {
         format!("{prefix}│   ")
     };
-    for (i, child) in node.children.iter().enumerate() {
-        print_tree(child, &child_prefix, i == node.children.len() - 1);
+    let visible_children: Vec<_> = node
+        .children
+        .iter()
+        .filter(|c| all || !matches!(c.task.status, Status::Done | Status::Cancelled))
+        .collect();
+    for (i, child) in visible_children.iter().enumerate() {
+        print_tree(
+            child,
+            &child_prefix,
+            i == visible_children.len() - 1,
+            tasks,
+            all,
+        );
     }
 }
 
-async fn cmd_graph(base: &Path, json: bool) -> Result<()> {
+async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
     let tasks = store::load_all(base).await?;
     let graph = Graph::build(&tasks);
 
     if json {
         let adj = graph.adjacency_list();
         output(&adj, true)?;
-    } else {
-        for (id, deps) in &graph.edges {
-            if let Some(t) = tasks.get(id) {
-                if deps.is_empty() {
-                    println!("[{}] {}", t.id, t.title);
-                } else {
-                    let dep_strs: Vec<String> = deps.iter().map(|d| format!("[{d}]")).collect();
-                    println!("[{}] {} → {}", t.id, t.title, dep_strs.join(", "));
-                }
-            }
+        return Ok(());
+    }
+
+    if tasks.is_empty() {
+        println!("No tasks.");
+        return Ok(());
+    }
+
+    // Roots: tasks that no other task depends on
+    let all_deps: HashSet<&str> = tasks
+        .values()
+        .flat_map(|t| t.depends_on.iter().map(String::as_str))
+        .collect();
+    let mut roots: Vec<&Task> = tasks
+        .values()
+        .filter(|t| !all_deps.contains(t.id.as_str()))
+        .filter(|t| all || !matches!(t.status, Status::Done | Status::Cancelled))
+        .collect();
+    roots.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+    if roots.is_empty() {
+        println!("No active tasks.");
+        return Ok(());
+    }
+
+    println!("Dependency graph\n");
+    for root in &roots {
+        if let Some(tree) = graph.dep_tree(&tasks, &root.id) {
+            print_tree(&tree, "", true, &tasks, all);
         }
     }
     Ok(())
@@ -577,11 +734,12 @@ fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_search(base: &Path, query: &str, json: bool) -> Result<()> {
+async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<()> {
     let tasks = store::load_all(base).await?;
     let query_lower = query.to_lowercase();
     let mut results: Vec<&Task> = tasks
         .values()
+        .filter(|t| all || !matches!(t.status, Status::Done | Status::Cancelled))
         .filter(|t| {
             t.title.to_lowercase().contains(&query_lower)
                 || t.body.to_lowercase().contains(&query_lower)
@@ -603,11 +761,11 @@ async fn cmd_search(base: &Path, query: &str, json: bool) -> Result<()> {
             for t in &results {
                 println!(
                     "[{}] {} {} — {} [{}]",
-                    t.id,
-                    t.priority,
-                    t.status,
+                    color_id(&t.id),
+                    color_priority(&t.priority),
+                    color_status(&t.status),
                     t.title,
-                    t.tags.join(", ")
+                    color_tags(&t.tags)
                 );
             }
         }

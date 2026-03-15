@@ -70,11 +70,14 @@ bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [
 ```
 
 ### `bea list`
+Hides `done` and `cancelled` tasks by default. Use `--all` / `-a` to show everything.
+
 ```sh
 bea list
 bea list --status open
 bea list --priority P0
 bea list --tag backend
+bea list --all
 ```
 
 ### `bea ready`
@@ -114,14 +117,28 @@ bea dep tree <id>                   # show dependency tree
 
 Adding a dependency that would create a cycle is rejected with an error.
 
+### `bea delete`
+Permanently delete a task file.
+
+```sh
+bea delete <id>
+```
+
 ### `bea graph`
-Show the full dependency graph for all tasks.
+Show the dependency graph as a tree. Hides `done` and `cancelled` tasks by default; use `--all` / `-a` to include them.
+
+```sh
+bea graph
+bea graph --all
+```
 
 ### `bea search`
+Matches against title, body, tags, and ID. Hides `done` and `cancelled` tasks by default.
+
 ```sh
 bea search "oauth"
+bea search "oauth" --all
 ```
-Matches against title, body, tags, and ID.
 
 ---
 
@@ -158,6 +175,7 @@ bea mcp   # starts MCP server over stdio
 | `complete_task` | Set status to `done` (`id`) |
 | `add_dependency` | Add a dependency, cycle-safe (`id`, `depends_on`) |
 | `remove_dependency` | Remove a dependency (`id`, `depends_on`) |
+| `delete_task` | Permanently delete a task (`id`) |
 | `search_tasks` | Full-text search (`query`) |
 | `get_graph` | Adjacency list of all dependencies |
 

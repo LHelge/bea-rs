@@ -1,10 +1,10 @@
 ---
 id: 35cd
 title: Add color output to CLI
-status: open
+status: done
 priority: P2
 created: 2026-03-15T20:47:44.322485921Z
-updated: 2026-03-15T20:47:44.322485921Z
+updated: 2026-03-15T22:57:54.249241559Z
 tags:
 - cli
 - ux
