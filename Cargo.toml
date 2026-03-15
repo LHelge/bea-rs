@@ -2,6 +2,11 @@
 name = "bea-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A file-based task tracker CLI and MCP server for AI agent workflows"
+license = "MIT"
+repository = "https://github.com/LHelge/bea-rs"
+keywords = ["task", "cli", "mcp", "agent"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "bea"
