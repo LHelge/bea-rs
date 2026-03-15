@@ -2,6 +2,8 @@
 
 A file-based task tracker for developers and AI agents.
 
+Heavily inspired by Steve Yegge's [Beads](https://github.com/steveyegge/beads) that didn't really fit my workflow. 
+
 Tasks live as Markdown files with YAML frontmatter in a `.tasks/` directory — plain text, git-friendly, no database. Run `bea` from the terminal or expose the same functionality as an MCP server for AI coding agents.
 
 ---
