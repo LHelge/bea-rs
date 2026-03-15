@@ -149,6 +149,28 @@ Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$V
 bea edit <id>
 ```
 
+### `bea completions`
+Generate shell completions for bash, zsh, or fish.
+
+```sh
+bea completions bash
+bea completions zsh
+bea completions fish
+```
+
+Add to your shell config to enable completions:
+
+```sh
+# zsh — add to .zshrc
+eval "$(bea completions zsh)"
+
+# bash — add to .bashrc
+eval "$(bea completions bash)"
+
+# fish — add to ~/.config/fish/config.fish
+bea completions fish | source
+```
+
 ---
 
 ## JSON output

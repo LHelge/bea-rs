@@ -310,3 +310,33 @@ fn test_edit_bad_frontmatter() {
         .success()
         .stderr(predicate::str::contains("Invalid frontmatter"));
 }
+
+#[test]
+fn test_completions_zsh() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compdef"));
+}
+
+#[test]
+fn test_completions_bash() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete"));
+}
+
+#[test]
+fn test_completions_fish() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete"));
+}

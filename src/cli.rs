@@ -3,7 +3,8 @@ use std::path::Path;
 use std::process::Command as ProcessCommand;
 
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use owo_colors::OwoColorize;
 use owo_colors::Stream::Stdout;
 use owo_colors::Style;
@@ -177,6 +178,12 @@ pub enum Command {
         id: String,
     },
 
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+
     /// Start MCP server on stdio
     Mcp,
 }
@@ -255,6 +262,10 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Delete { id } => cmd_delete(base, &id, cli.json),
         Command::Search { query, all } => cmd_search(base, &query, all, cli.json).await,
         Command::Edit { id } => cmd_edit(base, &id, cli.json),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Args::command(), "bea", &mut std::io::stdout());
+            Ok(())
+        }
         Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
 }
