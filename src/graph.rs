@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use crate::task::{Priority, Status, Task};
+use crate::task::{self, Priority, Status, Task};
 
 /// Dependency graph built from task `depends_on` fields.
 pub struct Graph {
@@ -54,10 +54,7 @@ impl Graph {
                     None => false, // missing dep blocks readiness
                 })
             })
-            .filter(|t| match tag {
-                Some(tag) => t.tags.iter().any(|tt| tt == tag),
-                None => true,
-            })
+            .filter(|t| task::matches_tag(t, tag))
             .collect();
 
         // Sort by effective priority (P0 first), then by creation date (oldest first)

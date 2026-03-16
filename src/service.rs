@@ -58,14 +58,14 @@ pub async fn list_tasks(
             if status.is_some() || include_all {
                 true
             } else {
-                !matches!(t.status, Status::Done | Status::Cancelled)
+                task::is_active(t)
             }
         })
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
-        .filter(|t| tag.is_none_or(|tag| t.tags.iter().any(|tt| tt == tag)))
+        .filter(|t| task::matches_tag(t, tag))
         .collect();
-    filtered.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    task::sort_by_priority_owned(&mut filtered);
     Ok(filtered)
 }
 
@@ -167,7 +167,7 @@ pub async fn search_tasks(base: &Path, query: &str, include_all: bool) -> Result
     let query_lower = query.to_lowercase();
     let mut results: Vec<Task> = tasks
         .into_values()
-        .filter(|t| include_all || !matches!(t.status, Status::Done | Status::Cancelled))
+        .filter(|t| include_all || task::is_active(t))
         .filter(|t| {
             t.title.to_lowercase().contains(&query_lower)
                 || t.body.to_lowercase().contains(&query_lower)
@@ -177,7 +177,7 @@ pub async fn search_tasks(base: &Path, query: &str, include_all: bool) -> Result
                 || t.id.contains(&query_lower)
         })
         .collect();
-    results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    task::sort_by_priority_owned(&mut results);
     Ok(results)
 }
 

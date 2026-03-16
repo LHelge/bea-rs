@@ -1,10 +1,10 @@
 ---
 id: 5b56
 title: Consolidate common task filtering and sorting helpers
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:37:28.266845Z
-updated: 2026-03-16T10:38:00.090253Z
+updated: 2026-03-16T19:37:53.405107Z
 tags:
 - code-review
 - refactor

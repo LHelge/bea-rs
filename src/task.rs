@@ -188,6 +188,23 @@ pub struct TaskDetail {
     pub updated: DateTime<Utc>,
 }
 
+// ── Shared filtering & sorting helpers ──────────────────────────────
+
+/// Whether a task is in an "active" status (not done or cancelled).
+pub fn is_active(task: &Task) -> bool {
+    !matches!(task.status, Status::Done | Status::Cancelled)
+}
+
+/// Whether a task matches the given tag (if any).
+pub fn matches_tag(task: &Task, tag: Option<&str>) -> bool {
+    tag.is_none_or(|t| task.tags.iter().any(|tt| tt == t))
+}
+
+/// Canonical sort: priority ascending (P0 first), then creation date ascending.
+pub fn sort_by_priority_owned(tasks: &mut [Task]) {
+    tasks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+}
+
 /// Generate a short hex ID from UUID v4, retrying on collision.
 pub fn generate_id(existing: &HashSet<String>, length: usize) -> String {
     loop {
@@ -449,5 +466,57 @@ updated: 2026-03-15T10:30:00Z
         assert_eq!(json["assignee"], "alice");
         assert!(json.get("created").is_some());
         assert!(json.get("updated").is_some());
+    }
+
+    #[test]
+    fn test_is_active() {
+        let mut t = Task::new("a1".into(), "T".into(), Priority::P2);
+        assert!(is_active(&t));
+
+        t.status = Status::InProgress;
+        assert!(is_active(&t));
+
+        t.status = Status::Done;
+        assert!(!is_active(&t));
+
+        t.status = Status::Cancelled;
+        assert!(!is_active(&t));
+
+        t.status = Status::Blocked;
+        assert!(is_active(&t));
+    }
+
+    #[test]
+    fn test_matches_tag() {
+        let mut t = Task::new("b2".into(), "T".into(), Priority::P2);
+        t.tags = vec!["backend".into(), "api".into()];
+
+        assert!(matches_tag(&t, None));
+        assert!(matches_tag(&t, Some("backend")));
+        assert!(matches_tag(&t, Some("api")));
+        assert!(!matches_tag(&t, Some("frontend")));
+    }
+
+    #[test]
+    fn test_sort_by_priority_owned() {
+        let mut t1 = Task::new("a1".into(), "Low".into(), Priority::P3);
+        t1.created = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut t2 = Task::new("b2".into(), "High".into(), Priority::P0);
+        t2.created = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut t3 = Task::new("c3".into(), "Also low, older".into(), Priority::P3);
+        t3.created = chrono::DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut tasks = vec![t1, t3, t2];
+        sort_by_priority_owned(&mut tasks);
+
+        assert_eq!(tasks[0].id, "b2"); // P0
+        assert_eq!(tasks[1].id, "c3"); // P3, older
+        assert_eq!(tasks[2].id, "a1"); // P3, newer
     }
 }
