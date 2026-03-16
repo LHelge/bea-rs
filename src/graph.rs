@@ -93,14 +93,42 @@ impl Graph {
     }
 
     /// Build a dependency tree for display.
+    /// Cycle-safe: nodes already on the current path are emitted as leaf markers.
     pub fn dep_tree<'a>(&self, tasks: &'a HashMap<String, Task>, id: &str) -> Option<DepNode<'a>> {
+        let mut visited = HashSet::new();
+        self.dep_tree_inner(tasks, id, &mut visited)
+    }
+
+    fn dep_tree_inner<'a>(
+        &self,
+        tasks: &'a HashMap<String, Task>,
+        id: &str,
+        visiting: &mut HashSet<String>,
+    ) -> Option<DepNode<'a>> {
         let task = tasks.get(id)?;
+
+        if !visiting.insert(id.to_string()) {
+            // Already on the current recursion path — cycle detected
+            return Some(DepNode {
+                task,
+                children: Vec::new(),
+                cycle: true,
+            });
+        }
+
         let children = task
             .depends_on
             .iter()
-            .filter_map(|dep_id| self.dep_tree(tasks, dep_id))
+            .filter_map(|dep_id| self.dep_tree_inner(tasks, dep_id, visiting))
             .collect();
-        Some(DepNode { task, children })
+
+        visiting.remove(id);
+
+        Some(DepNode {
+            task,
+            children,
+            cycle: false,
+        })
     }
 
     /// Get adjacency list for JSON output.
@@ -118,6 +146,8 @@ impl Graph {
 pub struct DepNode<'a> {
     pub task: &'a Task,
     pub children: Vec<DepNode<'a>>,
+    /// True when this node was already seen on the current path (cycle).
+    pub cycle: bool,
 }
 
 #[derive(Serialize)]
@@ -127,6 +157,8 @@ pub struct DepNodeJson {
     pub status: String,
     pub priority: Priority,
     pub children: Vec<DepNodeJson>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cycle: bool,
 }
 
 impl DepNodeJson {
@@ -141,6 +173,7 @@ impl DepNodeJson {
                 .iter()
                 .map(DepNodeJson::from_dep_node)
                 .collect(),
+            cycle: node.cycle,
         }
     }
 }
@@ -304,5 +337,84 @@ mod tests {
         let adj = graph.adjacency_list();
         assert_eq!(adj.get("a").unwrap().len(), 1);
         assert!(adj.get("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dep_tree_direct_cycle() {
+        // a -> b -> a  (direct cycle)
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec!["a"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "a").unwrap();
+        assert!(!tree.cycle);
+        assert_eq!(tree.children.len(), 1);
+        // b's child "a" should be a cycle marker
+        let b_node = &tree.children[0];
+        assert_eq!(b_node.task.id, "b");
+        assert!(!b_node.cycle);
+        assert_eq!(b_node.children.len(), 1);
+        let cycle_node = &b_node.children[0];
+        assert_eq!(cycle_node.task.id, "a");
+        assert!(cycle_node.cycle);
+        assert!(cycle_node.children.is_empty());
+    }
+
+    #[test]
+    fn test_dep_tree_transitive_cycle() {
+        // a -> b -> c -> a  (transitive cycle)
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec!["c"]),
+            make_task("c", Status::Open, Priority::P1, vec!["a"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "a").unwrap();
+        assert!(!tree.cycle);
+        let b = &tree.children[0];
+        let c = &b.children[0];
+        assert_eq!(c.task.id, "c");
+        assert!(!c.cycle);
+        let back_to_a = &c.children[0];
+        assert_eq!(back_to_a.task.id, "a");
+        assert!(back_to_a.cycle);
+        assert!(back_to_a.children.is_empty());
+    }
+
+    #[test]
+    fn test_dep_tree_self_cycle() {
+        // a -> a  (self-referencing)
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec!["a"])]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "a").unwrap();
+        assert!(!tree.cycle);
+        assert_eq!(tree.children.len(), 1);
+        let self_ref = &tree.children[0];
+        assert_eq!(self_ref.task.id, "a");
+        assert!(self_ref.cycle);
+        assert!(self_ref.children.is_empty());
+    }
+
+    #[test]
+    fn test_dep_tree_no_cycle() {
+        // Diamond: a -> b, a -> c, b -> d, c -> d (no cycle — d appears twice but not cyclic)
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b", "c"]),
+            make_task("b", Status::Open, Priority::P1, vec!["d"]),
+            make_task("c", Status::Open, Priority::P1, vec!["d"]),
+            make_task("d", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "a").unwrap();
+        assert!(!tree.cycle);
+        // d should appear under both b and c, and neither should be marked as cycle
+        for child in &tree.children {
+            assert!(!child.cycle);
+            for grandchild in &child.children {
+                assert_eq!(grandchild.task.id, "d");
+                assert!(!grandchild.cycle);
+            }
+        }
     }
 }

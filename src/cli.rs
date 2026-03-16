@@ -688,6 +688,15 @@ fn print_tree(
                 .get(dep_id)
                 .is_some_and(|dep| dep.status != Status::Done)
         });
+    let cycle_suffix = if node.cycle {
+        let style = Style::new().bold().yellow();
+        format!(
+            " {}",
+            "[CYCLE]".if_supports_color(Stdout, |s| s.style(style))
+        )
+    } else {
+        String::new()
+    };
     let blocked_suffix = if blocked {
         let style = Style::new().bold().red();
         format!(
@@ -699,7 +708,7 @@ fn print_tree(
     };
 
     println!(
-        "{prefix}{connector}[{}] {} [{}] ({}){blocked_suffix}",
+        "{prefix}{connector}[{}] {} [{}] ({}){blocked_suffix}{cycle_suffix}",
         color_id(&t.id),
         t.title,
         color_priority(&t.priority),
