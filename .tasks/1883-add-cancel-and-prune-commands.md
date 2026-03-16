@@ -1,10 +1,10 @@
 ---
 id: '1883'
 title: Add cancel and prune commands
-status: open
+status: done
 priority: P1
 created: 2026-03-16T09:52:32.418620Z
-updated: 2026-03-16T09:52:32.418620Z
+updated: 2026-03-16T10:10:59.680110Z
 tags:
 - feature
 - cli

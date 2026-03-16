@@ -172,6 +172,19 @@ pub enum Command {
         all: bool,
     },
 
+    /// Cancel a task (set status to cancelled)
+    Cancel {
+        /// Task ID
+        id: String,
+    },
+
+    /// Delete completed/cancelled tasks
+    Prune {
+        /// Also delete done tasks
+        #[arg(long)]
+        done: bool,
+    },
+
     /// Open a task in $EDITOR for editing
     Edit {
         /// Task ID
@@ -262,6 +275,8 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json).await,
         },
         Command::Graph { all } => cmd_graph(base, all, cli.json).await,
+        Command::Cancel { id } => cmd_status(base, &id, Status::Cancelled, cli.json),
+        Command::Prune { done } => cmd_prune(base, done, cli.json).await,
         Command::Delete { id } => cmd_delete(base, &id, cli.json),
         Command::Search { query, all } => cmd_search(base, &query, all, cli.json).await,
         Command::Edit { id } => cmd_edit(base, &id, cli.json),
@@ -748,6 +763,36 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
     for root in &roots {
         if let Some(tree) = graph.dep_tree(&tasks, &root.id) {
             print_tree(&tree, "", true, &tasks, all);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
+    let tasks = store::load_all(base).await?;
+    let to_delete: Vec<&Task> = tasks
+        .values()
+        .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
+        .collect();
+
+    let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
+    for t in &to_delete {
+        store::delete(base, &t.id)?;
+    }
+
+    if json {
+        output(&summaries, true)?;
+    } else {
+        if to_delete.is_empty() {
+            println!("No tasks to prune.");
+        } else {
+            for s in &summaries {
+                println!(
+                    "Pruned {} — {}",
+                    s["id"].as_str().unwrap_or_default(),
+                    s["title"].as_str().unwrap_or_default()
+                );
+            }
         }
     }
     Ok(())

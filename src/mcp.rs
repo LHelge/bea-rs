@@ -102,6 +102,12 @@ pub struct SearchParams {
     query: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PruneParams {
+    /// Also delete done tasks (default: only cancelled)
+    include_done: Option<bool>,
+}
+
 fn task_summary(t: &Task) -> serde_json::Value {
     serde_json::json!({
         "id": t.id,
@@ -341,6 +347,39 @@ impl BeaMcp {
         results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
         let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
+        ok_json(serde_json::json!(summaries))
+    }
+
+    #[tool(description = "Cancel a task (set status to cancelled)")]
+    async fn cancel_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut t = try_tool!(store::load_one(&self.base, &params.id));
+        t.status = Status::Cancelled;
+        t.updated = Utc::now();
+        try_tool!(store::save(&self.base, &t));
+        ok_json(task_summary(&t))
+    }
+
+    #[tool(
+        description = "Delete cancelled tasks. Set include_done=true to also delete done tasks."
+    )]
+    async fn prune_tasks(
+        &self,
+        Parameters(params): Parameters<PruneParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tasks = try_tool!(store::load_all(&self.base).await);
+        let include_done = params.include_done.unwrap_or(false);
+        let to_delete: Vec<&Task> = tasks
+            .values()
+            .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
+            .collect();
+
+        let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
+        for t in &to_delete {
+            try_tool!(store::delete(&self.base, &t.id));
+        }
         ok_json(serde_json::json!(summaries))
     }
 
