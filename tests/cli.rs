@@ -372,3 +372,142 @@ fn test_completions_fish() {
         .success()
         .stdout(predicate::str::contains("complete"));
 }
+
+// --- Prefix ID resolution tests ---
+
+/// Helper: create a task and return its full ID.
+fn create_task(dir: &TempDir, title: &str) -> String {
+    let out = bea(dir).args(["--json", "create", title]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn test_prefix_show_resolves() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Prefix show test");
+
+    // Use first 2 chars as prefix
+    let prefix = &id[..2];
+    bea(&tmp)
+        .args(["--json", "show", prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Prefix show test"));
+}
+
+#[test]
+fn test_prefix_start_and_done() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Prefix status test");
+    let prefix = &id[..2];
+
+    bea(&tmp)
+        .args(["start", prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("in_progress"));
+
+    bea(&tmp)
+        .args(["done", prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("done"));
+}
+
+#[test]
+fn test_prefix_dep_add() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_a = create_task(&tmp, "Dep target");
+    let id_b = create_task(&tmp, "Dep source");
+
+    let prefix_a = &id_a[..2];
+    let prefix_b = &id_b[..2];
+
+    // If prefixes happen to collide, use full IDs as fallback
+    let (use_a, use_b) = if prefix_a == prefix_b {
+        (id_a.as_str(), id_b.as_str())
+    } else {
+        (prefix_a, prefix_b)
+    };
+
+    bea(&tmp)
+        .args(["dep", "add", use_b, use_a])
+        .assert()
+        .success();
+
+    // Verify the dependency was added
+    let out = bea(&tmp).args(["--json", "show", &id_b]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let deps = v["depends_on"].as_array().unwrap();
+    assert!(deps.iter().any(|d| d.as_str().unwrap() == id_a));
+}
+
+#[test]
+fn test_prefix_ambiguous_error() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    // Create many tasks to increase chance of a shared prefix
+    let mut ids = Vec::new();
+    for i in 0..30 {
+        ids.push(create_task(&tmp, &format!("Ambiguous task {i}")));
+    }
+
+    // Find two IDs that share a first character
+    let mut found_prefix = None;
+    'outer: for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            if ids[i].as_bytes()[0] == ids[j].as_bytes()[0] {
+                found_prefix = Some(String::from(&ids[i][..1]));
+                break 'outer;
+            }
+        }
+    }
+
+    if let Some(prefix) = found_prefix {
+        bea(&tmp)
+            .args(["show", &prefix])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("ambiguous"));
+    }
+    // If no collision found (extremely unlikely with 30 tasks), skip gracefully
+}
+
+#[test]
+fn test_prefix_exact_match_preferred() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Exact match task");
+
+    // Using the full ID should always work even if it's a prefix of nothing else
+    bea(&tmp)
+        .args(["--json", "show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Exact match task"));
+}
+
+#[test]
+fn test_prefix_not_found() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    create_task(&tmp, "Some task");
+
+    bea(&tmp)
+        .args(["show", "zzz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}

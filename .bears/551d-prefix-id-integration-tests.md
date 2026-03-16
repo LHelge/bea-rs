@@ -1,10 +1,10 @@
 ---
 id: 551d
 title: 'Prefix ID: integration tests'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T09:53:37.117918Z
-updated: 2026-03-16T10:49:57.037178Z
+updated: 2026-03-16T21:03:07.906075018Z
 tags:
 - feature
 - ux
