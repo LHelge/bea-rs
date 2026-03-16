@@ -163,6 +163,18 @@ fn test_dep_cycle_rejected() {
 }
 
 #[test]
+fn test_create_with_unknown_dependency() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    bea(&tmp)
+        .args(["create", "Task with bad dep", "--depends-on", "zzzz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown dependency"));
+}
+
+#[test]
 fn test_search() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp).arg("init").assert().success();

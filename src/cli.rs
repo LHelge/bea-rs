@@ -363,6 +363,16 @@ async fn cmd_create(
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
     let id = task::generate_id(&existing_ids);
 
+    // Validate depends_on IDs exist
+    let unknown: Vec<String> = depends_on
+        .iter()
+        .filter(|dep| !tasks.contains_key(dep.as_str()))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(Error::UnknownDependency { ids: unknown });
+    }
+
     let mut t = Task::new(id, title, priority);
     t.tags = tags;
     t.depends_on = depends_on;

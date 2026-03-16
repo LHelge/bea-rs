@@ -13,6 +13,9 @@ pub enum Error {
     #[error("adding dependency would create a cycle: {from} -> {to}")]
     CycleDetected { from: String, to: String },
 
+    #[error("unknown dependency ID(s): {}", ids.join(", "))]
+    UnknownDependency { ids: Vec<String> },
+
     #[error("invalid frontmatter in {path}: {reason}")]
     InvalidFrontmatter { path: PathBuf, reason: String },
 

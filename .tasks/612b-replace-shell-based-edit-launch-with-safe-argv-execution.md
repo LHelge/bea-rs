@@ -1,10 +1,10 @@
 ---
 id: 612b
 title: Replace shell-based edit launch with safe argv execution
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:37:28.223571Z
-updated: 2026-03-16T10:37:28.223571Z
+updated: 2026-03-16T17:54:44.433145Z
 tags:
 - code-review
 - cli

@@ -216,9 +216,19 @@ impl BeaMcp {
         let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
         let id = task::generate_id(&existing_ids);
 
+        let depends_on = params.depends_on.unwrap_or_default();
+        let unknown: Vec<String> = depends_on
+            .iter()
+            .filter(|dep| !tasks.contains_key(dep.as_str()))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return err_result(Error::UnknownDependency { ids: unknown });
+        }
+
         let mut t = Task::new(id, params.title, priority);
         t.tags = params.tags.unwrap_or_default();
-        t.depends_on = params.depends_on.unwrap_or_default();
+        t.depends_on = depends_on;
         t.parent = params.parent;
         t.body = params.body.unwrap_or_default();
 

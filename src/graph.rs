@@ -43,7 +43,7 @@ impl Graph {
                 // All dependencies must be done
                 t.depends_on.iter().all(|dep_id| match tasks.get(dep_id) {
                     Some(dep) => dep.status == Status::Done,
-                    None => true, // missing dep is treated as satisfied
+                    None => false, // missing dep blocks readiness
                 })
             })
             .filter(|t| match tag {
@@ -237,6 +237,20 @@ mod tests {
             make_task("a", Status::InProgress, Priority::P1, vec![]),
             make_task("b", Status::Open, Priority::P1, vec!["a"]),
         ]);
+        let graph = Graph::build(&tasks);
+        let ready = graph.ready(&tasks, None, None);
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_ready_blocked_by_missing_dep() {
+        // Task "b" depends on "nonexistent" which is not in the task map
+        let tasks = make_tasks(vec![make_task(
+            "b",
+            Status::Open,
+            Priority::P1,
+            vec!["nonexistent"],
+        )]);
         let graph = Graph::build(&tasks);
         let ready = graph.ready(&tasks, None, None);
         assert!(ready.is_empty());

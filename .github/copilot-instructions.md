@@ -13,10 +13,13 @@ It has two modes:
 ## Development Workflow
 
 Work test-driven: add or update tests before (or alongside) implementation.
+After finishing any task, always run and ensure all pass:
 
 Project planning and task tracking use Bears. Prefer managing tasks through MCP tools when available instead of direct CLI usage.
+- Find next task using `list_ready` (MCP) or `bea ready` (CLI).
+- Start a task with `start_task` (MCP) or `bea start <id>` (CLI).
+- When done, mark complete with `complete_task` (MCP) or `bea complete <id>` (CLI).
 
-After finishing any task, always run and ensure all pass:
 
 ```bash
 cargo fmt && cargo clippy && cargo test

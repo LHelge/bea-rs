@@ -1,10 +1,10 @@
 ---
 id: a4a6
 title: Make edit integration tests platform-agnostic
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:37:28.231196Z
-updated: 2026-03-16T10:38:00.098088Z
+updated: 2026-03-16T17:54:45.247294Z
 tags:
 - code-review
 - testing
