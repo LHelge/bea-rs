@@ -1,10 +1,10 @@
 ---
 id: '9649'
 title: Inherited effective priority from dependents
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:18:51.775377Z
-updated: 2026-03-16T10:18:51.775377Z
+updated: 2026-03-16T19:20:12.112425Z
 tags:
 - feature
 ---

@@ -251,7 +251,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             all,
         } => cmd_list(base, status, priority, tag, all, cli.json).await,
         Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json).await,
-        Command::Show { id } => cmd_show(base, &id, cli.json),
+        Command::Show { id } => cmd_show(base, &id, cli.json).await,
         Command::Update {
             id,
             status,
@@ -307,6 +307,16 @@ fn color_priority(p: &Priority) -> String {
         Priority::P1 => p.if_supports_color(Stdout, |t| t.red()).to_string(),
         Priority::P2 => p.if_supports_color(Stdout, |t| t.yellow()).to_string(),
         Priority::P3 => p.to_string(),
+    }
+}
+
+/// Format priority with effective priority if it differs (e.g. "P3 → P1").
+fn format_priority(own: &Priority, effective: Option<&Priority>) -> String {
+    match effective {
+        Some(eff) if eff < own => {
+            format!("{} → {}", color_priority(own), color_priority(eff))
+        }
+        _ => color_priority(own),
     }
 }
 
@@ -388,9 +398,13 @@ async fn cmd_list(
     json: bool,
 ) -> Result<()> {
     let filtered = service::list_tasks(base, status, priority, tag.as_deref(), all).await?;
+    let eff = service::effective_priorities(base).await?;
 
     if json {
-        let summaries: Vec<_> = filtered.iter().map(task_summary).collect();
+        let summaries: Vec<_> = filtered
+            .iter()
+            .map(|t| task_summary_eff(t, eff.get(&t.id)))
+            .collect();
         output(&summaries, true)?;
     } else {
         if filtered.is_empty() {
@@ -400,7 +414,7 @@ async fn cmd_list(
                 println!(
                     "[{}] {} {} — {} [{}]",
                     color_id(&t.id),
-                    color_priority(&t.priority),
+                    format_priority(&t.priority, eff.get(&t.id)),
                     color_status(&t.status),
                     t.title,
                     color_tags(&t.tags)
@@ -418,9 +432,13 @@ async fn cmd_ready(
     json: bool,
 ) -> Result<()> {
     let ready = service::list_ready(base, tag.as_deref(), limit).await?;
+    let eff = service::effective_priorities(base).await?;
 
     if json {
-        let summaries: Vec<_> = ready.iter().map(task_summary).collect();
+        let summaries: Vec<_> = ready
+            .iter()
+            .map(|t| task_summary_eff(t, eff.get(&t.id)))
+            .collect();
         output(&summaries, true)?;
     } else {
         if ready.is_empty() {
@@ -430,7 +448,7 @@ async fn cmd_ready(
                 println!(
                     "[{}] {} — {} [{}]",
                     color_id(&t.id),
-                    color_priority(&t.priority),
+                    format_priority(&t.priority, eff.get(&t.id)),
                     t.title,
                     color_tags(&t.tags)
                 );
@@ -440,11 +458,13 @@ async fn cmd_ready(
     Ok(())
 }
 
-fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
+async fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
     let t = service::get_task(base, id)?;
+    let eff = service::effective_priorities(base).await?;
+    let ep = eff.get(&t.id);
 
     if json {
-        let mut s = task_summary(&t);
+        let mut s = task_summary_eff(&t, ep);
         s["body"] = serde_json::Value::String(t.body.clone());
         s["depends_on"] = serde_json::json!(t.depends_on);
         s["parent"] = serde_json::json!(t.parent);
@@ -466,7 +486,7 @@ fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
         println!(
             "{} {}",
             "Priority:".if_supports_color(Stdout, |t| t.bold()),
-            color_priority(&t.priority)
+            format_priority(&t.priority, ep)
         );
         println!(
             "{} {}",
@@ -589,11 +609,15 @@ async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
         let json_tree = DepNodeJson::from_dep_node(&tree);
         output(&json_tree, true)?;
     } else {
+        let eff: HashMap<String, Priority> = tasks
+            .keys()
+            .map(|id| (id.clone(), graph.effective_priority(id, &tasks)))
+            .collect();
         println!(
             "Dependency tree for {}:\n",
             tree.task.title.if_supports_color(Stdout, |t| t.bold())
         );
-        print_tree(&tree, "", true, &tasks, true);
+        print_tree(&tree, "", true, &tasks, &eff, true);
     }
     Ok(())
 }
@@ -603,6 +627,7 @@ fn print_tree(
     prefix: &str,
     is_last: bool,
     tasks: &HashMap<String, Task>,
+    eff: &HashMap<String, Priority>,
     all: bool,
 ) {
     let connector = if prefix.is_empty() {
@@ -643,7 +668,7 @@ fn print_tree(
         "{prefix}{connector}[{}] {} [{}] ({}){blocked_suffix}{cycle_suffix}",
         color_id(&t.id),
         t.title,
-        color_priority(&t.priority),
+        format_priority(&t.priority, eff.get(&t.id)),
         color_status(&t.status),
     );
 
@@ -663,6 +688,7 @@ fn print_tree(
             &child_prefix,
             i == visible_children.len() - 1,
             tasks,
+            eff,
             all,
         );
     }
@@ -682,6 +708,12 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Compute effective priorities
+    let eff: HashMap<String, Priority> = tasks
+        .keys()
+        .map(|id| (id.clone(), graph.effective_priority(id, &tasks)))
+        .collect();
+
     // Roots: tasks that no other task depends on
     let all_deps: HashSet<&str> = tasks
         .values()
@@ -692,7 +724,11 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
         .filter(|t| !all_deps.contains(t.id.as_str()))
         .filter(|t| all || !matches!(t.status, Status::Done | Status::Cancelled))
         .collect();
-    roots.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    roots.sort_by(|a, b| {
+        eff.get(&a.id)
+            .cmp(&eff.get(&b.id))
+            .then(a.created.cmp(&b.created))
+    });
 
     if roots.is_empty() {
         println!("No active tasks.");
@@ -702,7 +738,7 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
     println!("Dependency graph\n");
     for root in &roots {
         if let Some(tree) = graph.dep_tree(&tasks, &root.id) {
-            print_tree(&tree, "", true, &tasks, all);
+            print_tree(&tree, "", true, &tasks, &eff, all);
         }
     }
     Ok(())
@@ -832,4 +868,14 @@ fn task_summary(t: &Task) -> serde_json::Value {
         "priority": t.priority,
         "tags": t.tags,
     })
+}
+
+fn task_summary_eff(t: &Task, effective: Option<&Priority>) -> serde_json::Value {
+    let mut s = task_summary(t);
+    if let Some(eff) = effective
+        && eff < &t.priority
+    {
+        s["effective_priority"] = serde_json::json!(eff);
+    }
+    s
 }

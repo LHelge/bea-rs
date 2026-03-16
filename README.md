@@ -73,7 +73,7 @@ Any Markdown body goes here.
 
 **Statuses:** `open` · `in_progress` · `done` · `blocked` · `cancelled`
 
-**Priorities:** `P0` (critical) · `P1` · `P2` · `P3` (low) — sorted P0 first everywhere.
+**Priorities:** `P0` (critical) · `P1` · `P2` · `P3` (low) — sorted P0 first everywhere. A task inherits the highest priority of any task that depends on it, so a P3 task blocking a P0 task is effectively treated as P0.
 
 ---
 

@@ -115,6 +115,16 @@ fn task_summary(t: &Task) -> serde_json::Value {
     })
 }
 
+fn task_summary_eff(t: &Task, effective: Option<&Priority>) -> serde_json::Value {
+    let mut s = task_summary(t);
+    if let Some(eff) = effective
+        && eff < &t.priority
+    {
+        s["effective_priority"] = serde_json::json!(eff);
+    }
+    s
+}
+
 fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {
     let text = serde_json::to_string(&value)?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -153,7 +163,11 @@ impl BeaMcp {
             async {
                 let limit = params.limit.map(|v| v as usize);
                 let ready = service::list_ready(&self.base, params.tag.as_deref(), limit).await?;
-                let summaries: Vec<_> = ready.iter().map(task_summary).collect();
+                let eff = service::effective_priorities(&self.base).await?;
+                let summaries: Vec<_> = ready
+                    .iter()
+                    .map(|t| task_summary_eff(t, eff.get(&t.id)))
+                    .collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -177,7 +191,11 @@ impl BeaMcp {
                     true, // MCP always shows all statuses unless filtered
                 )
                 .await?;
-                let summaries: Vec<_> = filtered.iter().map(task_summary).collect();
+                let eff = service::effective_priorities(&self.base).await?;
+                let summaries: Vec<_> = filtered
+                    .iter()
+                    .map(|t| task_summary_eff(t, eff.get(&t.id)))
+                    .collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -192,8 +210,14 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::get_task(&self.base, &params.id)?;
+                let eff = service::effective_priorities(&self.base).await?;
                 let mut json = serde_json::to_value(&t)?;
-                json["body"] = serde_json::Value::String(t.body);
+                json["body"] = serde_json::Value::String(t.body.clone());
+                if let Some(ep) = eff.get(&t.id)
+                    && ep < &t.priority
+                {
+                    json["effective_priority"] = serde_json::json!(ep);
+                }
                 ok_json(json)
             }
             .await,

@@ -208,3 +208,14 @@ pub async fn get_graph(base: &Path) -> Result<(HashMap<String, Task>, Graph)> {
     let graph = Graph::build(&tasks);
     Ok((tasks, graph))
 }
+
+/// Compute effective priorities for all tasks.
+pub async fn effective_priorities(base: &Path) -> Result<HashMap<String, Priority>> {
+    let tasks = store::load_all(base).await?;
+    let graph = Graph::build(&tasks);
+    let mut map = HashMap::new();
+    for id in tasks.keys() {
+        map.insert(id.clone(), graph.effective_priority(id, &tasks));
+    }
+    Ok(map)
+}

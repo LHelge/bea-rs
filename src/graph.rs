@@ -8,25 +8,33 @@ use crate::task::{Priority, Status, Task};
 pub struct Graph {
     /// task_id -> set of task IDs it depends on
     pub edges: HashMap<String, HashSet<String>>,
+    /// task_id -> set of task IDs that depend on it (reverse edges)
+    pub reverse: HashMap<String, HashSet<String>>,
 }
 
 impl Graph {
     /// Build a dependency graph from a set of tasks.
     pub fn build(tasks: &HashMap<String, Task>) -> Self {
         let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut reverse: HashMap<String, HashSet<String>> = HashMap::new();
 
         for task in tasks.values() {
             edges.entry(task.id.clone()).or_default();
+            reverse.entry(task.id.clone()).or_default();
 
             for dep in &task.depends_on {
                 edges
                     .entry(task.id.clone())
                     .or_default()
                     .insert(dep.clone());
+                reverse
+                    .entry(dep.clone())
+                    .or_default()
+                    .insert(task.id.clone());
             }
         }
 
-        Graph { edges }
+        Graph { edges, reverse }
     }
 
     /// Return tasks that are ready: status is Open and all dependencies are Done.
@@ -52,14 +60,46 @@ impl Graph {
             })
             .collect();
 
-        // Sort by priority (P0 first), then by creation date (oldest first)
-        result.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        // Sort by effective priority (P0 first), then by creation date (oldest first)
+        result.sort_by(|a, b| {
+            self.effective_priority(&a.id, tasks)
+                .cmp(&self.effective_priority(&b.id, tasks))
+                .then(a.created.cmp(&b.created))
+        });
 
         if let Some(limit) = limit {
             result.truncate(limit);
         }
 
         result
+    }
+
+    /// Compute the effective priority of a task.
+    /// This is the minimum (highest urgency) of the task's own priority and
+    /// the priorities of all tasks that depend on it, transitively.
+    pub fn effective_priority(&self, id: &str, tasks: &HashMap<String, Task>) -> Priority {
+        let own = tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3);
+
+        let mut best = own;
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(id.to_string());
+
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if let Some(dependents) = self.reverse.get(&current) {
+                for dep in dependents {
+                    if let Some(t) = tasks.get(dep.as_str()) {
+                        best = best.min(t.priority);
+                    }
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+
+        best
     }
 
     /// Check if adding an edge from -> to would create a cycle.
@@ -430,5 +470,69 @@ mod tests {
                 assert!(!grandchild.cycle);
             }
         }
+    }
+
+    #[test]
+    fn test_effective_priority_no_dependents() {
+        // Task with no dependents: effective == own
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P3, vec![])]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P3);
+    }
+
+    #[test]
+    fn test_effective_priority_single_dependent() {
+        // "a" is depended on by "b" (P1). a's own priority is P3.
+        // b depends_on a → a's effective should be P1
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P3, vec![]),
+            make_task("b", Status::Open, Priority::P1, vec!["a"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P1);
+        // b has no dependents, so effective == own
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P1);
+    }
+
+    #[test]
+    fn test_effective_priority_chain() {
+        // c (P0) -> b (P2) -> a (P3)
+        // a's effective should be P0 (transitive through b from c)
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P3, vec![]),
+            make_task("b", Status::Open, Priority::P2, vec!["a"]),
+            make_task("c", Status::Open, Priority::P0, vec!["b"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
+    }
+
+    #[test]
+    fn test_effective_priority_diamond() {
+        // d (P0) -> b (P2), d (P0) -> c (P3), b -> a (P3), c -> a (P3)
+        // a's effective should be P0 (via both paths)
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P3, vec![]),
+            make_task("b", Status::Open, Priority::P2, vec!["a"]),
+            make_task("c", Status::Open, Priority::P3, vec!["a"]),
+            make_task("d", Status::Open, Priority::P0, vec!["b", "c"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
+    }
+
+    #[test]
+    fn test_effective_priority_own_is_highest() {
+        // Task's own priority is already highest — should stay same
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P0, vec![]),
+            make_task("b", Status::Open, Priority::P3, vec!["a"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
     }
 }
