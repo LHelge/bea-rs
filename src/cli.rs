@@ -229,8 +229,30 @@ pub enum DepCommand {
 }
 
 pub async fn run(cli: Args, base: &Path) -> Result<()> {
+    // Handle commands that don't need task data
+    match &cli.command {
+        Command::Init => return cmd_init(base, cli.json),
+        Command::Completions { shell } => {
+            clap_complete::generate(*shell, &mut Args::command(), "bea", &mut std::io::stdout());
+            return Ok(());
+        }
+        Command::Version => {
+            let version = env!("CARGO_PKG_VERSION");
+            if cli.json {
+                output(&serde_json::json!({ "version": version }), true)?;
+            } else {
+                println!("Bears {version}");
+            }
+            return Ok(());
+        }
+        Command::Mcp => unreachable!("MCP mode is handled in main"),
+        _ => {}
+    }
+
+    // Load all tasks once for commands that need them
+    let tasks = store::load_all(base).await?;
+
     match cli.command {
-        Command::Init => cmd_init(base, cli.json),
         Command::Create {
             title,
             priority,
@@ -238,20 +260,17 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             depends_on,
             parent,
             body,
-        } => {
-            cmd_create(
-                base, title, priority, tag, depends_on, parent, body, cli.json,
-            )
-            .await
-        }
+        } => cmd_create(
+            base, &tasks, title, priority, tag, depends_on, parent, body, cli.json,
+        ),
         Command::List {
             status,
             priority,
             tag,
             all,
-        } => cmd_list(base, status, priority, tag, all, cli.json).await,
-        Command::Ready { tag, limit } => cmd_ready(base, tag, limit, cli.json).await,
-        Command::Show { id } => cmd_show(base, &id, cli.json).await,
+        } => cmd_list(&tasks, status, priority, tag, all, cli.json),
+        Command::Ready { tag, limit } => cmd_ready(&tasks, tag, limit, cli.json),
+        Command::Show { id } => cmd_show(&tasks, &id, cli.json),
         Command::Update {
             id,
             status,
@@ -261,40 +280,30 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             body,
             title,
         } => cmd_update(
-            base, &id, status, priority, tag, assignee, body, title, cli.json,
+            base, &tasks, &id, status, priority, tag, assignee, body, title, cli.json,
         ),
-        Command::Status { id, status } => cmd_status(base, &id, status, cli.json),
-        Command::Start { id } => cmd_status(base, &id, Status::InProgress, cli.json),
-        Command::Done { id } => cmd_status(base, &id, Status::Done, cli.json),
+        Command::Status { id, status } => cmd_status(base, &tasks, &id, status, cli.json),
+        Command::Start { id } => cmd_status(base, &tasks, &id, Status::InProgress, cli.json),
+        Command::Done { id } => cmd_status(base, &tasks, &id, Status::Done, cli.json),
         Command::Dep { command } => match command {
             DepCommand::Add { id, depends_on } => {
-                cmd_dep_add(base, &id, &depends_on, cli.json).await
+                cmd_dep_add(base, &tasks, &id, &depends_on, cli.json)
             }
             DepCommand::Remove { id, depends_on } => {
-                cmd_dep_remove(base, &id, &depends_on, cli.json)
+                cmd_dep_remove(base, &tasks, &id, &depends_on, cli.json)
             }
-            DepCommand::Tree { id } => cmd_dep_tree(base, &id, cli.json).await,
+            DepCommand::Tree { id } => cmd_dep_tree(&tasks, &id, cli.json),
         },
-        Command::Graph { all } => cmd_graph(base, all, cli.json).await,
-        Command::Cancel { id } => cmd_status(base, &id, Status::Cancelled, cli.json),
-        Command::Prune { done } => cmd_prune(base, done, cli.json).await,
-        Command::Delete { id } => cmd_delete(base, &id, cli.json),
-        Command::Search { query, all } => cmd_search(base, &query, all, cli.json).await,
-        Command::Edit { id } => cmd_edit(base, &id, cli.json),
-        Command::Completions { shell } => {
-            clap_complete::generate(shell, &mut Args::command(), "bea", &mut std::io::stdout());
-            Ok(())
+        Command::Graph { all } => cmd_graph(&tasks, all, cli.json),
+        Command::Cancel { id } => cmd_status(base, &tasks, &id, Status::Cancelled, cli.json),
+        Command::Prune { done } => cmd_prune(base, &tasks, done, cli.json),
+        Command::Delete { id } => cmd_delete(base, &tasks, &id, cli.json),
+        Command::Search { query, all } => cmd_search(&tasks, &query, all, cli.json),
+        Command::Edit { id } => cmd_edit(base, &tasks, &id, cli.json),
+        // Already handled above
+        Command::Init | Command::Completions { .. } | Command::Version | Command::Mcp => {
+            unreachable!()
         }
-        Command::Version => {
-            let version = env!("CARGO_PKG_VERSION");
-            if cli.json {
-                output(&serde_json::json!({ "version": version }), true)?;
-            } else {
-                println!("Bears {version}");
-            }
-            Ok(())
-        }
-        Command::Mcp => unreachable!("MCP mode is handled in main"),
     }
 }
 
@@ -360,8 +369,9 @@ fn cmd_init(base: &Path, json: bool) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn cmd_create(
+fn cmd_create(
     base: &Path,
+    tasks: &HashMap<String, Task>,
     title: String,
     priority: Priority,
     tags: Vec<String>,
@@ -372,14 +382,14 @@ async fn cmd_create(
 ) -> Result<()> {
     let t = service::create_task(
         base,
+        tasks,
         title,
         priority,
         tags,
         depends_on,
         parent,
         body.unwrap_or_default(),
-    )
-    .await?;
+    )?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -389,16 +399,16 @@ async fn cmd_create(
     Ok(())
 }
 
-async fn cmd_list(
-    base: &Path,
+fn cmd_list(
+    tasks: &HashMap<String, Task>,
     status: Option<Status>,
     priority: Option<Priority>,
     tag: Option<String>,
     all: bool,
     json: bool,
 ) -> Result<()> {
-    let filtered = service::list_tasks(base, status, priority, tag.as_deref(), all).await?;
-    let eff = service::effective_priorities(base).await?;
+    let filtered = service::list_tasks(tasks, status, priority, tag.as_deref(), all);
+    let eff = service::effective_priorities(tasks);
 
     if json {
         let summaries: Vec<_> = filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
@@ -422,14 +432,14 @@ async fn cmd_list(
     Ok(())
 }
 
-async fn cmd_ready(
-    base: &Path,
+fn cmd_ready(
+    tasks: &HashMap<String, Task>,
     tag: Option<String>,
     limit: Option<usize>,
     json: bool,
 ) -> Result<()> {
-    let ready = service::list_ready(base, tag.as_deref(), limit).await?;
-    let eff = service::effective_priorities(base).await?;
+    let ready = service::list_ready(tasks, tag.as_deref(), limit);
+    let eff = service::effective_priorities(tasks);
 
     if json {
         let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
@@ -452,9 +462,9 @@ async fn cmd_ready(
     Ok(())
 }
 
-async fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
-    let t = service::get_task(base, id)?;
-    let eff = service::effective_priorities(base).await?;
+fn cmd_show(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::get_task(tasks, id)?;
+    let eff = service::effective_priorities(tasks);
     let ep = eff.get(&t.id);
 
     if json {
@@ -529,6 +539,7 @@ async fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn cmd_update(
     base: &Path,
+    tasks: &HashMap<String, Task>,
     id: &str,
     status: Option<Status>,
     priority: Option<Priority>,
@@ -538,7 +549,9 @@ fn cmd_update(
     title: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let t = service::update_task(base, id, status, priority, tags, assignee, body, title)?;
+    let t = service::update_task(
+        base, tasks, id, status, priority, tags, assignee, body, title,
+    )?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -548,8 +561,14 @@ fn cmd_update(
     Ok(())
 }
 
-fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
-    let t = service::set_status(base, id, status)?;
+fn cmd_status(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: &str,
+    status: Status,
+    json: bool,
+) -> Result<()> {
+    let t = service::set_status(base, tasks, id, status)?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -564,8 +583,14 @@ fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
-    let t = service::add_dependency(base, id, depends_on).await?;
+fn cmd_dep_add(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: &str,
+    depends_on: &str,
+    json: bool,
+) -> Result<()> {
+    let t = service::add_dependency(base, tasks, id, depends_on)?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -575,8 +600,14 @@ async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Res
     Ok(())
 }
 
-fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
-    let t = service::remove_dependency(base, id, depends_on)?;
+fn cmd_dep_remove(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: &str,
+    depends_on: &str,
+    json: bool,
+) -> Result<()> {
+    let t = service::remove_dependency(base, tasks, id, depends_on)?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -586,10 +617,10 @@ fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result
     Ok(())
 }
 
-async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
-    let (tasks, graph) = service::get_graph(base).await?;
+fn cmd_dep_tree(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let graph = service::build_graph(tasks);
     let tree = graph
-        .dep_tree(&tasks, id)
+        .dep_tree(tasks, id)
         .ok_or_else(|| Error::TaskNotFound(id.into()))?;
 
     if json {
@@ -598,13 +629,13 @@ async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
     } else {
         let eff: HashMap<String, Priority> = tasks
             .keys()
-            .map(|id| (id.clone(), graph.effective_priority(id, &tasks)))
+            .map(|id| (id.clone(), graph.effective_priority(id, tasks)))
             .collect();
         println!(
             "Dependency tree for {}:\n",
             tree.task.title.if_supports_color(Stdout, |t| t.bold())
         );
-        print_tree(&tree, "", true, &tasks, &eff, true);
+        print_tree(&tree, "", true, tasks, &eff, true);
     }
     Ok(())
 }
@@ -681,8 +712,8 @@ fn print_tree(
     }
 }
 
-async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
-    let (tasks, graph) = service::get_graph(base).await?;
+fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result<()> {
+    let graph = service::build_graph(tasks);
 
     if json {
         let adj = graph.adjacency_list();
@@ -698,7 +729,7 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
     // Compute effective priorities
     let eff: HashMap<String, Priority> = tasks
         .keys()
-        .map(|id| (id.clone(), graph.effective_priority(id, &tasks)))
+        .map(|id| (id.clone(), graph.effective_priority(id, tasks)))
         .collect();
 
     // Roots: tasks that no other task depends on
@@ -724,15 +755,20 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
 
     println!("Dependency graph\n");
     for root in &roots {
-        if let Some(tree) = graph.dep_tree(&tasks, &root.id) {
-            print_tree(&tree, "", true, &tasks, &eff, all);
+        if let Some(tree) = graph.dep_tree(tasks, &root.id) {
+            print_tree(&tree, "", true, tasks, &eff, all);
         }
     }
     Ok(())
 }
 
-async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
-    let deleted = service::prune_tasks(base, include_done).await?;
+fn cmd_prune(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    include_done: bool,
+    json: bool,
+) -> Result<()> {
+    let deleted = service::prune_tasks(base, tasks, include_done)?;
     let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
@@ -749,8 +785,8 @@ async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
-    let t = service::delete_task(base, id)?;
+fn cmd_delete(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::delete_task(base, tasks, id)?;
 
     if json {
         output(&t.summary(None), true)?;
@@ -760,8 +796,8 @@ fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<()> {
-    let results = service::search_tasks(base, query, all).await?;
+fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: bool) -> Result<()> {
+    let results = service::search_tasks(tasks, query, all);
 
     if json {
         let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
@@ -785,9 +821,9 @@ async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<(
     Ok(())
 }
 
-fn cmd_edit(base: &Path, id: &str, json: bool) -> Result<()> {
-    // Validate task exists
-    let original = store::load_one(base, id)?;
+fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    // Resolve prefix and load task
+    let original = service::get_task(tasks, id)?;
     let path = store::find_task_path(base, &original.id)?;
 
     // Resolve editor

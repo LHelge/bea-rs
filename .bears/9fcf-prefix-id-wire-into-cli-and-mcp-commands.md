@@ -1,10 +1,10 @@
 ---
 id: 9fcf
 title: 'Prefix ID: wire into CLI and MCP commands'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T09:53:32.087232Z
-updated: 2026-03-16T10:49:57.029140Z
+updated: 2026-03-16T20:59:38.274490139Z
 tags:
 - feature
 - ux

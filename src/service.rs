@@ -10,8 +10,10 @@ use crate::store;
 use crate::task::{self, Priority, Status, Task};
 
 /// Create a new task with validation.
-pub async fn create_task(
+#[allow(clippy::too_many_arguments)]
+pub fn create_task(
     base: &Path,
+    tasks: &HashMap<String, Task>,
     title: String,
     priority: Priority,
     tags: Vec<String>,
@@ -20,7 +22,6 @@ pub async fn create_task(
     body: String,
 ) -> Result<Task> {
     let config = config::load(base)?;
-    let tasks = store::load_all(base).await?;
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
     let id = task::generate_id(&existing_ids, config.id_length as usize);
 
@@ -44,16 +45,15 @@ pub async fn create_task(
 }
 
 /// List tasks with optional filters, sorted by priority then creation date.
-pub async fn list_tasks(
-    base: &Path,
+pub fn list_tasks(
+    tasks: &HashMap<String, Task>,
     status: Option<Status>,
     priority: Option<Priority>,
     tag: Option<&str>,
     include_all: bool,
-) -> Result<Vec<Task>> {
-    let tasks = store::load_all(base).await?;
+) -> Vec<Task> {
     let mut filtered: Vec<Task> = tasks
-        .into_values()
+        .values()
         .filter(|t| {
             if status.is_some() || include_all {
                 true
@@ -64,29 +64,35 @@ pub async fn list_tasks(
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
         .filter(|t| task::matches_tag(t, tag))
+        .cloned()
         .collect();
     task::sort_by_priority_owned(&mut filtered);
-    Ok(filtered)
+    filtered
 }
 
 /// Return tasks that are ready to work on.
-pub async fn list_ready(base: &Path, tag: Option<&str>, limit: Option<usize>) -> Result<Vec<Task>> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
-    let ready = graph.ready(&tasks, tag, limit);
-    Ok(ready.into_iter().cloned().collect())
+pub fn list_ready(
+    tasks: &HashMap<String, Task>,
+    tag: Option<&str>,
+    limit: Option<usize>,
+) -> Vec<Task> {
+    let graph = Graph::build(tasks);
+    let ready = graph.ready(tasks, tag, limit);
+    ready.into_iter().cloned().collect()
 }
 
-/// Get a single task by ID.
-pub fn get_task(base: &Path, id: &str) -> Result<Task> {
-    store::load_one(base, id)
+/// Get a single task by ID or prefix.
+pub fn get_task(tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    Ok(tasks[&id].clone())
 }
 
 /// Update task fields. Only `Some` fields are changed.
 #[allow(clippy::too_many_arguments)]
 pub fn update_task(
     base: &Path,
-    id: &str,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
     status: Option<Status>,
     priority: Option<Priority>,
     tags: Option<Vec<String>>,
@@ -94,7 +100,8 @@ pub fn update_task(
     body: Option<String>,
     title: Option<String>,
 ) -> Result<Task> {
-    let mut t = store::load_one(base, id)?;
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = tasks[&id].clone();
 
     if let Some(s) = status {
         t.status = s;
@@ -120,31 +127,42 @@ pub fn update_task(
     Ok(t)
 }
 
-/// Set task status.
-pub fn set_status(base: &Path, id: &str, status: Status) -> Result<Task> {
-    let mut t = store::load_one(base, id)?;
+/// Set task status by ID or prefix.
+pub fn set_status(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    status: Status,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = tasks[&id].clone();
     t.status = status;
     t.updated = Utc::now();
     store::save(base, &t)?;
     Ok(t)
 }
 
-/// Add a dependency with cycle detection.
-pub async fn add_dependency(base: &Path, id: &str, depends_on: &str) -> Result<Task> {
-    store::load_one(base, depends_on)?;
-    let mut t = store::load_one(base, id)?;
+/// Add a dependency with cycle detection. Both IDs support prefix matching.
+pub fn add_dependency(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    dep_or_prefix: &str,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let depends_on = store::resolve_prefix(tasks, dep_or_prefix)?;
 
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
-    if graph.would_cycle(id, depends_on) {
+    let graph = Graph::build(tasks);
+    if graph.would_cycle(&id, &depends_on) {
         return Err(Error::CycleDetected {
-            from: id.into(),
-            to: depends_on.into(),
+            from: id,
+            to: depends_on,
         });
     }
 
-    if !t.depends_on.contains(&depends_on.to_string()) {
-        t.depends_on.push(depends_on.to_string());
+    let mut t = tasks[&id].clone();
+    if !t.depends_on.contains(&depends_on) {
+        t.depends_on.push(depends_on);
         t.updated = Utc::now();
         store::save(base, &t)?;
     }
@@ -152,21 +170,27 @@ pub async fn add_dependency(base: &Path, id: &str, depends_on: &str) -> Result<T
     Ok(t)
 }
 
-/// Remove a dependency.
-pub fn remove_dependency(base: &Path, id: &str, depends_on: &str) -> Result<Task> {
-    let mut t = store::load_one(base, id)?;
-    t.depends_on.retain(|d| d != depends_on);
+/// Remove a dependency. Both IDs support prefix matching.
+pub fn remove_dependency(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    dep_or_prefix: &str,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let depends_on = store::resolve_prefix(tasks, dep_or_prefix)?;
+    let mut t = tasks[&id].clone();
+    t.depends_on.retain(|d| d != &depends_on);
     t.updated = Utc::now();
     store::save(base, &t)?;
     Ok(t)
 }
 
 /// Search tasks by text query.
-pub async fn search_tasks(base: &Path, query: &str, include_all: bool) -> Result<Vec<Task>> {
-    let tasks = store::load_all(base).await?;
+pub fn search_tasks(tasks: &HashMap<String, Task>, query: &str, include_all: bool) -> Vec<Task> {
     let query_lower = query.to_lowercase();
     let mut results: Vec<Task> = tasks
-        .into_values()
+        .values()
         .filter(|t| include_all || task::is_active(t))
         .filter(|t| {
             t.title.to_lowercase().contains(&query_lower)
@@ -176,24 +200,30 @@ pub async fn search_tasks(base: &Path, query: &str, include_all: bool) -> Result
                     .any(|tag| tag.to_lowercase().contains(&query_lower))
                 || t.id.contains(&query_lower)
         })
+        .cloned()
         .collect();
     task::sort_by_priority_owned(&mut results);
-    Ok(results)
+    results
 }
 
-/// Delete a task by ID, returning the deleted task.
-pub fn delete_task(base: &Path, id: &str) -> Result<Task> {
-    let t = store::load_one(base, id)?;
-    store::delete(base, id)?;
+/// Delete a task by ID or prefix, returning the deleted task.
+pub fn delete_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let t = tasks[&id].clone();
+    store::delete(base, &id)?;
     Ok(t)
 }
 
 /// Prune cancelled (and optionally done) tasks, returning deleted tasks.
-pub async fn prune_tasks(base: &Path, include_done: bool) -> Result<Vec<Task>> {
-    let tasks = store::load_all(base).await?;
+pub fn prune_tasks(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    include_done: bool,
+) -> Result<Vec<Task>> {
     let to_delete: Vec<Task> = tasks
-        .into_values()
+        .values()
         .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
+        .cloned()
         .collect();
 
     for t in &to_delete {
@@ -202,20 +232,17 @@ pub async fn prune_tasks(base: &Path, include_done: bool) -> Result<Vec<Task>> {
     Ok(to_delete)
 }
 
-/// Get the dependency graph data.
-pub async fn get_graph(base: &Path) -> Result<(HashMap<String, Task>, Graph)> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
-    Ok((tasks, graph))
+/// Build the dependency graph from tasks.
+pub fn build_graph(tasks: &HashMap<String, Task>) -> Graph {
+    Graph::build(tasks)
 }
 
 /// Compute effective priorities for all tasks.
-pub async fn effective_priorities(base: &Path) -> Result<HashMap<String, Priority>> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
+pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
+    let graph = Graph::build(tasks);
     let mut map = HashMap::new();
     for id in tasks.keys() {
-        map.insert(id.clone(), graph.effective_priority(id, &tasks));
+        map.insert(id.clone(), graph.effective_priority(id, tasks));
     }
-    Ok(map)
+    map
 }

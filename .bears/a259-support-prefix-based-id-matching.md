@@ -1,10 +1,10 @@
 ---
 id: a259
 title: Support prefix-based ID matching
-status: open
+status: done
 priority: P1
 created: 2026-03-16T09:53:16.733904Z
-updated: 2026-03-16T10:49:57.012843Z
+updated: 2026-03-16T20:59:47.765365975Z
 tags:
 - feature
 - ux
