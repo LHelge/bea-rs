@@ -3,6 +3,7 @@ use std::path::Path;
 
 use chrono::Utc;
 
+use crate::config;
 use crate::error::{Error, Result};
 use crate::graph::Graph;
 use crate::store;
@@ -18,9 +19,10 @@ pub async fn create_task(
     parent: Option<String>,
     body: String,
 ) -> Result<Task> {
+    let config = config::load(base)?;
     let tasks = store::load_all(base).await?;
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-    let id = task::generate_id(&existing_ids);
+    let id = task::generate_id(&existing_ids, config.id_length as usize);
 
     let unknown: Vec<String> = depends_on
         .iter()

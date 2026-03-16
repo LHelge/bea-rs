@@ -344,7 +344,7 @@ fn cmd_init(base: &Path, json: bool) -> Result<()> {
             true,
         )?;
     } else {
-        println!("Initialized .tasks/ directory at {}", dir.display());
+        println!("Initialized bears in {}", dir.display());
     }
     Ok(())
 }

@@ -135,10 +135,11 @@ impl Task {
     }
 }
 
-/// Generate a short 4-char hex ID from UUID v4, retrying on collision.
-pub fn generate_id(existing: &HashSet<String>) -> String {
+/// Generate a short hex ID from UUID v4, retrying on collision.
+pub fn generate_id(existing: &HashSet<String>, length: usize) -> String {
     loop {
-        let id = &uuid::Uuid::new_v4().to_string()[..4];
+        let uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let id = &uuid[..length];
         let id = id.to_string();
         if !existing.contains(&id) {
             return id;
@@ -249,7 +250,7 @@ mod tests {
     #[test]
     fn test_generate_id_unique() {
         let existing = HashSet::new();
-        let id = generate_id(&existing);
+        let id = generate_id(&existing, 4);
         assert_eq!(id.len(), 4);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -257,9 +258,9 @@ mod tests {
     #[test]
     fn test_generate_id_avoids_collision() {
         let mut existing = HashSet::new();
-        let id1 = generate_id(&existing);
+        let id1 = generate_id(&existing, 4);
         existing.insert(id1.clone());
-        let id2 = generate_id(&existing);
+        let id2 = generate_id(&existing, 4);
         assert_ne!(id1, id2);
     }
 

@@ -15,7 +15,7 @@ fn test_init() {
         .args(["init"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Initialized .tasks/"));
+        .stdout(predicate::str::contains("Initialized bears"));
 }
 
 #[test]

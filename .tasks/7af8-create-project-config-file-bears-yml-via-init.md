@@ -1,10 +1,10 @@
 ---
 id: 7af8
 title: Create project config file .bears.yml via init
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:46:46.739127Z
-updated: 2026-03-16T10:46:46.739127Z
+updated: 2026-03-16T18:45:53.261164Z
 tags:
 - code-review
 - config

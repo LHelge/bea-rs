@@ -14,10 +14,11 @@ pub fn tasks_dir(base: &Path) -> PathBuf {
     base.join(TASKS_DIR)
 }
 
-/// Initialize a new `.tasks/` directory.
+/// Initialize a new `.tasks/` directory and `.bears.yml` config.
 pub fn init(base: &Path) -> Result<PathBuf> {
     let dir = tasks_dir(base);
     fs::create_dir_all(&dir)?;
+    crate::config::create_default(base)?;
     Ok(dir)
 }
 
