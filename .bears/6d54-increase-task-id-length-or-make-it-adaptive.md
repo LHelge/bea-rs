@@ -1,10 +1,10 @@
 ---
 id: 6d54
 title: Increase task ID length or make it adaptive
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:37:28.274332Z
-updated: 2026-03-16T10:46:51.074406Z
+updated: 2026-03-16T20:31:33.310133508Z
 tags:
 - code-review
 - task-model

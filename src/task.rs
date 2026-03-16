@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -205,12 +206,17 @@ pub fn sort_by_priority_owned(tasks: &mut [Task]) {
     tasks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 }
 
-/// Generate a short hex ID from UUID v4, retrying on collision.
+/// Unambiguous character set for ID generation.
+/// Excludes easily confused characters: 0/o, 1/l/i.
+const ID_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+/// Generate a short alphanumeric ID, retrying on collision.
 pub fn generate_id(existing: &HashSet<String>, length: usize) -> String {
+    let mut rng = rand::rng();
     loop {
-        let uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let id = &uuid[..length];
-        let id = id.to_string();
+        let id: String = (0..length)
+            .map(|_| ID_CHARSET[rng.random_range(0..ID_CHARSET.len())] as char)
+            .collect();
         if !existing.contains(&id) {
             return id;
         }
@@ -342,7 +348,8 @@ mod tests {
         let existing = HashSet::new();
         let id = generate_id(&existing, 4);
         assert_eq!(id.len(), 4);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        let allowed: Vec<char> = std::str::from_utf8(ID_CHARSET).unwrap().chars().collect();
+        assert!(id.chars().all(|c| allowed.contains(&c)));
     }
 
     #[test]
@@ -352,6 +359,16 @@ mod tests {
         existing.insert(id1.clone());
         let id2 = generate_id(&existing, 4);
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_generate_id_excludes_ambiguous_chars() {
+        let existing = HashSet::new();
+        let ambiguous = ['0', 'o', '1', 'l', 'i'];
+        for _ in 0..100 {
+            let id = generate_id(&existing, 6);
+            assert!(!id.chars().any(|c| ambiguous.contains(&c)));
+        }
     }
 
     #[test]

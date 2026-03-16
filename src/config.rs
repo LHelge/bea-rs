@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 const CONFIG_FILE: &str = ".bears.yml";
 
-const DEFAULT_ID_LENGTH: u8 = 4;
-const MIN_ID_LENGTH: u8 = 3;
+const DEFAULT_ID_LENGTH: u8 = 3;
+const MIN_ID_LENGTH: u8 = 2;
 const MAX_ID_LENGTH: u8 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.id_length, 4);
+        assert_eq!(config.id_length, 3);
     }
 
     #[test]
@@ -91,7 +91,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_default(tmp.path()).unwrap();
         let config = load(tmp.path()).unwrap();
-        assert_eq!(config.id_length, 4);
+        assert_eq!(config.id_length, 3);
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_validate_too_small() {
-        let config = Config { id_length: 2 };
+        let config = Config { id_length: 1 };
         assert!(config.validate().is_err());
     }
 
@@ -116,14 +116,14 @@ mod tests {
 
     #[test]
     fn test_validate_bounds() {
-        Config { id_length: 4 }.validate().unwrap();
+        Config { id_length: 2 }.validate().unwrap();
         Config { id_length: 8 }.validate().unwrap();
     }
 
     #[test]
     fn test_load_invalid_id_length() {
         let tmp = TempDir::new().unwrap();
-        fs::write(config_path(tmp.path()), "id-length: 2\n").unwrap();
+        fs::write(config_path(tmp.path()), "id-length: 1\n").unwrap();
         assert!(load(tmp.path()).is_err());
     }
 
