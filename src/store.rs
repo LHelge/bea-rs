@@ -91,9 +91,15 @@ pub fn find_task_path(base: &Path, id: &str) -> Result<PathBuf> {
 pub fn load_one(base: &Path, id: &str) -> Result<Task> {
     let path = find_task_path(base, id)?;
     let content = fs::read_to_string(&path)?;
-    task::parse_task(&content).map_err(|_| Error::InvalidFrontmatter {
-        path,
-        reason: "failed to parse frontmatter".into(),
+    task::parse_task(&content).map_err(|e| match e {
+        Error::InvalidFrontmatter { reason, .. } => Error::InvalidFrontmatter {
+            path: path.clone(),
+            reason,
+        },
+        other => Error::InvalidFrontmatter {
+            path: path.clone(),
+            reason: other.to_string(),
+        },
     })
 }
 
@@ -207,6 +213,48 @@ mod tests {
             load_one(tmp.path(), "zzzz"),
             Err(Error::TaskNotFound(_))
         ));
+    }
+
+    #[test]
+    fn test_load_one_missing_delimiter() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        // Write a file with no frontmatter delimiters
+        fs::write(
+            tmp.path().join(BEARS_DIR).join("bad1-no-delimiters.md"),
+            "just some text, no frontmatter",
+        )
+        .unwrap();
+        let err = load_one(tmp.path(), "bad1").unwrap_err();
+        match &err {
+            Error::InvalidFrontmatter { path, reason } => {
+                assert!(path.ends_with("bad1-no-delimiters.md"));
+                assert!(reason.contains("missing opening --- delimiter"), "{reason}");
+            }
+            other => panic!("expected InvalidFrontmatter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_load_one_bad_yaml() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        // Write a file with delimiters but invalid YAML
+        fs::write(
+            tmp.path().join(BEARS_DIR).join("bad2-bad-yaml.md"),
+            "---\n: :\nbogus yaml\n---\n",
+        )
+        .unwrap();
+        let err = load_one(tmp.path(), "bad2").unwrap_err();
+        match &err {
+            Error::InvalidFrontmatter { path, reason } => {
+                assert!(path.ends_with("bad2-bad-yaml.md"));
+                // Should contain the serde_yaml error details, not just "failed to parse"
+                assert!(!reason.contains("failed to parse frontmatter"), "{reason}");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected InvalidFrontmatter, got {other:?}"),
+        }
     }
 
     #[test]

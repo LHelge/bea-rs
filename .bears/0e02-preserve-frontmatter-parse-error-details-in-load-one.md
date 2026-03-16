@@ -1,10 +1,10 @@
 ---
 id: '0e02'
 title: Preserve frontmatter parse error details in load_one
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:37:28.245805Z
-updated: 2026-03-16T10:37:28.245805Z
+updated: 2026-03-16T19:25:28.863320Z
 tags:
 - code-review
 - store
