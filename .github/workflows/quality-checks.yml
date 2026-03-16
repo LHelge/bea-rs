@@ -1,19 +1,11 @@
-name: CI
+name: Reusable Quality Checks
 
 on:
-  push:
-    paths:
-      - '**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-  pull_request:
-    paths:
-      - '**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  workflow_call:
 
 jobs:
-  ci:
+  quality-checks:
+    name: Format, Lint, and Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,11 +18,11 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: fmt
+      - name: Check formatting
         run: cargo fmt --check
 
-      - name: clippy
+      - name: Run clippy
         run: cargo clippy -- -D warnings
 
-      - name: test
+      - name: Run tests
         run: cargo test
