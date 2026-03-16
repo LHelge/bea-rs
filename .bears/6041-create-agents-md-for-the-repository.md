@@ -1,10 +1,10 @@
 ---
 id: '6041'
 title: Create AGENTS.md for the repository
-status: open
+status: done
 priority: P2
 created: 2026-03-16T09:55:06.724568Z
-updated: 2026-03-16T09:55:06.724568Z
+updated: 2026-03-16T19:04:56.294704Z
 tags:
 - docs
 ---
