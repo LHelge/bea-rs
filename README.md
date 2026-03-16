@@ -67,16 +67,20 @@ id: a1b2
 title: Implement OAuth flow
 status: open
 priority: P1
+type: task
 created: 2026-03-15T10:30:00Z
 updated: 2026-03-15T10:30:00Z
 tags: [backend, auth]
 depends_on: [f4c9]
+parent: x9k2
 ---
 
 Any Markdown body goes here.
 ```
 
 **Statuses:** `open` · `in_progress` · `done` · `blocked` · `cancelled`
+
+**Types:** `task` (default) · `epic` (high-level objective grouping child tasks)
 
 **Priorities:** `P0` (critical) · `P1` · `P2` · `P3` (low) — sorted P0 first everywhere. A task inherits the highest priority of any task that depends on it, so a P3 task blocking a P0 task is effectively treated as P0.
 
@@ -93,8 +97,10 @@ bea init
 
 ### `bea create`
 ```sh
-bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--body "..."]
+bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--body "..."] [--epic]
 ```
+
+Use `--epic` to create an epic instead of a regular task. Epics are high-level objectives that group child tasks via the `--parent` flag.
 
 ### `bea list`
 Hides `done` and `cancelled` tasks by default. Use `--all` / `-a` to show everything.
@@ -104,15 +110,17 @@ bea list
 bea list --status open
 bea list --priority P0
 bea list --tag backend
+bea list --epic <epic-id>
 bea list --all
 ```
 
 ### `bea ready`
-Show tasks that are `open` and have all dependencies completed. This is the key command for agent workflows — always start here.
+Show tasks that are `open` and have all dependencies completed. Epics are excluded — only actionable tasks appear. This is the key command for agent workflows — always start here.
 
 ```sh
 bea ready
 bea ready --tag backend --limit 5
+bea ready --epic <epic-id>
 ```
 
 ### `bea show`
@@ -127,13 +135,23 @@ bea update <id> --priority P0 --tag urgent,backend
 bea update <id> --title "New title" --body "Updated description"
 ```
 
-### `bea start` / `bea done`
+### `bea epics`
+List all epics with progress (done/total children).
+
+```sh
+bea epics
+```
+
+### `bea start` / `bea done` / `bea cancel`
 Shortcuts for the most common status transitions:
 
 ```sh
-bea start <id>   # → in_progress
-bea done <id>    # → done
+bea start <id>    # → in_progress
+bea done <id>     # → done
+bea cancel <id>   # → cancelled
 ```
+
+When all children of an epic are completed, the epic is automatically marked as done.
 
 ### `bea dep`
 ```sh
@@ -149,6 +167,14 @@ Permanently delete a task file.
 
 ```sh
 bea delete <id>
+```
+
+### `bea prune`
+Delete cancelled tasks. Use `--done` to also delete completed tasks.
+
+```sh
+bea prune
+bea prune --done
 ```
 
 ### `bea graph`
@@ -222,13 +248,16 @@ bea mcp   # starts MCP server over stdio
 
 | Tool | Description |
 |---|---|
-| `list_ready` | Tasks ready to work on (`limit?`, `tag?`) |
-| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`) |
+| `list_ready` | Tasks ready to work on (`limit?`, `tag?`, `epic?`) |
+| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`, `epic?`) |
+| `list_epics` | List all epics with progress |
 | `get_task` | Full task details (`id`) |
-| `create_task` | Create a task (`title`, `priority?`, `tags?`, `depends_on?`, `body?`) |
+| `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `body?`, `type?`) |
 | `update_task` | Update fields (`id`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`) |
 | `start_task` | Set status to `in_progress` (`id`) |
 | `complete_task` | Set status to `done` (`id`) |
+| `cancel_task` | Set status to `cancelled` (`id`) |
+| `prune_tasks` | Delete cancelled tasks (`include_done?`) |
 | `add_dependency` | Add a dependency, cycle-safe (`id`, `depends_on`) |
 | `remove_dependency` | Remove a dependency (`id`, `depends_on`) |
 | `delete_task` | Permanently delete a task (`id`) |
@@ -269,12 +298,20 @@ All three of `fmt`, `clippy`, and `test` must pass cleanly before committing.
 
 ```
 src/
-  main.rs    Entry point — dispatch to CLI or MCP server
-  cli.rs     CLI commands (clap)
-  mcp.rs     MCP server — JSON-RPC 2.0 over stdio
-  store.rs   Read/write .tasks/ directory
-  task.rs    Task struct, frontmatter parse/render, ID & slug
-  graph.rs   Dependency graph, ready computation, cycle detection
-  error.rs   Error types
-.tasks/      Task files (created by `bea init`)
+  main.rs        Entry point — dispatch to CLI or MCP server
+  cli/
+    mod.rs       CLI module root and dispatch
+    args.rs      clap command and argument definitions
+    cmd.rs       Command handlers (list, show, create, etc.)
+  mcp/
+    mod.rs       MCP module root and server setup
+    params.rs    Tool parameter structs (serde + JSON Schema)
+    tools.rs     MCP tool implementations and tests
+  service.rs     Business logic (create, update, epic progress, etc.)
+  store.rs       Read/write .bears/ directory
+  task.rs        Task struct, frontmatter parse/render, ID & slug
+  graph.rs       Dependency graph, ready computation, cycle detection
+  config.rs      .bears.yml configuration
+  error.rs       Error types
+.bears/          Task files (created by `bea init`)
 ```
