@@ -4,12 +4,13 @@ title: 'Prefix ID: wire into CLI and MCP commands'
 status: open
 priority: P1
 created: 2026-03-16T09:53:32.087232Z
-updated: 2026-03-16T09:53:32.087232Z
+updated: 2026-03-16T10:49:57.029140Z
 tags:
 - feature
 - ux
 depends_on:
 - 05fd
+- 6d54
 parent: a259
 ---
 

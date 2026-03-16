@@ -1,10 +1,10 @@
 ---
 id: '7895'
 title: Add debug logging to MCP server
-status: open
+status: cancelled
 priority: P2
 created: 2026-03-15T20:48:21.792806982Z
-updated: 2026-03-15T20:48:21.792806982Z
+updated: 2026-03-16T10:13:58.885973Z
 tags:
 - mcp
 ---
