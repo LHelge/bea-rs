@@ -1,10 +1,10 @@
 ---
 id: 57a2
 title: Harden frontmatter delimiter parsing for edge cases
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:37:28.281036Z
-updated: 2026-03-16T10:37:28.281036Z
+updated: 2026-03-16T20:23:24.845460245Z
 tags:
 - code-review
 - parsing

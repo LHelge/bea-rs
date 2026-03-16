@@ -252,33 +252,53 @@ pub fn filename(task: &Task) -> String {
 }
 
 /// Parse a task from markdown content with YAML frontmatter.
+///
+/// Handles BOM, CRLF/LF line endings, and validates that `---` delimiters
+/// appear on their own lines. Returns a clear error for malformed input.
 pub fn parse_task(content: &str) -> Result<Task> {
-    let content = content.trim_start_matches('\u{feff}'); // strip BOM
-    if !content.starts_with("---") {
+    // Strip BOM and normalize CRLF → LF
+    let content = content.trim_start_matches('\u{feff}');
+    let content = content.replace("\r\n", "\n");
+
+    let mut lines = content.split('\n');
+
+    // First line must be exactly "---"
+    match lines.next() {
+        Some(line) if line.trim_end() == "---" => {}
+        _ => {
+            return Err(Error::InvalidFrontmatter {
+                path: "".into(),
+                reason: "missing opening --- delimiter".into(),
+            });
+        }
+    }
+
+    // Collect YAML lines until we hit a closing "---"
+    let mut yaml_lines = Vec::new();
+    let mut found_closing = false;
+    for line in &mut lines {
+        if line.trim_end() == "---" {
+            found_closing = true;
+            break;
+        }
+        yaml_lines.push(line);
+    }
+
+    if !found_closing {
         return Err(Error::InvalidFrontmatter {
             path: "".into(),
-            reason: "missing opening --- delimiter".into(),
+            reason: "missing closing --- delimiter".into(),
         });
     }
 
-    let after_first = &content[3..];
-    let end = after_first
-        .find("\n---")
-        .ok_or_else(|| Error::InvalidFrontmatter {
-            path: "".into(),
-            reason: "missing closing --- delimiter".into(),
-        })?;
+    let yaml_str = yaml_lines.join("\n");
 
-    let yaml_str = &after_first[..end];
-    let body_start = end + 4; // skip \n---
-    let body = if body_start < after_first.len() {
-        let rest = &after_first[body_start..];
-        rest.trim_start_matches('\n').to_string()
-    } else {
-        String::new()
-    };
+    // Everything after the closing delimiter is the body
+    let remaining: Vec<&str> = lines.collect();
+    let body_raw = remaining.join("\n");
+    let body = body_raw.trim_start_matches('\n').to_string();
 
-    let mut task: Task = serde_yaml::from_str(yaml_str)?;
+    let mut task: Task = serde_yaml::from_str(&yaml_str)?;
     task.body = body;
     Ok(task)
 }
@@ -518,5 +538,64 @@ updated: 2026-03-15T10:30:00Z
         assert_eq!(tasks[0].id, "b2"); // P0
         assert_eq!(tasks[1].id, "c3"); // P3, older
         assert_eq!(tasks[2].id, "a1"); // P3, newer
+    }
+
+    // ── Frontmatter parsing edge-case tests ─────────────────────────
+
+    #[test]
+    fn test_parse_crlf_line_endings() {
+        let content = "---\r\nid: cr01\r\ntitle: CRLF task\r\nstatus: open\r\npriority: P2\r\ncreated: 2026-03-15T10:30:00Z\r\nupdated: 2026-03-15T10:30:00Z\r\n---\r\n\r\nBody with CRLF.\r\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "cr01");
+        assert_eq!(task.title, "CRLF task");
+        assert_eq!(task.body, "Body with CRLF.\n");
+    }
+
+    #[test]
+    fn test_parse_bom_prefix() {
+        let content = "\u{feff}---\nid: bom1\ntitle: BOM task\nstatus: open\npriority: P1\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "bom1");
+        assert_eq!(task.body, "");
+    }
+
+    #[test]
+    fn test_parse_bom_with_crlf() {
+        let content = "\u{feff}---\r\nid: bc01\r\ntitle: BOM+CRLF\r\nstatus: done\r\npriority: P0\r\ncreated: 2026-03-15T10:30:00Z\r\nupdated: 2026-03-15T10:30:00Z\r\n---\r\n\r\nBoth BOM and CRLF.\r\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "bc01");
+        assert_eq!(task.title, "BOM+CRLF");
+        assert_eq!(task.body, "Both BOM and CRLF.\n");
+    }
+
+    #[test]
+    fn test_parse_missing_opening_delimiter() {
+        let content = "id: broken\ntitle: No opening\n---\n";
+        let err = parse_task(content).unwrap_err();
+        assert!(err.to_string().contains("opening ---"));
+    }
+
+    #[test]
+    fn test_parse_missing_closing_delimiter() {
+        let content = "---\nid: broken\ntitle: No closing\n";
+        let err = parse_task(content).unwrap_err();
+        assert!(err.to_string().contains("closing ---"));
+    }
+
+    #[test]
+    fn test_parse_no_body_no_trailing_newline() {
+        let content = "---\nid: nb01\ntitle: Minimal\nstatus: open\npriority: P3\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "nb01");
+        assert_eq!(task.body, "");
+    }
+
+    #[test]
+    fn test_parse_body_preserves_internal_triple_dashes() {
+        let content = "---\nid: td01\ntitle: Triple dashes in body\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n\nSome text\n--- not a delimiter\nMore text\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "td01");
+        assert!(task.body.contains("--- not a delimiter"));
+        assert!(task.body.contains("More text"));
     }
 }
