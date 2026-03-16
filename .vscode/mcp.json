@@ -2,8 +2,10 @@
 	"servers": {
 		"Bears": {
 			"type": "stdio",
-			"command": "bea",
+			"command": "cargo",
 			"args": [
+				"run",
+				"--",
 				"mcp"
 			]
 		}
