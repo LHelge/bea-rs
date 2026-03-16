@@ -1,5 +1,10 @@
 # bears 🐻
 
+[![CI](https://github.com/LHelge/bea-rs/actions/workflows/push.yml/badge.svg)](https://github.com/LHelge/bea-rs/actions/workflows/push.yml)
+[![crates.io](https://img.shields.io/crates/v/bea-rs)](https://crates.io/crates/bea-rs)
+[![GitHub release](https://img.shields.io/github/v/release/LHelge/bea-rs)](https://github.com/LHelge/bea-rs/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A file-based task tracker for developers and AI agents.
 
 Heavily inspired by Steve Yegge's [Beads](https://github.com/steveyegge/beads) that didn't really fit my workflow. 
