@@ -672,20 +672,17 @@ fn print_tree(
     } else {
         String::new()
     };
-    let blocked_suffix = if blocked {
-        let style = Style::new().bold().red();
-        format!(
-            " {}",
-            "[BLOCKED]".if_supports_color(Stdout, |s| s.style(style))
-        )
+    let title = if blocked {
+        t.title
+            .if_supports_color(Stdout, |s| s.dimmed())
+            .to_string()
     } else {
-        String::new()
+        t.title.clone()
     };
 
     println!(
-        "{prefix}{connector}[{}] {} [{}] ({}){blocked_suffix}{cycle_suffix}",
+        "{prefix}{connector}[{}] {title} [{}] ({}){cycle_suffix}",
         color_id(&t.id),
-        t.title,
         format_priority(&t.priority, eff.get(&t.id)),
         color_status(&t.status),
     );

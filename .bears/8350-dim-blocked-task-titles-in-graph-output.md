@@ -1,10 +1,10 @@
 ---
 id: '8350'
 title: Dim blocked task titles in graph output
-status: open
+status: done
 priority: P2
 created: 2026-03-16T12:48:07.782684Z
-updated: 2026-03-16T12:48:07.782684Z
+updated: 2026-03-16T21:23:58.991752012Z
 tags:
 - ux
 - cli
