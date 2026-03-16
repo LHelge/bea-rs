@@ -868,11 +868,15 @@ fn cmd_edit(base: &Path, id: &str, json: bool) -> Result<()> {
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".into());
 
-    // Open editor — use sh -c so $EDITOR can contain arguments
-    let path_str = path.to_string_lossy();
-    let status = ProcessCommand::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"{path_str}\""))
+    // Parse editor into executable and arguments (split on whitespace)
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let (exe, args) = parts
+        .split_first()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "EDITOR is empty"))?;
+
+    let status = ProcessCommand::new(exe)
+        .args(args)
+        .arg(&path)
         .status()
         .map_err(Error::Io)?;
 

@@ -239,9 +239,17 @@ fn test_edit_modifies_body() {
         serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
     let id = v["id"].as_str().unwrap().to_string();
 
-    // Use sed as $EDITOR to append a line to the file
+    // Create a portable editor script that appends a line
+    let script = tmp.path().join("append-editor.sh");
+    std::fs::write(&script, "#!/bin/sh\necho 'appended line' >> \"$1\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     bea(&tmp)
-        .env("EDITOR", "sed -i '$ a\\appended line'")
+        .env("EDITOR", script.to_str().unwrap())
         .args(["edit", &id])
         .assert()
         .success()
@@ -302,9 +310,21 @@ fn test_edit_bad_frontmatter() {
         serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
     let id = v["id"].as_str().unwrap().to_string();
 
-    // Use sed to corrupt the frontmatter (replace status line with invalid yaml)
+    // Create a portable editor script that corrupts the frontmatter
+    let script = tmp.path().join("corrupt-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nsed 's/^status:.*/status: [invalid/' \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     bea(&tmp)
-        .env("EDITOR", "sed -i 's/^status:.*/status: [invalid/'")
+        .env("EDITOR", script.to_str().unwrap())
         .args(["edit", &id])
         .assert()
         .success()

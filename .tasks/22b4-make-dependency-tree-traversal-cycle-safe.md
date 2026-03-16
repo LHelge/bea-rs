@@ -1,10 +1,10 @@
 ---
 id: 22b4
 title: Make dependency tree traversal cycle-safe
-status: open
+status: done
 priority: P0
 created: 2026-03-16T10:37:28.208940Z
-updated: 2026-03-16T10:37:28.208940Z
+updated: 2026-03-16T17:50:43.732756Z
 tags:
 - code-review
 - graph
