@@ -511,3 +511,207 @@ fn test_prefix_not_found() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+// --- Regression tests for review-driven fixes ---
+
+/// 22b4: dep tree with a cycle shows [CYCLE] marker (doesn't hang).
+#[test]
+fn test_dep_tree_cycle_safe() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_a = create_task(&tmp, "Task A");
+    let id_b = create_task(&tmp, "Task B");
+
+    // A depends on B
+    bea(&tmp)
+        .args(["dep", "add", &id_a, &id_b])
+        .assert()
+        .success();
+
+    // Force a cycle by manually adding B -> A in the file
+    let bears_dir = tmp.path().join(".bears");
+    for entry in std::fs::read_dir(&bears_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&id_b)
+        {
+            let content = std::fs::read_to_string(&path).unwrap();
+            // Task B has no depends_on field; inject one before closing ---
+            let patched =
+                content.replacen("\n---\n", &format!("\ndepends_on:\n- {id_a}\n---\n"), 1);
+            std::fs::write(&path, patched).unwrap();
+            break;
+        }
+    }
+
+    // dep tree should complete (not hang) and show CYCLE marker in JSON
+    let out = bea(&tmp)
+        .args(["--json", "dep", "tree", &id_a])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+
+    // Find a node with cycle: true somewhere in the tree
+    fn has_cycle(node: &serde_json::Value) -> bool {
+        if node.get("cycle").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return true;
+        }
+        if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+            return children.iter().any(has_cycle);
+        }
+        false
+    }
+    assert!(has_cycle(&json), "expected cycle marker in dep tree JSON");
+}
+
+/// 22b4: `graph` command with cyclic data completes.
+#[test]
+fn test_graph_with_cycle_completes() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_a = create_task(&tmp, "Cycle A");
+    let id_b = create_task(&tmp, "Cycle B");
+
+    bea(&tmp)
+        .args(["dep", "add", &id_a, &id_b])
+        .assert()
+        .success();
+
+    // Force cycle in file
+    let bears_dir = tmp.path().join(".bears");
+    for entry in std::fs::read_dir(&bears_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&id_b)
+        {
+            let content = std::fs::read_to_string(&path).unwrap();
+            let patched =
+                content.replacen("\n---\n", &format!("\ndepends_on:\n- {id_a}\n---\n"), 1);
+            std::fs::write(&path, patched).unwrap();
+            break;
+        }
+    }
+
+    // graph should still complete, not loop forever
+    bea(&tmp).args(["--json", "graph"]).assert().success();
+}
+
+/// ff18: ready excludes tasks whose dependency was deleted (missing dep ID).
+#[test]
+fn test_ready_missing_dep_blocks() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_dep = create_task(&tmp, "Will be deleted");
+    let id_task = create_task(&tmp, "Depends on deleted");
+
+    bea(&tmp)
+        .args(["dep", "add", &id_task, &id_dep])
+        .assert()
+        .success();
+
+    // Delete the dependency task
+    bea(&tmp).args(["delete", &id_dep]).assert().success();
+
+    // The dependent task should NOT appear in ready
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Depends on deleted").not());
+}
+
+/// bc2f: init creates .bears/ directory (not .tasks/).
+#[test]
+fn test_init_creates_bears_dir() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    assert!(tmp.path().join(".bears").is_dir());
+    assert!(!tmp.path().join(".tasks").exists());
+}
+
+/// 612b: edit works with a multi-word EDITOR value.
+#[test]
+fn test_edit_multiword_editor() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Multi-word editor test");
+
+    // Create a wrapper script that accepts and ignores extra args
+    let script = tmp.path().join("my-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n# Ignore --wait flag, append text to file\necho 'added by editor' >> \"$2\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Use "script --wait" as EDITOR (multi-word)
+    let editor_val = format!("{} --wait", script.display());
+    bea(&tmp)
+        .env("EDITOR", &editor_val)
+        .args(["edit", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Edited task"));
+
+    // Verify body was modified
+    let out = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v["body"].as_str().unwrap().contains("added by editor"));
+}
+
+/// ff18: creating a task with unknown depends_on is rejected.
+#[test]
+fn test_update_with_unknown_dep_via_dep_add() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Has deps");
+
+    // dep add with nonexistent target should fail
+    bea(&tmp)
+        .args(["dep", "add", &id, "zzzz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+/// bc2f + 0e02: load_all skips files with invalid frontmatter gracefully.
+#[test]
+fn test_list_skips_corrupt_file() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    create_task(&tmp, "Good task");
+
+    // Write a corrupt .md file into .bears/
+    let corrupt_path = tmp.path().join(".bears/xxxx-corrupt.md");
+    std::fs::write(&corrupt_path, "not valid frontmatter at all").unwrap();
+
+    // list should still work, showing the good task
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Good task"));
+}

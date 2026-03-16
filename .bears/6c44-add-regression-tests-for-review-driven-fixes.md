@@ -1,10 +1,10 @@
 ---
 id: 6c44
 title: Add regression tests for review-driven fixes
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:37:28.288294Z
-updated: 2026-03-16T10:48:26.234950Z
+updated: 2026-03-16T21:09:28.729884886Z
 tags:
 - code-review
 - testing
