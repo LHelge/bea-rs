@@ -133,6 +133,59 @@ impl Task {
             body: String::new(),
         }
     }
+
+    /// Compact projection: id, title, status, priority, tags, and optional effective priority.
+    pub fn summary(&self, effective_priority: Option<&Priority>) -> TaskSummary {
+        TaskSummary {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            status: self.status.clone(),
+            priority: self.priority,
+            tags: self.tags.clone(),
+            effective_priority: effective_priority
+                .filter(|ep| *ep < &self.priority)
+                .copied(),
+        }
+    }
+
+    /// Full projection: all summary fields plus body, deps, parent, assignee, timestamps.
+    pub fn detail(&self, effective_priority: Option<&Priority>) -> TaskDetail {
+        TaskDetail {
+            summary: self.summary(effective_priority),
+            body: self.body.clone(),
+            depends_on: self.depends_on.clone(),
+            parent: self.parent.clone(),
+            assignee: self.assignee.clone(),
+            created: self.created,
+            updated: self.updated,
+        }
+    }
+}
+
+/// Compact task projection used by list/ready/create/update responses.
+#[derive(Debug, Serialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub priority: Priority,
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_priority: Option<Priority>,
+}
+
+/// Full task projection used by show/get_task responses.
+#[derive(Debug, Serialize)]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub summary: TaskSummary,
+    pub body: String,
+    pub depends_on: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub assignee: String,
+    pub created: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
 }
 
 /// Generate a short hex ID from UUID v4, retrying on collision.
@@ -344,5 +397,57 @@ updated: 2026-03-15T10:30:00Z
     fn test_status_from_str() {
         assert_eq!("in_progress".parse::<Status>().unwrap(), Status::InProgress);
         assert!("invalid".parse::<Status>().is_err());
+    }
+
+    #[test]
+    fn test_summary_basic_fields() {
+        let t = Task::new("ab12".into(), "Test task".into(), Priority::P2);
+        let s = t.summary(None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["id"], "ab12");
+        assert_eq!(json["title"], "Test task");
+        assert_eq!(json["status"], "open");
+        assert_eq!(json["priority"], "P2");
+        assert!(json.get("effective_priority").is_none());
+    }
+
+    #[test]
+    fn test_summary_with_effective_priority() {
+        let t = Task::new("cd34".into(), "High eff".into(), Priority::P3);
+        let s = t.summary(Some(&Priority::P1));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["effective_priority"], "P1");
+    }
+
+    #[test]
+    fn test_summary_effective_not_set_when_same() {
+        let t = Task::new("ef56".into(), "Same prio".into(), Priority::P1);
+        let s = t.summary(Some(&Priority::P1));
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("effective_priority").is_none());
+    }
+
+    #[test]
+    fn test_detail_has_all_fields() {
+        let mut t = Task::new("gh78".into(), "Detail test".into(), Priority::P1);
+        t.body = "Some body".into();
+        t.depends_on = vec!["ab12".into()];
+        t.parent = Some("zz99".into());
+        t.assignee = "alice".into();
+
+        let d = t.detail(Some(&Priority::P0));
+        let json = serde_json::to_value(&d).unwrap();
+        // Flattened summary fields
+        assert_eq!(json["id"], "gh78");
+        assert_eq!(json["title"], "Detail test");
+        assert_eq!(json["priority"], "P1");
+        assert_eq!(json["effective_priority"], "P0");
+        // Detail-only fields
+        assert_eq!(json["body"], "Some body");
+        assert_eq!(json["depends_on"], serde_json::json!(["ab12"]));
+        assert_eq!(json["parent"], "zz99");
+        assert_eq!(json["assignee"], "alice");
+        assert!(json.get("created").is_some());
+        assert!(json.get("updated").is_some());
     }
 }

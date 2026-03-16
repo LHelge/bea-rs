@@ -1,10 +1,10 @@
 ---
 id: '6133'
 title: Centralize task summary/detail projection models
-status: open
+status: done
 priority: P2
 created: 2026-03-16T10:37:28.259922Z
-updated: 2026-03-16T10:38:00.081173Z
+updated: 2026-03-16T19:32:57.756616Z
 tags:
 - code-review
 - refactor

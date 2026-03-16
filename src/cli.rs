@@ -382,7 +382,7 @@ async fn cmd_create(
     .await?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!("Created task {} — {}", t.id, t.title);
     }
@@ -401,10 +401,7 @@ async fn cmd_list(
     let eff = service::effective_priorities(base).await?;
 
     if json {
-        let summaries: Vec<_> = filtered
-            .iter()
-            .map(|t| task_summary_eff(t, eff.get(&t.id)))
-            .collect();
+        let summaries: Vec<_> = filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
         output(&summaries, true)?;
     } else {
         if filtered.is_empty() {
@@ -435,10 +432,7 @@ async fn cmd_ready(
     let eff = service::effective_priorities(base).await?;
 
     if json {
-        let summaries: Vec<_> = ready
-            .iter()
-            .map(|t| task_summary_eff(t, eff.get(&t.id)))
-            .collect();
+        let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
         output(&summaries, true)?;
     } else {
         if ready.is_empty() {
@@ -464,14 +458,7 @@ async fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
     let ep = eff.get(&t.id);
 
     if json {
-        let mut s = task_summary_eff(&t, ep);
-        s["body"] = serde_json::Value::String(t.body.clone());
-        s["depends_on"] = serde_json::json!(t.depends_on);
-        s["parent"] = serde_json::json!(t.parent);
-        s["assignee"] = serde_json::json!(t.assignee);
-        s["created"] = serde_json::json!(t.created);
-        s["updated"] = serde_json::json!(t.updated);
-        output(&s, true)?;
+        output(&t.detail(ep), true)?;
     } else {
         println!(
             "[{}] {}",
@@ -554,7 +541,7 @@ fn cmd_update(
     let t = service::update_task(base, id, status, priority, tags, assignee, body, title)?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!("Updated task {} — {}", t.id, t.title);
     }
@@ -565,7 +552,7 @@ fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
     let t = service::set_status(base, id, status)?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!(
             "[{}] {} → {}",
@@ -581,7 +568,7 @@ async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Res
     let t = service::add_dependency(base, id, depends_on).await?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!("[{}] now depends on [{}]", id, depends_on);
     }
@@ -592,7 +579,7 @@ fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result
     let t = service::remove_dependency(base, id, depends_on)?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!("[{}] no longer depends on [{}]", id, depends_on);
     }
@@ -746,7 +733,7 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
 
 async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
     let deleted = service::prune_tasks(base, include_done).await?;
-    let summaries: Vec<_> = deleted.iter().map(task_summary).collect();
+    let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
         output(&summaries, true)?;
@@ -755,11 +742,7 @@ async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
             println!("No tasks to prune.");
         } else {
             for s in &summaries {
-                println!(
-                    "Pruned {} — {}",
-                    s["id"].as_str().unwrap_or_default(),
-                    s["title"].as_str().unwrap_or_default()
-                );
+                println!("Pruned {} — {}", s.id, s.title);
             }
         }
     }
@@ -770,7 +753,7 @@ fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
     let t = service::delete_task(base, id)?;
 
     if json {
-        output(&task_summary(&t), true)?;
+        output(&t.summary(None), true)?;
     } else {
         println!("Deleted task {} — {}", t.id, t.title);
     }
@@ -781,7 +764,7 @@ async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<(
     let results = service::search_tasks(base, query, all).await?;
 
     if json {
-        let summaries: Vec<_> = results.iter().map(task_summary).collect();
+        let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
         output(&summaries, true)?;
     } else {
         if results.is_empty() {
@@ -853,29 +836,9 @@ fn cmd_edit(base: &Path, id: &str, json: bool) -> Result<()> {
     store::save(base, &edited)?;
 
     if json {
-        output(&task_summary(&edited), true)?;
+        output(&edited.summary(None), true)?;
     } else {
         println!("Edited task {} — {}", edited.id, edited.title);
     }
     Ok(())
-}
-
-fn task_summary(t: &Task) -> serde_json::Value {
-    serde_json::json!({
-        "id": t.id,
-        "title": t.title,
-        "status": t.status,
-        "priority": t.priority,
-        "tags": t.tags,
-    })
-}
-
-fn task_summary_eff(t: &Task, effective: Option<&Priority>) -> serde_json::Value {
-    let mut s = task_summary(t);
-    if let Some(eff) = effective
-        && eff < &t.priority
-    {
-        s["effective_priority"] = serde_json::json!(eff);
-    }
-    s
 }

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::Error;
 use crate::service;
-use crate::task::{Priority, Status, Task};
+use crate::task::{Priority, Status};
 
 #[derive(Clone)]
 pub struct BeaMcp {
@@ -105,26 +105,6 @@ pub struct PruneParams {
     include_done: Option<bool>,
 }
 
-fn task_summary(t: &Task) -> serde_json::Value {
-    serde_json::json!({
-        "id": t.id,
-        "title": t.title,
-        "status": t.status,
-        "priority": t.priority,
-        "tags": t.tags,
-    })
-}
-
-fn task_summary_eff(t: &Task, effective: Option<&Priority>) -> serde_json::Value {
-    let mut s = task_summary(t);
-    if let Some(eff) = effective
-        && eff < &t.priority
-    {
-        s["effective_priority"] = serde_json::json!(eff);
-    }
-    s
-}
-
 fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {
     let text = serde_json::to_string(&value)?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -164,10 +144,7 @@ impl BeaMcp {
                 let limit = params.limit.map(|v| v as usize);
                 let ready = service::list_ready(&self.base, params.tag.as_deref(), limit).await?;
                 let eff = service::effective_priorities(&self.base).await?;
-                let summaries: Vec<_> = ready
-                    .iter()
-                    .map(|t| task_summary_eff(t, eff.get(&t.id)))
-                    .collect();
+                let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -192,10 +169,8 @@ impl BeaMcp {
                 )
                 .await?;
                 let eff = service::effective_priorities(&self.base).await?;
-                let summaries: Vec<_> = filtered
-                    .iter()
-                    .map(|t| task_summary_eff(t, eff.get(&t.id)))
-                    .collect();
+                let summaries: Vec<_> =
+                    filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -211,14 +186,8 @@ impl BeaMcp {
             async {
                 let t = service::get_task(&self.base, &params.id)?;
                 let eff = service::effective_priorities(&self.base).await?;
-                let mut json = serde_json::to_value(&t)?;
-                json["body"] = serde_json::Value::String(t.body.clone());
-                if let Some(ep) = eff.get(&t.id)
-                    && ep < &t.priority
-                {
-                    json["effective_priority"] = serde_json::json!(ep);
-                }
-                ok_json(json)
+                let ep = eff.get(&t.id);
+                ok_json(serde_json::to_value(t.detail(ep))?)
             }
             .await,
         )
@@ -248,7 +217,7 @@ impl BeaMcp {
                     params.body.unwrap_or_default(),
                 )
                 .await?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -273,7 +242,7 @@ impl BeaMcp {
                     params.body,
                     None, // MCP doesn't support title update currently
                 )?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -287,7 +256,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::set_status(&self.base, &params.id, Status::InProgress)?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -301,7 +270,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::set_status(&self.base, &params.id, Status::Done)?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -315,7 +284,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::add_dependency(&self.base, &params.id, &params.depends_on).await?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -329,7 +298,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::remove_dependency(&self.base, &params.id, &params.depends_on)?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -343,7 +312,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let results = service::search_tasks(&self.base, &params.query, true).await?;
-                let summaries: Vec<_> = results.iter().map(task_summary).collect();
+                let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -358,7 +327,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::set_status(&self.base, &params.id, Status::Cancelled)?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
@@ -375,7 +344,7 @@ impl BeaMcp {
             async {
                 let include_done = params.include_done.unwrap_or(false);
                 let deleted = service::prune_tasks(&self.base, include_done).await?;
-                let summaries: Vec<_> = deleted.iter().map(task_summary).collect();
+                let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -390,7 +359,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let t = service::delete_task(&self.base, &params.id)?;
-                ok_json(task_summary(&t))
+                ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
         )
