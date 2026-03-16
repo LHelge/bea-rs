@@ -118,25 +118,31 @@ fn task_summary(t: &Task) -> serde_json::Value {
     })
 }
 
-fn ok_json(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
-    let text = serde_json::to_string(&value)
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("JSON error: {e}"), None))?;
+fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {
+    let text = serde_json::to_string(&value)?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-fn err_result(e: Error) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
+/// Boundary: convert domain errors into MCP tool-level errors (isError=true),
+/// not JSON-RPC protocol errors.
+fn tool_ok(r: Result<CallToolResult, Error>) -> Result<CallToolResult, rmcp::ErrorData> {
+    Ok(r.unwrap_or_else(|e| CallToolResult::error(vec![Content::text(e.to_string())])))
 }
 
-/// Map our domain errors to MCP results. Tool-level errors become isError=true results,
-/// not JSON-RPC errors (per MCP convention).
-macro_rules! try_tool {
-    ($expr:expr) => {
-        match $expr {
-            Ok(v) => v,
-            Err(e) => return err_result(e),
-        }
-    };
+fn parse_status(s: &str) -> Result<Status, Error> {
+    s.parse().map_err(|_| Error::InvalidFilter {
+        field: "status".into(),
+        value: s.into(),
+        expected: "open, in_progress, done, blocked, cancelled".into(),
+    })
+}
+
+fn parse_priority(s: &str) -> Result<Priority, Error> {
+    s.parse().map_err(|_| Error::InvalidFilter {
+        field: "priority".into(),
+        value: s.into(),
+        expected: "P0, P1, P2, P3".into(),
+    })
 }
 
 #[tool_router]
@@ -146,12 +152,17 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<ListReadyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let graph = Graph::build(&tasks);
-        let limit = params.limit.map(|v| v as usize);
-        let ready = graph.ready(&tasks, params.tag.as_deref(), limit);
-        let summaries: Vec<_> = ready.iter().map(|t| task_summary(t)).collect();
-        ok_json(serde_json::json!(summaries))
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let graph = Graph::build(&tasks);
+                let limit = params.limit.map(|v| v as usize);
+                let ready = graph.ready(&tasks, params.tag.as_deref(), limit);
+                let summaries: Vec<_> = ready.iter().map(|t| task_summary(t)).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "List tasks with optional filters")]
@@ -159,25 +170,31 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<ListTasksFilterParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let status: Option<Status> = params.status.as_deref().and_then(|s| s.parse().ok());
-        let priority: Option<Priority> = params.priority.as_deref().and_then(|s| s.parse().ok());
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let status = params.status.as_deref().map(parse_status).transpose()?;
+                let priority = params.priority.as_deref().map(parse_priority).transpose()?;
 
-        let mut filtered: Vec<&Task> = tasks
-            .values()
-            .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
-            .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
-            .filter(|t| {
-                params
-                    .tag
-                    .as_ref()
-                    .is_none_or(|tag| t.tags.iter().any(|tt| tt == tag))
-            })
-            .collect();
-        filtered.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+                let mut filtered: Vec<&Task> = tasks
+                    .values()
+                    .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
+                    .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
+                    .filter(|t| {
+                        params
+                            .tag
+                            .as_ref()
+                            .is_none_or(|tag| t.tags.iter().any(|tt| tt == tag))
+                    })
+                    .collect();
+                filtered
+                    .sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
-        let summaries: Vec<_> = filtered.iter().map(|t| task_summary(t)).collect();
-        ok_json(serde_json::json!(summaries))
+                let summaries: Vec<_> = filtered.iter().map(|t| task_summary(t)).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Get full details of a single task")]
@@ -185,20 +202,15 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let t = try_tool!(store::load_one(&self.base, &params.id));
-        ok_json(serde_json::json!({
-            "id": t.id,
-            "title": t.title,
-            "status": t.status,
-            "priority": t.priority,
-            "tags": t.tags,
-            "depends_on": t.depends_on,
-            "parent": t.parent,
-            "assignee": t.assignee,
-            "created": t.created,
-            "updated": t.updated,
-            "body": t.body,
-        }))
+        tool_ok(
+            async {
+                let t = store::load_one(&self.base, &params.id)?;
+                let mut json = serde_json::to_value(&t)?;
+                json["body"] = serde_json::Value::String(t.body);
+                ok_json(json)
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Create a new task")]
@@ -206,34 +218,40 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let priority: Priority = params
-            .priority
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(Priority::P2);
+        tool_ok(
+            async {
+                let priority = params
+                    .priority
+                    .as_deref()
+                    .map(parse_priority)
+                    .transpose()?
+                    .unwrap_or(Priority::P2);
 
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-        let id = task::generate_id(&existing_ids);
+                let tasks = store::load_all(&self.base).await?;
+                let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
+                let id = task::generate_id(&existing_ids);
 
-        let depends_on = params.depends_on.unwrap_or_default();
-        let unknown: Vec<String> = depends_on
-            .iter()
-            .filter(|dep| !tasks.contains_key(dep.as_str()))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            return err_result(Error::UnknownDependency { ids: unknown });
-        }
+                let depends_on = params.depends_on.unwrap_or_default();
+                let unknown: Vec<String> = depends_on
+                    .iter()
+                    .filter(|dep| !tasks.contains_key(dep.as_str()))
+                    .cloned()
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err(Error::UnknownDependency { ids: unknown });
+                }
 
-        let mut t = Task::new(id, params.title, priority);
-        t.tags = params.tags.unwrap_or_default();
-        t.depends_on = depends_on;
-        t.parent = params.parent;
-        t.body = params.body.unwrap_or_default();
+                let mut t = Task::new(id, params.title, priority);
+                t.tags = params.tags.unwrap_or_default();
+                t.depends_on = depends_on;
+                t.parent = params.parent;
+                t.body = params.body.unwrap_or_default();
 
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Update task fields")]
@@ -241,35 +259,32 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
+        tool_ok(
+            async {
+                let mut t = store::load_one(&self.base, &params.id)?;
 
-        if let Some(s) = params
-            .status
-            .as_deref()
-            .and_then(|s| s.parse::<Status>().ok())
-        {
-            t.status = s;
-        }
-        if let Some(p) = params
-            .priority
-            .as_deref()
-            .and_then(|s| s.parse::<Priority>().ok())
-        {
-            t.priority = p;
-        }
-        if let Some(tags) = params.tags {
-            t.tags = tags;
-        }
-        if let Some(a) = params.assignee {
-            t.assignee = a;
-        }
-        if let Some(b) = params.body {
-            t.body = b;
-        }
+                if let Some(s) = params.status.as_deref() {
+                    t.status = parse_status(s)?;
+                }
+                if let Some(s) = params.priority.as_deref() {
+                    t.priority = parse_priority(s)?;
+                }
+                if let Some(tags) = params.tags {
+                    t.tags = tags;
+                }
+                if let Some(a) = params.assignee {
+                    t.assignee = a;
+                }
+                if let Some(b) = params.body {
+                    t.body = b;
+                }
 
-        t.updated = Utc::now();
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+                t.updated = Utc::now();
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Start a task (set status to in_progress)")]
@@ -277,11 +292,16 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
-        t.status = Status::InProgress;
-        t.updated = Utc::now();
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+        tool_ok(
+            async {
+                let mut t = store::load_one(&self.base, &params.id)?;
+                t.status = Status::InProgress;
+                t.updated = Utc::now();
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Complete a task (set status to done)")]
@@ -289,11 +309,16 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
-        t.status = Status::Done;
-        t.updated = Utc::now();
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+        tool_ok(
+            async {
+                let mut t = store::load_one(&self.base, &params.id)?;
+                t.status = Status::Done;
+                t.updated = Utc::now();
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Add a dependency between tasks")]
@@ -301,27 +326,30 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<DepParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // Verify dependency target exists
-        try_tool!(store::load_one(&self.base, &params.depends_on));
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
+        tool_ok(
+            async {
+                store::load_one(&self.base, &params.depends_on)?;
+                let mut t = store::load_one(&self.base, &params.id)?;
 
-        // Check for cycles
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let graph = Graph::build(&tasks);
-        if graph.would_cycle(&params.id, &params.depends_on) {
-            return err_result(Error::CycleDetected {
-                from: params.id,
-                to: params.depends_on,
-            });
-        }
+                let tasks = store::load_all(&self.base).await?;
+                let graph = Graph::build(&tasks);
+                if graph.would_cycle(&params.id, &params.depends_on) {
+                    return Err(Error::CycleDetected {
+                        from: params.id,
+                        to: params.depends_on,
+                    });
+                }
 
-        if !t.depends_on.contains(&params.depends_on) {
-            t.depends_on.push(params.depends_on);
-            t.updated = Utc::now();
-            try_tool!(store::save(&self.base, &t));
-        }
+                if !t.depends_on.contains(&params.depends_on) {
+                    t.depends_on.push(params.depends_on);
+                    t.updated = Utc::now();
+                    store::save(&self.base, &t)?;
+                }
 
-        ok_json(task_summary(&t))
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Remove a dependency between tasks")]
@@ -329,11 +357,16 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<DepParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
-        t.depends_on.retain(|d| d != &params.depends_on);
-        t.updated = Utc::now();
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+        tool_ok(
+            async {
+                let mut t = store::load_one(&self.base, &params.id)?;
+                t.depends_on.retain(|d| d != &params.depends_on);
+                t.updated = Utc::now();
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Search tasks by text query")]
@@ -341,23 +374,28 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let query_lower = params.query.to_lowercase();
-        let mut results: Vec<&Task> = tasks
-            .values()
-            .filter(|t| {
-                t.title.to_lowercase().contains(&query_lower)
-                    || t.body.to_lowercase().contains(&query_lower)
-                    || t.tags
-                        .iter()
-                        .any(|tag| tag.to_lowercase().contains(&query_lower))
-                    || t.id.contains(&query_lower)
-            })
-            .collect();
-        results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let query_lower = params.query.to_lowercase();
+                let mut results: Vec<&Task> = tasks
+                    .values()
+                    .filter(|t| {
+                        t.title.to_lowercase().contains(&query_lower)
+                            || t.body.to_lowercase().contains(&query_lower)
+                            || t.tags
+                                .iter()
+                                .any(|tag| tag.to_lowercase().contains(&query_lower))
+                            || t.id.contains(&query_lower)
+                    })
+                    .collect();
+                results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
-        let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
-        ok_json(serde_json::json!(summaries))
+                let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Cancel a task (set status to cancelled)")]
@@ -365,11 +403,16 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut t = try_tool!(store::load_one(&self.base, &params.id));
-        t.status = Status::Cancelled;
-        t.updated = Utc::now();
-        try_tool!(store::save(&self.base, &t));
-        ok_json(task_summary(&t))
+        tool_ok(
+            async {
+                let mut t = store::load_one(&self.base, &params.id)?;
+                t.status = Status::Cancelled;
+                t.updated = Utc::now();
+                store::save(&self.base, &t)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(
@@ -379,18 +422,25 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<PruneParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let include_done = params.include_done.unwrap_or(false);
-        let to_delete: Vec<&Task> = tasks
-            .values()
-            .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
-            .collect();
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let include_done = params.include_done.unwrap_or(false);
+                let to_delete: Vec<&Task> = tasks
+                    .values()
+                    .filter(|t| {
+                        t.status == Status::Cancelled || (include_done && t.status == Status::Done)
+                    })
+                    .collect();
 
-        let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
-        for t in &to_delete {
-            try_tool!(store::delete(&self.base, &t.id));
-        }
-        ok_json(serde_json::json!(summaries))
+                let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
+                for t in &to_delete {
+                    store::delete(&self.base, &t.id)?;
+                }
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Permanently delete a task by ID")]
@@ -398,17 +448,27 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let t = try_tool!(store::load_one(&self.base, &params.id));
-        try_tool!(store::delete(&self.base, &params.id));
-        ok_json(task_summary(&t))
+        tool_ok(
+            async {
+                let t = store::load_one(&self.base, &params.id)?;
+                store::delete(&self.base, &params.id)?;
+                ok_json(task_summary(&t))
+            }
+            .await,
+        )
     }
 
     #[tool(description = "Get the full dependency graph as an adjacency list")]
     async fn get_graph(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        let tasks = try_tool!(store::load_all(&self.base).await);
-        let graph = Graph::build(&tasks);
-        let adj = graph.adjacency_list();
-        ok_json(serde_json::json!(adj))
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let graph = Graph::build(&tasks);
+                let adj = graph.adjacency_list();
+                ok_json(serde_json::json!(adj))
+            }
+            .await,
+        )
     }
 }
 
@@ -455,6 +515,13 @@ mod tests {
             _ => panic!("expected text content"),
         };
         serde_json::from_str(text).unwrap()
+    }
+
+    fn extract_text(result: &CallToolResult) -> &str {
+        match &result.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        }
     }
 
     #[tokio::test]
@@ -731,5 +798,84 @@ mod tests {
         let graph = mcp.get_graph().await.unwrap();
         let json = extract_json(&graph);
         assert!(json.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_invalid_status_filter() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: Some("bogus".into()),
+                priority: None,
+                tag: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(extract_text(&result).contains("invalid status"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_invalid_priority_filter() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: Some("P9".into()),
+                tag: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(extract_text(&result).contains("invalid priority"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_create_invalid_priority() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Bad priority".into(),
+                priority: Some("high".into()),
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(extract_text(&result).contains("invalid priority"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_update_invalid_status() {
+        let (_tmp, mcp) = setup();
+        let t = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&t)["id"].as_str().unwrap().to_string();
+
+        let result = mcp
+            .update_task(Parameters(UpdateTaskParams {
+                id,
+                status: Some("invalid".into()),
+                priority: None,
+                tags: None,
+                assignee: None,
+                body: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(extract_text(&result).contains("invalid status"));
     }
 }

@@ -16,6 +16,13 @@ pub enum Error {
     #[error("unknown dependency ID(s): {}", ids.join(", "))]
     UnknownDependency { ids: Vec<String> },
 
+    #[error("invalid {field}: {value} (expected {expected})")]
+    InvalidFilter {
+        field: String,
+        value: String,
+        expected: String,
+    },
+
     #[error("invalid frontmatter in {path}: {reason}")]
     InvalidFrontmatter { path: PathBuf, reason: String },
 

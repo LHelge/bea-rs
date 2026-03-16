@@ -1,10 +1,10 @@
 ---
 id: ff18
 title: Validate dependency IDs on create/update and in ready
-status: open
+status: done
 priority: P0
 created: 2026-03-16T10:37:28.216576Z
-updated: 2026-03-16T10:37:28.216576Z
+updated: 2026-03-16T18:00:40.255505Z
 tags:
 - code-review
 - validation
