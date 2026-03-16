@@ -1,7 +1,5 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -10,9 +8,8 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
 use crate::error::Error;
-use crate::graph::Graph;
-use crate::store;
-use crate::task::{self, Priority, Status, Task};
+use crate::service;
+use crate::task::{Priority, Status, Task};
 
 #[derive(Clone)]
 pub struct BeaMcp {
@@ -154,11 +151,9 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let tasks = store::load_all(&self.base).await?;
-                let graph = Graph::build(&tasks);
                 let limit = params.limit.map(|v| v as usize);
-                let ready = graph.ready(&tasks, params.tag.as_deref(), limit);
-                let summaries: Vec<_> = ready.iter().map(|t| task_summary(t)).collect();
+                let ready = service::list_ready(&self.base, params.tag.as_deref(), limit).await?;
+                let summaries: Vec<_> = ready.iter().map(task_summary).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -172,25 +167,17 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let tasks = store::load_all(&self.base).await?;
                 let status = params.status.as_deref().map(parse_status).transpose()?;
                 let priority = params.priority.as_deref().map(parse_priority).transpose()?;
-
-                let mut filtered: Vec<&Task> = tasks
-                    .values()
-                    .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
-                    .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
-                    .filter(|t| {
-                        params
-                            .tag
-                            .as_ref()
-                            .is_none_or(|tag| t.tags.iter().any(|tt| tt == tag))
-                    })
-                    .collect();
-                filtered
-                    .sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
-
-                let summaries: Vec<_> = filtered.iter().map(|t| task_summary(t)).collect();
+                let filtered = service::list_tasks(
+                    &self.base,
+                    status,
+                    priority,
+                    params.tag.as_deref(),
+                    true, // MCP always shows all statuses unless filtered
+                )
+                .await?;
+                let summaries: Vec<_> = filtered.iter().map(task_summary).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -204,7 +191,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let t = store::load_one(&self.base, &params.id)?;
+                let t = service::get_task(&self.base, &params.id)?;
                 let mut json = serde_json::to_value(&t)?;
                 json["body"] = serde_json::Value::String(t.body);
                 ok_json(json)
@@ -227,27 +214,16 @@ impl BeaMcp {
                     .transpose()?
                     .unwrap_or(Priority::P2);
 
-                let tasks = store::load_all(&self.base).await?;
-                let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-                let id = task::generate_id(&existing_ids);
-
-                let depends_on = params.depends_on.unwrap_or_default();
-                let unknown: Vec<String> = depends_on
-                    .iter()
-                    .filter(|dep| !tasks.contains_key(dep.as_str()))
-                    .cloned()
-                    .collect();
-                if !unknown.is_empty() {
-                    return Err(Error::UnknownDependency { ids: unknown });
-                }
-
-                let mut t = Task::new(id, params.title, priority);
-                t.tags = params.tags.unwrap_or_default();
-                t.depends_on = depends_on;
-                t.parent = params.parent;
-                t.body = params.body.unwrap_or_default();
-
-                store::save(&self.base, &t)?;
+                let t = service::create_task(
+                    &self.base,
+                    params.title,
+                    priority,
+                    params.tags.unwrap_or_default(),
+                    params.depends_on.unwrap_or_default(),
+                    params.parent,
+                    params.body.unwrap_or_default(),
+                )
+                .await?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -261,26 +237,18 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let mut t = store::load_one(&self.base, &params.id)?;
-
-                if let Some(s) = params.status.as_deref() {
-                    t.status = parse_status(s)?;
-                }
-                if let Some(s) = params.priority.as_deref() {
-                    t.priority = parse_priority(s)?;
-                }
-                if let Some(tags) = params.tags {
-                    t.tags = tags;
-                }
-                if let Some(a) = params.assignee {
-                    t.assignee = a;
-                }
-                if let Some(b) = params.body {
-                    t.body = b;
-                }
-
-                t.updated = Utc::now();
-                store::save(&self.base, &t)?;
+                let status = params.status.as_deref().map(parse_status).transpose()?;
+                let priority = params.priority.as_deref().map(parse_priority).transpose()?;
+                let t = service::update_task(
+                    &self.base,
+                    &params.id,
+                    status,
+                    priority,
+                    params.tags,
+                    params.assignee,
+                    params.body,
+                    None, // MCP doesn't support title update currently
+                )?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -294,10 +262,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let mut t = store::load_one(&self.base, &params.id)?;
-                t.status = Status::InProgress;
-                t.updated = Utc::now();
-                store::save(&self.base, &t)?;
+                let t = service::set_status(&self.base, &params.id, Status::InProgress)?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -311,10 +276,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let mut t = store::load_one(&self.base, &params.id)?;
-                t.status = Status::Done;
-                t.updated = Utc::now();
-                store::save(&self.base, &t)?;
+                let t = service::set_status(&self.base, &params.id, Status::Done)?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -328,24 +290,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                store::load_one(&self.base, &params.depends_on)?;
-                let mut t = store::load_one(&self.base, &params.id)?;
-
-                let tasks = store::load_all(&self.base).await?;
-                let graph = Graph::build(&tasks);
-                if graph.would_cycle(&params.id, &params.depends_on) {
-                    return Err(Error::CycleDetected {
-                        from: params.id,
-                        to: params.depends_on,
-                    });
-                }
-
-                if !t.depends_on.contains(&params.depends_on) {
-                    t.depends_on.push(params.depends_on);
-                    t.updated = Utc::now();
-                    store::save(&self.base, &t)?;
-                }
-
+                let t = service::add_dependency(&self.base, &params.id, &params.depends_on).await?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -359,10 +304,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let mut t = store::load_one(&self.base, &params.id)?;
-                t.depends_on.retain(|d| d != &params.depends_on);
-                t.updated = Utc::now();
-                store::save(&self.base, &t)?;
+                let t = service::remove_dependency(&self.base, &params.id, &params.depends_on)?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -376,22 +318,8 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let tasks = store::load_all(&self.base).await?;
-                let query_lower = params.query.to_lowercase();
-                let mut results: Vec<&Task> = tasks
-                    .values()
-                    .filter(|t| {
-                        t.title.to_lowercase().contains(&query_lower)
-                            || t.body.to_lowercase().contains(&query_lower)
-                            || t.tags
-                                .iter()
-                                .any(|tag| tag.to_lowercase().contains(&query_lower))
-                            || t.id.contains(&query_lower)
-                    })
-                    .collect();
-                results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
-
-                let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
+                let results = service::search_tasks(&self.base, &params.query, true).await?;
+                let summaries: Vec<_> = results.iter().map(task_summary).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -405,10 +333,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let mut t = store::load_one(&self.base, &params.id)?;
-                t.status = Status::Cancelled;
-                t.updated = Utc::now();
-                store::save(&self.base, &t)?;
+                let t = service::set_status(&self.base, &params.id, Status::Cancelled)?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -424,19 +349,9 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let tasks = store::load_all(&self.base).await?;
                 let include_done = params.include_done.unwrap_or(false);
-                let to_delete: Vec<&Task> = tasks
-                    .values()
-                    .filter(|t| {
-                        t.status == Status::Cancelled || (include_done && t.status == Status::Done)
-                    })
-                    .collect();
-
-                let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
-                for t in &to_delete {
-                    store::delete(&self.base, &t.id)?;
-                }
+                let deleted = service::prune_tasks(&self.base, include_done).await?;
+                let summaries: Vec<_> = deleted.iter().map(task_summary).collect();
                 ok_json(serde_json::json!(summaries))
             }
             .await,
@@ -450,8 +365,7 @@ impl BeaMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let t = store::load_one(&self.base, &params.id)?;
-                store::delete(&self.base, &params.id)?;
+                let t = service::delete_task(&self.base, &params.id)?;
                 ok_json(task_summary(&t))
             }
             .await,
@@ -462,8 +376,7 @@ impl BeaMcp {
     async fn get_graph(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
-                let tasks = store::load_all(&self.base).await?;
-                let graph = Graph::build(&tasks);
+                let (_, graph) = service::get_graph(&self.base).await?;
                 let adj = graph.adjacency_list();
                 ok_json(serde_json::json!(adj))
             }
@@ -500,6 +413,7 @@ pub async fn run(base: &Path) -> crate::error::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, BeaMcp) {

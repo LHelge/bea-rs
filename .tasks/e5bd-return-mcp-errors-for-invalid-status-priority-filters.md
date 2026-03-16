@@ -1,10 +1,10 @@
 ---
 id: e5bd
 title: Return MCP errors for invalid status/priority filters
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:37:28.238294Z
-updated: 2026-03-16T10:37:28.238294Z
+updated: 2026-03-16T18:22:12.841951Z
 tags:
 - code-review
 - mcp

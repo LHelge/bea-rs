@@ -11,7 +11,8 @@ use owo_colors::Style;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::graph::{DepNode, DepNodeJson, Graph};
+use crate::graph::{DepNode, DepNodeJson};
+use crate::service;
 use crate::store;
 use crate::task::{self, Priority, Status, Task};
 
@@ -359,29 +360,16 @@ async fn cmd_create(
     body: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-    let id = task::generate_id(&existing_ids);
-
-    // Validate depends_on IDs exist
-    let unknown: Vec<String> = depends_on
-        .iter()
-        .filter(|dep| !tasks.contains_key(dep.as_str()))
-        .cloned()
-        .collect();
-    if !unknown.is_empty() {
-        return Err(Error::UnknownDependency { ids: unknown });
-    }
-
-    let mut t = Task::new(id, title, priority);
-    t.tags = tags;
-    t.depends_on = depends_on;
-    t.parent = parent;
-    if let Some(body) = body {
-        t.body = body;
-    }
-
-    store::save(base, &t)?;
+    let t = service::create_task(
+        base,
+        title,
+        priority,
+        tags,
+        depends_on,
+        parent,
+        body.unwrap_or_default(),
+    )
+    .await?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -399,27 +387,10 @@ async fn cmd_list(
     all: bool,
     json: bool,
 ) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let mut filtered: Vec<&Task> = tasks
-        .values()
-        .filter(|t| {
-            if status.is_some() || all {
-                true
-            } else {
-                !matches!(t.status, Status::Done | Status::Cancelled)
-            }
-        })
-        .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
-        .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
-        .filter(|t| {
-            tag.as_ref()
-                .is_none_or(|tag| t.tags.iter().any(|tt| tt == tag))
-        })
-        .collect();
-    filtered.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    let filtered = service::list_tasks(base, status, priority, tag.as_deref(), all).await?;
 
     if json {
-        let summaries: Vec<_> = filtered.iter().map(|t| task_summary(t)).collect();
+        let summaries: Vec<_> = filtered.iter().map(task_summary).collect();
         output(&summaries, true)?;
     } else {
         if filtered.is_empty() {
@@ -446,12 +417,10 @@ async fn cmd_ready(
     limit: Option<usize>,
     json: bool,
 ) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
-    let ready = graph.ready(&tasks, tag.as_deref(), limit);
+    let ready = service::list_ready(base, tag.as_deref(), limit).await?;
 
     if json {
-        let summaries: Vec<_> = ready.iter().map(|t| task_summary(t)).collect();
+        let summaries: Vec<_> = ready.iter().map(task_summary).collect();
         output(&summaries, true)?;
     } else {
         if ready.is_empty() {
@@ -472,7 +441,7 @@ async fn cmd_ready(
 }
 
 fn cmd_show(base: &Path, id: &str, json: bool) -> Result<()> {
-    let t = store::load_one(base, id)?;
+    let t = service::get_task(base, id)?;
 
     if json {
         let mut s = task_summary(&t);
@@ -562,29 +531,7 @@ fn cmd_update(
     title: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let mut t = store::load_one(base, id)?;
-
-    if let Some(s) = status {
-        t.status = s;
-    }
-    if let Some(p) = priority {
-        t.priority = p;
-    }
-    if let Some(tags) = tags {
-        t.tags = tags;
-    }
-    if let Some(a) = assignee {
-        t.assignee = a;
-    }
-    if let Some(b) = body {
-        t.body = b;
-    }
-    if let Some(title) = title {
-        t.title = title;
-    }
-    t.updated = Utc::now();
-
-    store::save(base, &t)?;
+    let t = service::update_task(base, id, status, priority, tags, assignee, body, title)?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -595,10 +542,7 @@ fn cmd_update(
 }
 
 fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
-    let mut t = store::load_one(base, id)?;
-    t.status = status;
-    t.updated = Utc::now();
-    store::save(base, &t)?;
+    let t = service::set_status(base, id, status)?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -614,25 +558,7 @@ fn cmd_status(base: &Path, id: &str, status: Status, json: bool) -> Result<()> {
 }
 
 async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
-    // Verify both tasks exist
-    let _ = store::load_one(base, depends_on)?;
-    let mut t = store::load_one(base, id)?;
-
-    // Check for cycles
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
-    if graph.would_cycle(id, depends_on) {
-        return Err(Error::CycleDetected {
-            from: id.into(),
-            to: depends_on.into(),
-        });
-    }
-
-    if !t.depends_on.contains(&depends_on.to_string()) {
-        t.depends_on.push(depends_on.to_string());
-        t.updated = Utc::now();
-        store::save(base, &t)?;
-    }
+    let t = service::add_dependency(base, id, depends_on).await?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -643,10 +569,7 @@ async fn cmd_dep_add(base: &Path, id: &str, depends_on: &str, json: bool) -> Res
 }
 
 fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result<()> {
-    let mut t = store::load_one(base, id)?;
-    t.depends_on.retain(|d| d != depends_on);
-    t.updated = Utc::now();
-    store::save(base, &t)?;
+    let t = service::remove_dependency(base, id, depends_on)?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -657,8 +580,7 @@ fn cmd_dep_remove(base: &Path, id: &str, depends_on: &str, json: bool) -> Result
 }
 
 async fn cmd_dep_tree(base: &Path, id: &str, json: bool) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
+    let (tasks, graph) = service::get_graph(base).await?;
     let tree = graph
         .dep_tree(&tasks, id)
         .ok_or_else(|| Error::TaskNotFound(id.into()))?;
@@ -747,8 +669,7 @@ fn print_tree(
 }
 
 async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let graph = Graph::build(&tasks);
+    let (tasks, graph) = service::get_graph(base).await?;
 
     if json {
         let adj = graph.adjacency_list();
@@ -788,21 +709,13 @@ async fn cmd_graph(base: &Path, all: bool, json: bool) -> Result<()> {
 }
 
 async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let to_delete: Vec<&Task> = tasks
-        .values()
-        .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
-        .collect();
-
-    let summaries: Vec<_> = to_delete.iter().map(|t| task_summary(t)).collect();
-    for t in &to_delete {
-        store::delete(base, &t.id)?;
-    }
+    let deleted = service::prune_tasks(base, include_done).await?;
+    let summaries: Vec<_> = deleted.iter().map(task_summary).collect();
 
     if json {
         output(&summaries, true)?;
     } else {
-        if to_delete.is_empty() {
+        if deleted.is_empty() {
             println!("No tasks to prune.");
         } else {
             for s in &summaries {
@@ -818,8 +731,7 @@ async fn cmd_prune(base: &Path, include_done: bool, json: bool) -> Result<()> {
 }
 
 fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
-    let t = store::load_one(base, id)?;
-    store::delete(base, id)?;
+    let t = service::delete_task(base, id)?;
 
     if json {
         output(&task_summary(&t), true)?;
@@ -830,24 +742,10 @@ fn cmd_delete(base: &Path, id: &str, json: bool) -> Result<()> {
 }
 
 async fn cmd_search(base: &Path, query: &str, all: bool, json: bool) -> Result<()> {
-    let tasks = store::load_all(base).await?;
-    let query_lower = query.to_lowercase();
-    let mut results: Vec<&Task> = tasks
-        .values()
-        .filter(|t| all || !matches!(t.status, Status::Done | Status::Cancelled))
-        .filter(|t| {
-            t.title.to_lowercase().contains(&query_lower)
-                || t.body.to_lowercase().contains(&query_lower)
-                || t.tags
-                    .iter()
-                    .any(|tag| tag.to_lowercase().contains(&query_lower))
-                || t.id.contains(&query_lower)
-        })
-        .collect();
-    results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    let results = service::search_tasks(base, query, all).await?;
 
     if json {
-        let summaries: Vec<_> = results.iter().map(|t| task_summary(t)).collect();
+        let summaries: Vec<_> = results.iter().map(task_summary).collect();
         output(&summaries, true)?;
     } else {
         if results.is_empty() {

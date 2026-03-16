@@ -1,10 +1,10 @@
 ---
 id: 482d
 title: Extract shared app service used by CLI and MCP
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:37:28.252974Z
-updated: 2026-03-16T10:37:28.252974Z
+updated: 2026-03-16T18:38:47.313891Z
 tags:
 - code-review
 - architecture

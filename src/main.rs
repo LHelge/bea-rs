@@ -2,6 +2,7 @@ mod cli;
 mod error;
 mod graph;
 mod mcp;
+mod service;
 mod store;
 mod task;
 
