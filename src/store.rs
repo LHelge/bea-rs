@@ -120,6 +120,31 @@ pub fn save(base: &Path, t: &Task) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a task ID or unique prefix to a full task ID.
+/// Returns the exact match if found, or the unique prefix match.
+/// Errors if zero or multiple tasks match.
+pub fn resolve_prefix(tasks: &HashMap<String, Task>, prefix: &str) -> Result<String> {
+    // Exact match first
+    if tasks.contains_key(prefix) {
+        return Ok(prefix.to_string());
+    }
+
+    let matches: Vec<&String> = tasks.keys().filter(|id| id.starts_with(prefix)).collect();
+
+    match matches.len() {
+        0 => Err(Error::TaskNotFound(prefix.into())),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let mut sorted = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            sorted.sort();
+            Err(Error::AmbiguousPrefix {
+                prefix: prefix.into(),
+                matches: sorted.join(", "),
+            })
+        }
+    }
+}
+
 /// Delete a task file by ID.
 pub fn delete(base: &Path, id: &str) -> Result<()> {
     let path = find_task_path(base, id)?;
@@ -268,5 +293,55 @@ mod tests {
 
         delete(tmp.path(), "ef56").unwrap();
         assert!(find_task_path(tmp.path(), "ef56").is_err());
+    }
+
+    #[test]
+    fn test_resolve_prefix_exact_match() {
+        let mut tasks = HashMap::new();
+        tasks.insert(
+            "ab12".into(),
+            Task::new("ab12".into(), "T1".into(), Priority::P2),
+        );
+        assert_eq!(resolve_prefix(&tasks, "ab12").unwrap(), "ab12");
+    }
+
+    #[test]
+    fn test_resolve_prefix_unique() {
+        let mut tasks = HashMap::new();
+        tasks.insert(
+            "ab12".into(),
+            Task::new("ab12".into(), "T1".into(), Priority::P2),
+        );
+        tasks.insert(
+            "cd34".into(),
+            Task::new("cd34".into(), "T2".into(), Priority::P2),
+        );
+        assert_eq!(resolve_prefix(&tasks, "ab").unwrap(), "ab12");
+    }
+
+    #[test]
+    fn test_resolve_prefix_ambiguous() {
+        let mut tasks = HashMap::new();
+        tasks.insert(
+            "ab12".into(),
+            Task::new("ab12".into(), "T1".into(), Priority::P2),
+        );
+        tasks.insert(
+            "ab34".into(),
+            Task::new("ab34".into(), "T2".into(), Priority::P2),
+        );
+        let err = resolve_prefix(&tasks, "ab").unwrap_err();
+        assert!(matches!(err, Error::AmbiguousPrefix { .. }));
+    }
+
+    #[test]
+    fn test_resolve_prefix_no_match() {
+        let mut tasks = HashMap::new();
+        tasks.insert(
+            "ab12".into(),
+            Task::new("ab12".into(), "T1".into(), Priority::P2),
+        );
+        let err = resolve_prefix(&tasks, "zz").unwrap_err();
+        assert!(matches!(err, Error::TaskNotFound(_)));
     }
 }

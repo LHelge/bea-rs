@@ -10,6 +10,9 @@ pub enum Error {
     #[error("task not found: {0}")]
     TaskNotFound(String),
 
+    #[error("ambiguous prefix '{prefix}' matches multiple tasks: {matches}")]
+    AmbiguousPrefix { prefix: String, matches: String },
+
     #[error("adding dependency would create a cycle: {from} -> {to}")]
     CycleDetected { from: String, to: String },
 

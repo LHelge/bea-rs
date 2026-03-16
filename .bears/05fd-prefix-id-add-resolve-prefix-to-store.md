@@ -1,10 +1,10 @@
 ---
 id: 05fd
 title: 'Prefix ID: add resolve_prefix to store'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T09:53:26.678314Z
-updated: 2026-03-16T10:49:57.021262Z
+updated: 2026-03-16T20:34:09.803803174Z
 tags:
 - feature
 - ux
