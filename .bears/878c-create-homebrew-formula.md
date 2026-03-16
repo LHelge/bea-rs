@@ -2,9 +2,9 @@
 id: 878c
 title: Create Homebrew formula
 status: open
-priority: P2
+priority: P3
 created: 2026-03-15T20:47:09.822298818Z
-updated: 2026-03-15T20:48:39.885268202Z
+updated: 2026-03-16T18:55:39.275716Z
 tags:
 - release
 depends_on:

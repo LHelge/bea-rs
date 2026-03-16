@@ -1,10 +1,10 @@
 ---
 id: d801
 title: Write install script
-status: open
+status: done
 priority: P2
 created: 2026-03-15T20:47:09.884481410Z
-updated: 2026-03-15T20:48:39.947403379Z
+updated: 2026-03-16T19:00:49.489968Z
 tags:
 - release
 - docs

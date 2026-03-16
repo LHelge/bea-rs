@@ -4,13 +4,33 @@ A file-based task tracker for developers and AI agents.
 
 Heavily inspired by Steve Yegge's [Beads](https://github.com/steveyegge/beads) that didn't really fit my workflow. 
 
-Tasks live as Markdown files with YAML frontmatter in a `.tasks/` directory — plain text, git-friendly, no database. Run `bea` from the terminal or expose the same functionality as an MCP server for AI coding agents.
+Tasks live as Markdown files with YAML frontmatter in a `.bears/` directory — plain text, git-friendly, no database. Run `bea` from the terminal or expose the same functionality as an MCP server for AI coding agents.
 
 ---
 
 ## Install
 
+### From crates.io
+
 ```sh
+cargo install bea-rs
+```
+
+### Pre-built binary
+
+Download the latest release for your platform:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/LHelge/bea-rs/main/install.sh | sh
+```
+
+This detects your OS and architecture, downloads the right binary from GitHub Releases, and installs it to `/usr/local/bin`. Set `BEA_INSTALL_DIR` to change the install location. Falls back to `cargo install` if no pre-built binary is available.
+
+### From source
+
+```sh
+git clone https://github.com/LHelge/bea-rs.git
+cd bea-rs
 cargo install --path .
 ```
 
@@ -34,7 +54,7 @@ bea done <id>
 
 ## Task format
 
-Each task is stored as `.tasks/{id}-{slug}.md`:
+Each task is stored as `.bears/{id}-{slug}.md`:
 
 ```markdown
 ---
@@ -60,7 +80,7 @@ Any Markdown body goes here.
 ## Commands
 
 ### `bea init`
-Create the `.tasks/` directory in the current directory.
+Create the `.bears/` directory and `.bears.yml` config in the current directory.
 
 ```sh
 bea init
