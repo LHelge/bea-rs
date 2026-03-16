@@ -7,22 +7,22 @@ use tokio::task::JoinSet;
 use crate::error::{Error, Result};
 use crate::task::{self, Task};
 
-const TASKS_DIR: &str = ".tasks";
+const BEARS_DIR: &str = ".bears";
 
-/// Returns the `.tasks/` directory path relative to the given base.
+/// Returns the `.bears/` directory path relative to the given base.
 pub fn tasks_dir(base: &Path) -> PathBuf {
-    base.join(TASKS_DIR)
+    base.join(BEARS_DIR)
 }
 
-/// Initialize a new `.tasks/` directory and `.bears.yml` config.
+/// Initialize a new `.bears/` directory and `.bears.yml` config.
 pub fn init(base: &Path) -> Result<PathBuf> {
-    let dir = tasks_dir(base);
+    let dir = base.join(BEARS_DIR);
     fs::create_dir_all(&dir)?;
     crate::config::create_default(base)?;
     Ok(dir)
 }
 
-/// Load all tasks from the `.tasks/` directory.
+/// Load all tasks from the `.bears/` directory.
 /// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
 pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
     let dir = tasks_dir(base);
@@ -185,7 +185,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init(tmp.path()).unwrap();
         // write a non-.md file to confirm it's skipped
-        fs::write(tmp.path().join(TASKS_DIR).join("notes.txt"), "ignored").unwrap();
+        fs::write(tmp.path().join(BEARS_DIR).join("notes.txt"), "ignored").unwrap();
         let tasks = load_all(tmp.path()).await.unwrap();
         assert!(tasks.is_empty());
     }

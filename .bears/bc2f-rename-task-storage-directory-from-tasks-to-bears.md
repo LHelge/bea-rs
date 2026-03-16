@@ -1,10 +1,10 @@
 ---
 id: bc2f
 title: Rename task storage directory from .tasks to .bears
-status: open
+status: done
 priority: P1
 created: 2026-03-16T10:46:46.748188Z
-updated: 2026-03-16T10:46:46.748188Z
+updated: 2026-03-16T18:51:58.993319Z
 tags:
 - code-review
 - storage
