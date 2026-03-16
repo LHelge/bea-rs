@@ -156,7 +156,7 @@ pub fn delete(base: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::Priority;
+    use crate::task::{Priority, TaskType};
     use tempfile::TempDir;
 
     #[test]
@@ -344,5 +344,63 @@ mod tests {
         );
         let err = resolve_prefix(&tasks, "zz").unwrap_err();
         assert!(matches!(err, Error::TaskNotFound(_)));
+    }
+
+    #[test]
+    fn test_save_and_load_epic() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let mut t = Task::new("ep01".into(), "My epic".into(), Priority::P1);
+        t.task_type = TaskType::Epic;
+        t.body = "Epic description.\n".into();
+
+        save(tmp.path(), &t).unwrap();
+
+        let loaded = load_one(tmp.path(), "ep01").unwrap();
+        assert_eq!(loaded.task_type, TaskType::Epic);
+        assert_eq!(loaded.title, "My epic");
+        assert_eq!(loaded.body, "Epic description.\n");
+
+        // Verify the file on disk contains "type: epic"
+        let path = find_task_path(tmp.path(), "ep01").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("type: epic"));
+    }
+
+    #[test]
+    fn test_save_and_load_task_no_type_field() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let t = Task::new("tk01".into(), "Regular task".into(), Priority::P2);
+        save(tmp.path(), &t).unwrap();
+
+        // Verify the file on disk does NOT contain "type:"
+        let path = find_task_path(tmp.path(), "tk01").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("type:"));
+
+        // Load it back and verify default
+        let loaded = load_one(tmp.path(), "tk01").unwrap();
+        assert_eq!(loaded.task_type, TaskType::Task);
+    }
+
+    #[tokio::test]
+    async fn test_load_all_mixed_types() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let t1 = Task::new("tk02".into(), "A task".into(), Priority::P2);
+        save(tmp.path(), &t1).unwrap();
+
+        let mut t2 = Task::new("ep02".into(), "An epic".into(), Priority::P1);
+        t2.task_type = TaskType::Epic;
+        save(tmp.path(), &t2).unwrap();
+
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks["tk02"].task_type, TaskType::Task);
+        assert_eq!(tasks["ep02"].task_type, TaskType::Epic);
     }
 }

@@ -1,10 +1,10 @@
 ---
 id: '622'
 title: 'MCP: epic support in tools'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.226461809Z
-updated: 2026-03-16T21:42:57.386981211Z
+updated: 2026-03-16T23:09:36.172657857Z
 tags:
 - feature
 - epic

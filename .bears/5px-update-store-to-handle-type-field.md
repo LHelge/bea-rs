@@ -1,10 +1,10 @@
 ---
 id: 5px
 title: Update store to handle type field
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.205657124Z
-updated: 2026-03-16T21:42:57.367505038Z
+updated: 2026-03-16T22:16:28.278096138Z
 tags:
 - feature
 - epic

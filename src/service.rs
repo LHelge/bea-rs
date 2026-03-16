@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::Utc;
+use serde::Serialize;
 
 use crate::config;
 use crate::error::{Error, Result};
 use crate::graph::Graph;
 use crate::store;
-use crate::task::{self, Priority, Status, Task};
+use crate::task::{self, Priority, Status, Task, TaskType};
 
 /// Create a new task with validation.
 #[allow(clippy::too_many_arguments)]
@@ -20,6 +21,7 @@ pub fn create_task(
     depends_on: Vec<String>,
     parent: Option<String>,
     body: String,
+    task_type: TaskType,
 ) -> Result<Task> {
     let config = config::load(base)?;
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
@@ -35,6 +37,7 @@ pub fn create_task(
     }
 
     let mut t = Task::new(id, title, priority);
+    t.task_type = task_type;
     t.tags = tags;
     t.depends_on = depends_on;
     t.parent = parent;
@@ -51,6 +54,7 @@ pub fn list_tasks(
     priority: Option<Priority>,
     tag: Option<&str>,
     include_all: bool,
+    epic: Option<&str>,
 ) -> Vec<Task> {
     let mut filtered: Vec<Task> = tasks
         .values()
@@ -64,6 +68,7 @@ pub fn list_tasks(
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
         .filter(|t| task::matches_tag(t, tag))
+        .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
         .cloned()
         .collect();
     task::sort_by_priority_owned(&mut filtered);
@@ -75,9 +80,10 @@ pub fn list_ready(
     tasks: &HashMap<String, Task>,
     tag: Option<&str>,
     limit: Option<usize>,
+    epic: Option<&str>,
 ) -> Vec<Task> {
     let graph = Graph::build(tasks);
-    let ready = graph.ready(tasks, tag, limit);
+    let ready = graph.ready(tasks, tag, limit, epic);
     ready.into_iter().cloned().collect()
 }
 
@@ -139,6 +145,24 @@ pub fn set_status(
     t.status = status;
     t.updated = Utc::now();
     store::save(base, &t)?;
+
+    // Auto-close parent epic when all children are done
+    if t.status == Status::Done
+        && let Some(ref parent_id) = t.parent
+        && let Some(parent) = tasks.get(parent_id)
+        && parent.task_type.is_epic()
+        && parent.status != Status::Done
+    {
+        let progress = epic_progress(tasks, parent_id);
+        // +1 because `tasks` still has the old status for this task
+        if progress.done + 1 >= progress.total {
+            let mut parent = parent.clone();
+            parent.status = Status::Done;
+            parent.updated = Utc::now();
+            store::save(base, &parent)?;
+        }
+    }
+
     Ok(t)
 }
 
@@ -245,4 +269,156 @@ pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Pr
         map.insert(id.clone(), graph.effective_priority(id, tasks));
     }
     map
+}
+
+/// Progress of an epic: how many children are done vs total.
+#[derive(Debug, Clone, Serialize)]
+pub struct EpicProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// Compact epic projection used by the epics command.
+#[derive(Debug, Serialize)]
+pub struct EpicSummary {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub priority: Priority,
+    pub tags: Vec<String>,
+    pub progress: EpicProgress,
+}
+
+/// Compute progress for an epic by counting children (tasks with parent == epic_id).
+pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgress {
+    let mut done = 0;
+    let mut total = 0;
+    for t in tasks.values() {
+        if t.parent.as_deref() == Some(epic_id) {
+            total += 1;
+            if t.status == Status::Done {
+                done += 1;
+            }
+        }
+    }
+    EpicProgress { done, total }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_task(id: &str, status: Status) -> Task {
+        let mut t = Task::new(id.to_string(), format!("Task {id}"), Priority::P2);
+        t.status = status;
+        t
+    }
+
+    fn make_epic(id: &str) -> Task {
+        let mut t = Task::new(id.to_string(), format!("Epic {id}"), Priority::P1);
+        t.task_type = TaskType::Epic;
+        t
+    }
+
+    fn make_child(id: &str, parent: &str, status: Status) -> Task {
+        let mut t = make_task(id, status);
+        t.parent = Some(parent.to_string());
+        t
+    }
+
+    fn task_map(tasks: Vec<Task>) -> HashMap<String, Task> {
+        tasks.into_iter().map(|t| (t.id.clone(), t)).collect()
+    }
+
+    #[test]
+    fn test_epic_progress_no_children() {
+        let tasks = task_map(vec![make_epic("e1")]);
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!(p.done, 0);
+        assert_eq!(p.total, 0);
+    }
+
+    #[test]
+    fn test_epic_progress_mixed() {
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            make_child("c1", "e1", Status::Done),
+            make_child("c2", "e1", Status::Open),
+            make_child("c3", "e1", Status::InProgress),
+        ]);
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!(p.done, 1);
+        assert_eq!(p.total, 3);
+    }
+
+    #[test]
+    fn test_epic_progress_all_done() {
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            make_child("c1", "e1", Status::Done),
+            make_child("c2", "e1", Status::Done),
+        ]);
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!(p.done, 2);
+        assert_eq!(p.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_epic_auto_close() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "My Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete first child — epic stays open
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Open);
+
+        // Complete second child — epic auto-closes
+        set_status(tmp.path(), &tasks, &child2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
 }

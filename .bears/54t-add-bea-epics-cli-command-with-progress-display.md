@@ -1,10 +1,10 @@
 ---
 id: 54t
 title: Add bea epics CLI command with progress display
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.220948494Z
-updated: 2026-03-16T21:42:57.382010717Z
+updated: 2026-03-16T22:51:52.066081966Z
 tags:
 - feature
 - epic

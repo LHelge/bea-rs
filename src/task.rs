@@ -44,6 +44,45 @@ impl std::str::FromStr for Status {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    #[default]
+    Task,
+    Epic,
+}
+
+impl TaskType {
+    pub fn is_task(self) -> bool {
+        self == TaskType::Task
+    }
+
+    pub fn is_epic(self) -> bool {
+        self == TaskType::Epic
+    }
+}
+
+impl fmt::Display for TaskType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TaskType::Task => write!(f, "task"),
+            TaskType::Epic => write!(f, "epic"),
+        }
+    }
+}
+
+impl std::str::FromStr for TaskType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "task" => Ok(TaskType::Task),
+            "epic" => Ok(TaskType::Epic),
+            _ => Err(format!("invalid task type: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Priority {
     P0,
@@ -101,6 +140,8 @@ impl std::str::FromStr for Priority {
 pub struct Task {
     pub id: String,
     pub title: String,
+    #[serde(default, rename = "type", skip_serializing_if = "is_default_task_type")]
+    pub task_type: TaskType,
     pub status: Status,
     pub priority: Priority,
     pub created: DateTime<Utc>,
@@ -117,12 +158,17 @@ pub struct Task {
     pub body: String,
 }
 
+fn is_default_task_type(t: &TaskType) -> bool {
+    t.is_task()
+}
+
 impl Task {
     pub fn new(id: String, title: String, priority: Priority) -> Self {
         let now = Utc::now();
         Task {
             id,
             title,
+            task_type: TaskType::Task,
             status: Status::Open,
             priority,
             created: now,
@@ -135,11 +181,12 @@ impl Task {
         }
     }
 
-    /// Compact projection: id, title, status, priority, tags, and optional effective priority.
+    /// Compact projection: id, title, type, status, priority, tags, and optional effective priority.
     pub fn summary(&self, effective_priority: Option<&Priority>) -> TaskSummary {
         TaskSummary {
             id: self.id.clone(),
             title: self.title.clone(),
+            task_type: self.task_type,
             status: self.status.clone(),
             priority: self.priority,
             tags: self.tags.clone(),
@@ -161,6 +208,21 @@ impl Task {
             updated: self.updated,
         }
     }
+
+    /// Epic projection: id, title, status, priority, tags, and progress.
+    pub fn epic_summary(
+        &self,
+        progress: crate::service::EpicProgress,
+    ) -> crate::service::EpicSummary {
+        crate::service::EpicSummary {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            status: self.status.clone(),
+            priority: self.priority,
+            tags: self.tags.clone(),
+            progress,
+        }
+    }
 }
 
 /// Compact task projection used by list/ready/create/update responses.
@@ -168,6 +230,8 @@ impl Task {
 pub struct TaskSummary {
     pub id: String,
     pub title: String,
+    #[serde(rename = "type", skip_serializing_if = "is_default_task_type")]
+    pub task_type: TaskType,
     pub status: Status,
     pub priority: Priority,
     pub tags: Vec<String>,
@@ -614,5 +678,87 @@ updated: 2026-03-15T10:30:00Z
         assert_eq!(task.id, "td01");
         assert!(task.body.contains("--- not a delimiter"));
         assert!(task.body.contains("More text"));
+    }
+
+    // ── TaskType tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_task_type_default() {
+        assert_eq!(TaskType::default(), TaskType::Task);
+    }
+
+    #[test]
+    fn test_task_type_display() {
+        assert_eq!(TaskType::Task.to_string(), "task");
+        assert_eq!(TaskType::Epic.to_string(), "epic");
+    }
+
+    #[test]
+    fn test_task_type_from_str() {
+        assert_eq!("task".parse::<TaskType>().unwrap(), TaskType::Task);
+        assert_eq!("epic".parse::<TaskType>().unwrap(), TaskType::Epic);
+        assert!("invalid".parse::<TaskType>().is_err());
+    }
+
+    #[test]
+    fn test_task_new_defaults_to_task_type() {
+        let t = Task::new("ab12".into(), "Test".into(), Priority::P1);
+        assert_eq!(t.task_type, TaskType::Task);
+    }
+
+    #[test]
+    fn test_task_type_not_serialized_when_task() {
+        let t = Task::new("ab12".into(), "Normal task".into(), Priority::P1);
+        let rendered = render_task(&t);
+        assert!(!rendered.contains("type:"));
+    }
+
+    #[test]
+    fn test_task_type_serialized_when_epic() {
+        let mut t = Task::new("ab12".into(), "My epic".into(), Priority::P1);
+        t.task_type = TaskType::Epic;
+        let rendered = render_task(&t);
+        assert!(rendered.contains("type: epic"));
+    }
+
+    #[test]
+    fn test_parse_task_without_type_defaults_to_task() {
+        let content = "---\nid: nt01\ntitle: No type\nstatus: open\npriority: P1\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.task_type, TaskType::Task);
+    }
+
+    #[test]
+    fn test_parse_task_with_epic_type() {
+        let content = "---\nid: ep01\ntitle: My epic\ntype: epic\nstatus: open\npriority: P1\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.task_type, TaskType::Epic);
+    }
+
+    #[test]
+    fn test_epic_roundtrip() {
+        let mut t = Task::new("ep02".into(), "Epic roundtrip".into(), Priority::P0);
+        t.task_type = TaskType::Epic;
+        let rendered = render_task(&t);
+        let parsed = parse_task(&rendered).unwrap();
+        assert_eq!(parsed.task_type, TaskType::Epic);
+        assert_eq!(parsed.id, "ep02");
+    }
+
+    #[test]
+    fn test_summary_includes_type_for_epic() {
+        let mut t = Task::new("ep03".into(), "Epic sum".into(), Priority::P1);
+        t.task_type = TaskType::Epic;
+        let s = t.summary(None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["type"], "epic");
+    }
+
+    #[test]
+    fn test_summary_omits_type_for_task() {
+        let t = Task::new("tk01".into(), "Task sum".into(), Priority::P1);
+        let s = t.summary(None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("type").is_none());
     }
 }

@@ -1,10 +1,10 @@
 ---
 id: rk4
 title: Add type field (task/epic) to Task model
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.196230577Z
-updated: 2026-03-16T21:42:57.364872982Z
+updated: 2026-03-16T22:14:48.900639614Z
 tags:
 - feature
 - epic

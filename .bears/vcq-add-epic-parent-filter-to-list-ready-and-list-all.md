@@ -1,10 +1,10 @@
 ---
 id: vcq
 title: Add epic/parent filter to list_ready and list_all
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.217853765Z
-updated: 2026-03-16T21:42:57.379764865Z
+updated: 2026-03-16T22:37:31.659354559Z
 tags:
 - feature
 - epic

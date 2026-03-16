@@ -1,10 +1,10 @@
 ---
 id: p5j
 title: Add --epic flag to bea create CLI
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.207141299Z
-updated: 2026-03-16T21:42:57.370086187Z
+updated: 2026-03-16T22:19:58.480536950Z
 tags:
 - feature
 - epic

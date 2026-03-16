@@ -1,8 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-
-use serde::Serialize;
-
 use crate::task::{self, Priority, Status, Task};
+use serde::Serialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Dependency graph built from task `depends_on` fields.
 pub struct Graph {
@@ -43,10 +41,12 @@ impl Graph {
         tasks: &'a HashMap<String, Task>,
         tag: Option<&str>,
         limit: Option<usize>,
+        epic: Option<&str>,
     ) -> Vec<&'a Task> {
         let mut result: Vec<&Task> = tasks
             .values()
             .filter(|t| t.status == Status::Open)
+            .filter(|t| t.task_type.is_task()) // epics are not directly workable
             .filter(|t| {
                 // All dependencies must be done
                 t.depends_on.iter().all(|dep_id| match tasks.get(dep_id) {
@@ -55,6 +55,7 @@ impl Graph {
                 })
             })
             .filter(|t| task::matches_tag(t, tag))
+            .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
             .collect();
 
         // Sort by effective priority (P0 first), then by creation date (oldest first)
@@ -218,12 +219,14 @@ impl DepNodeJson {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::TaskType;
     use chrono::Utc;
 
     fn make_task(id: &str, status: Status, priority: Priority, deps: Vec<&str>) -> Task {
         Task {
             id: id.into(),
             title: format!("Task {id}"),
+            task_type: TaskType::default(),
             status,
             priority,
             created: Utc::now(),
@@ -247,7 +250,7 @@ mod tests {
             make_task("b", Status::Open, Priority::P0, vec![]),
         ]);
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, None);
+        let ready = graph.ready(&tasks, None, None, None);
         // P0 should come first
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].id, "b");
@@ -262,7 +265,7 @@ mod tests {
             make_task("c", Status::Open, Priority::P1, vec!["b"]),
         ]);
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, None);
+        let ready = graph.ready(&tasks, None, None, None);
         // Only b is ready (a is done, c depends on b which isn't done)
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, "b");
@@ -275,7 +278,7 @@ mod tests {
             make_task("b", Status::Open, Priority::P1, vec!["a"]),
         ]);
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, None);
+        let ready = graph.ready(&tasks, None, None, None);
         assert!(ready.is_empty());
     }
 
@@ -289,7 +292,7 @@ mod tests {
             vec!["nonexistent"],
         )]);
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, None);
+        let ready = graph.ready(&tasks, None, None, None);
         assert!(ready.is_empty());
     }
 
@@ -300,7 +303,7 @@ mod tests {
         let tasks = make_tasks(vec![t, make_task("b", Status::Open, Priority::P1, vec![])]);
         let graph = Graph::build(&tasks);
 
-        let ready = graph.ready(&tasks, Some("backend"), None);
+        let ready = graph.ready(&tasks, Some("backend"), None, None);
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, "a");
     }
@@ -313,8 +316,48 @@ mod tests {
             make_task("c", Status::Open, Priority::P1, vec![]),
         ]);
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, Some(2));
+        let ready = graph.ready(&tasks, None, Some(2), None);
         assert_eq!(ready.len(), 2);
+    }
+
+    #[test]
+    fn test_ready_excludes_epics() {
+        let mut epic = make_task("e", Status::Open, Priority::P0, vec![]);
+        epic.task_type = TaskType::Epic;
+        let tasks = make_tasks(vec![
+            epic,
+            make_task("a", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let ready = graph.ready(&tasks, None, None, None);
+        // Only task "a" should be ready, not epic "e"
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "a");
+    }
+
+    #[test]
+    fn test_ready_with_epic_filter() {
+        let mut t1 = make_task("a", Status::Open, Priority::P1, vec![]);
+        t1.parent = Some("epic1".into());
+        let mut t2 = make_task("b", Status::Open, Priority::P1, vec![]);
+        t2.parent = Some("epic2".into());
+        let t3 = make_task("c", Status::Open, Priority::P1, vec![]);
+        let tasks = make_tasks(vec![t1, t2, t3]);
+        let graph = Graph::build(&tasks);
+
+        // Filter to epic1 — only task "a"
+        let ready = graph.ready(&tasks, None, None, Some("epic1"));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "a");
+
+        // Filter to epic2 — only task "b"
+        let ready = graph.ready(&tasks, None, None, Some("epic2"));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "b");
+
+        // No filter — all three
+        let ready = graph.ready(&tasks, None, None, None);
+        assert_eq!(ready.len(), 3);
     }
 
     #[test]
@@ -374,7 +417,7 @@ mod tests {
     fn test_empty_graph() {
         let tasks: HashMap<String, Task> = HashMap::new();
         let graph = Graph::build(&tasks);
-        let ready = graph.ready(&tasks, None, None);
+        let ready = graph.ready(&tasks, None, None, None);
         assert!(ready.is_empty());
     }
 

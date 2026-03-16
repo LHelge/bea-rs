@@ -1,10 +1,11 @@
 ---
 id: hza
 title: Epic support
-status: open
+type: epic
+status: done
 priority: P1
 created: 2026-03-16T21:39:48.650190064Z
-updated: 2026-03-16T21:42:57.355635432Z
+updated: 2026-03-16T23:16:02.280524217Z
 tags:
 - feature
 - epic

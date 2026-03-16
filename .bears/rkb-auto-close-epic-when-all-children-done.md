@@ -1,10 +1,10 @@
 ---
 id: rkb
 title: Auto-close epic when all children done
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.212499641Z
-updated: 2026-03-16T21:42:57.374867140Z
+updated: 2026-03-16T22:27:20.468146725Z
 tags:
 - feature
 - epic

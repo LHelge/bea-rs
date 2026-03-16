@@ -1,6 +1,7 @@
 ---
 id: und
 title: TUI support
+type: epic
 status: open
 priority: P1
 created: 2026-03-16T21:49:09.287614965Z

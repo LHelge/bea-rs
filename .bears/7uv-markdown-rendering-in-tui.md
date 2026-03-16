@@ -1,6 +1,7 @@
 ---
 id: 7uv
 title: Markdown rendering in TUI
+type: epic
 status: open
 priority: P2
 created: 2026-03-16T21:55:29.826406210Z

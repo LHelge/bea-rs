@@ -1,10 +1,10 @@
 ---
 id: dr6
 title: Epic progress computation (done/total)
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.209900341Z
-updated: 2026-03-16T21:42:57.372215166Z
+updated: 2026-03-16T22:21:08.129421684Z
 tags:
 - feature
 - epic

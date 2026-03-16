@@ -1,10 +1,10 @@
 ---
 id: zwc
 title: 'CLI display: style epics in list/show output'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:40:22.223452312Z
-updated: 2026-03-16T21:42:57.384491996Z
+updated: 2026-03-16T23:10:48.039360697Z
 tags:
 - feature
 - epic

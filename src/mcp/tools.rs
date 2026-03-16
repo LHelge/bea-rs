@@ -1,137 +1,15 @@
-use std::path::{Path, PathBuf};
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::schemars;
-use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
-use serde::Deserialize;
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::error::Error;
 use crate::service;
 use crate::store;
-use crate::task::{Priority, Status};
+use crate::task::{self, Priority, Status};
 
-#[derive(Clone)]
-pub struct BeaMcp {
-    base: PathBuf,
-    #[allow(dead_code)]
-    tool_router: ToolRouter<Self>,
-}
-
-impl BeaMcp {
-    pub fn new(base: PathBuf) -> Self {
-        Self {
-            base,
-            tool_router: Self::tool_router(),
-        }
-    }
-}
-
-// Parameter structs for tool inputs
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListReadyParams {
-    /// Max number of results
-    limit: Option<u64>,
-    /// Filter by tag
-    tag: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListTasksFilterParams {
-    /// Filter by status (open, in_progress, done, blocked, cancelled)
-    status: Option<String>,
-    /// Filter by priority (P0, P1, P2, P3)
-    priority: Option<String>,
-    /// Filter by tag
-    tag: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct TaskIdParams {
-    /// Task ID
-    id: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CreateTaskParams {
-    /// Task title
-    title: String,
-    /// Priority (P0, P1, P2, P3)
-    priority: Option<String>,
-    /// Tags
-    tags: Option<Vec<String>>,
-    /// IDs of tasks this depends on
-    depends_on: Option<Vec<String>>,
-    /// Parent task ID
-    parent: Option<String>,
-    /// Task body (markdown)
-    body: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct UpdateTaskParams {
-    /// Task ID
-    id: String,
-    /// New status (open, in_progress, done, blocked, cancelled)
-    status: Option<String>,
-    /// New priority (P0, P1, P2, P3)
-    priority: Option<String>,
-    /// New tags (replaces existing)
-    tags: Option<Vec<String>>,
-    /// New assignee
-    assignee: Option<String>,
-    /// New body (markdown)
-    body: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct DepParams {
-    /// Task that will depend on another
-    id: String,
-    /// Task to depend on
-    depends_on: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchParams {
-    /// Search query
-    query: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct PruneParams {
-    /// Also delete done tasks (default: only cancelled)
-    include_done: Option<bool>,
-}
-
-fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {
-    let text = serde_json::to_string(&value)?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
-}
-
-/// Boundary: convert domain errors into MCP tool-level errors (isError=true),
-/// not JSON-RPC protocol errors.
-fn tool_ok(r: Result<CallToolResult, Error>) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(r.unwrap_or_else(|e| CallToolResult::error(vec![Content::text(e.to_string())])))
-}
-
-fn parse_status(s: &str) -> Result<Status, Error> {
-    s.parse().map_err(|_| Error::InvalidFilter {
-        field: "status".into(),
-        value: s.into(),
-        expected: "open, in_progress, done, blocked, cancelled".into(),
-    })
-}
-
-fn parse_priority(s: &str) -> Result<Priority, Error> {
-    s.parse().map_err(|_| Error::InvalidFilter {
-        field: "priority".into(),
-        value: s.into(),
-        expected: "P0, P1, P2, P3".into(),
-    })
-}
+use super::params::*;
+use super::{BeaMcp, ok_json, parse_priority, parse_status, tool_ok};
 
 #[tool_router]
 impl BeaMcp {
@@ -144,7 +22,12 @@ impl BeaMcp {
             async {
                 let tasks = store::load_all(&self.base).await?;
                 let limit = params.limit.map(|v| v as usize);
-                let ready = service::list_ready(&tasks, params.tag.as_deref(), limit);
+                let ready = service::list_ready(
+                    &tasks,
+                    params.tag.as_deref(),
+                    limit,
+                    params.epic.as_deref(),
+                );
                 let eff = service::effective_priorities(&tasks);
                 let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
                 ok_json(serde_json::json!(summaries))
@@ -169,6 +52,7 @@ impl BeaMcp {
                     priority,
                     params.tag.as_deref(),
                     true, // MCP always shows all statuses unless filtered
+                    params.epic.as_deref(),
                 );
                 let eff = service::effective_priorities(&tasks);
                 let summaries: Vec<_> =
@@ -211,6 +95,18 @@ impl BeaMcp {
                     .transpose()?
                     .unwrap_or(Priority::P2);
 
+                let task_type = params
+                    .task_type
+                    .as_deref()
+                    .map(|s| s.parse::<task::TaskType>())
+                    .transpose()
+                    .map_err(|e| Error::InvalidFilter {
+                        field: "type".into(),
+                        value: e.clone(),
+                        expected: "task, epic".into(),
+                    })?
+                    .unwrap_or_default();
+
                 let t = service::create_task(
                     &self.base,
                     &tasks,
@@ -220,6 +116,7 @@ impl BeaMcp {
                     params.depends_on.unwrap_or_default(),
                     params.parent,
                     params.body.unwrap_or_default(),
+                    task_type,
                 )?;
                 ok_json(serde_json::to_value(t.summary(None))?)
             }
@@ -393,6 +290,24 @@ impl BeaMcp {
             .await,
         )
     }
+
+    #[tool(description = "List all epics with progress summary")]
+    async fn list_epics(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let mut epics: Vec<&task::Task> =
+                    tasks.values().filter(|t| t.task_type.is_epic()).collect();
+                epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+                let summaries: Vec<_> = epics
+                    .iter()
+                    .map(|t| t.epic_summary(service::epic_progress(&tasks, &t.id)))
+                    .collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
+    }
 }
 
 #[tool_handler]
@@ -407,23 +322,22 @@ impl ServerHandler for BeaMcp {
     }
 }
 
-pub async fn run(base: &Path) -> crate::error::Result<()> {
-    let server = BeaMcp::new(base.to_path_buf());
-    let service = server
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(())
+impl BeaMcp {
+    pub(super) fn build_tool_router() -> ToolRouter<Self> {
+        Self::tool_router()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::*;
+
     use crate::store;
+
+    use super::super::BeaMcp;
+    use super::super::params::*;
+
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, BeaMcp) {
@@ -459,6 +373,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -471,6 +386,7 @@ mod tests {
                 status: None,
                 priority: None,
                 tag: None,
+                epic: None,
             }))
             .await
             .unwrap();
@@ -491,6 +407,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: Some("Some body".into()),
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -513,6 +430,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -542,6 +460,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -554,6 +473,7 @@ mod tests {
             depends_on: Some(vec![id1.clone()]),
             parent: None,
             body: None,
+            task_type: None,
         }))
         .await
         .unwrap();
@@ -563,6 +483,7 @@ mod tests {
             .list_ready(Parameters(ListReadyParams {
                 limit: None,
                 tag: None,
+                epic: None,
             }))
             .await
             .unwrap();
@@ -581,6 +502,7 @@ mod tests {
             .list_ready(Parameters(ListReadyParams {
                 limit: None,
                 tag: None,
+                epic: None,
             }))
             .await
             .unwrap();
@@ -601,6 +523,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -614,6 +537,7 @@ mod tests {
                 depends_on: Some(vec![id_a.clone()]),
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -639,6 +563,7 @@ mod tests {
             depends_on: None,
             parent: None,
             body: None,
+            task_type: None,
         }))
         .await
         .unwrap();
@@ -649,6 +574,7 @@ mod tests {
             depends_on: None,
             parent: None,
             body: None,
+            task_type: None,
         }))
         .await
         .unwrap();
@@ -676,6 +602,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -703,6 +630,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -715,6 +643,7 @@ mod tests {
             depends_on: Some(vec![id_a]),
             parent: None,
             body: None,
+            task_type: None,
         }))
         .await
         .unwrap();
@@ -732,6 +661,7 @@ mod tests {
                 status: Some("bogus".into()),
                 priority: None,
                 tag: None,
+                epic: None,
             }))
             .await
             .unwrap();
@@ -747,6 +677,7 @@ mod tests {
                 status: None,
                 priority: Some("P9".into()),
                 tag: None,
+                epic: None,
             }))
             .await
             .unwrap();
@@ -765,6 +696,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();
@@ -783,6 +715,7 @@ mod tests {
                 depends_on: None,
                 parent: None,
                 body: None,
+                task_type: None,
             }))
             .await
             .unwrap();

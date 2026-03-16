@@ -1,10 +1,10 @@
 ---
 id: yem
 title: Tests for epic workflow
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:40:22.229038336Z
-updated: 2026-03-16T21:42:57.389244135Z
+updated: 2026-03-16T23:15:49.613700424Z
 tags:
 - feature
 - epic

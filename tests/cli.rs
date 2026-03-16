@@ -715,3 +715,188 @@ fn test_list_skips_corrupt_file() {
         .success()
         .stdout(predicate::str::contains("Good task"));
 }
+
+fn create_epic(dir: &TempDir, title: &str) -> String {
+    let out = bea(dir)
+        .args(["--json", "create", "--epic", title])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+fn create_child_task(dir: &TempDir, title: &str, parent: &str) -> String {
+    let out = bea(dir)
+        .args(["--json", "create", "--parent", parent, title])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+fn get_task_status(dir: &TempDir, id: &str) -> String {
+    let out = bea(dir).args(["--json", "show", id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    v["status"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn test_epic_auto_close_when_all_children_done() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "My epic");
+    let child1 = create_child_task(&tmp, "Child 1", &epic_id);
+    let child2 = create_child_task(&tmp, "Child 2", &epic_id);
+
+    // Complete first child — epic should stay open
+    bea(&tmp).args(["done", &child1]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "open");
+
+    // Complete second child — epic should auto-close
+    bea(&tmp).args(["done", &child2]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "done");
+}
+
+#[test]
+fn test_epic_not_in_ready() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Hidden epic");
+    let _child = create_child_task(&tmp, "Visible child", &epic_id);
+
+    // ready should show the child but not the epic
+    bea(&tmp)
+        .args(["--json", "ready"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Visible child"))
+        .stdout(predicate::str::contains("Hidden epic").not());
+}
+
+#[test]
+fn test_epic_stays_open_with_partial_completion() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Partial epic");
+    let child1 = create_child_task(&tmp, "Done child", &epic_id);
+    let _child2 = create_child_task(&tmp, "Open child", &epic_id);
+
+    bea(&tmp).args(["done", &child1]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "open");
+}
+
+#[test]
+fn test_epic_epics_command_output() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Release v2");
+    let child = create_child_task(&tmp, "Write docs", &epic_id);
+
+    // bea epics should list the epic with progress
+    bea(&tmp)
+        .arg("epics")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Epic:"))
+        .stdout(predicate::str::contains("Release v2"))
+        .stdout(predicate::str::contains("[0/1]"));
+
+    // Complete child and check progress updates
+    bea(&tmp).args(["done", &child]).assert().success();
+    bea(&tmp)
+        .args(["--json", "epics"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"done\""));
+}
+
+#[test]
+fn test_epic_ready_with_epic_filter() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic1 = create_epic(&tmp, "Epic One");
+    let epic2 = create_epic(&tmp, "Epic Two");
+    let child1 = create_child_task(&tmp, "Task for E1", &epic1);
+    let _child2 = create_child_task(&tmp, "Task for E2", &epic2);
+
+    // --epic filters to only children of that epic
+    bea(&tmp)
+        .args(["--json", "ready", "--epic", &epic1])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task for E1"))
+        .stdout(predicate::str::contains("Task for E2").not());
+
+    bea(&tmp)
+        .args(["--json", "ready", "--epic", &epic2])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task for E2"))
+        .stdout(predicate::str::contains("Task for E1").not());
+
+    // Unfiltered ready shows both children (but no epics)
+    bea(&tmp)
+        .args(["--json", "ready"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task for E1"))
+        .stdout(predicate::str::contains("Task for E2"))
+        .stdout(predicate::str::contains("Epic One").not())
+        .stdout(predicate::str::contains("Epic Two").not());
+
+    // Complete child1 to verify epic filter still works
+    bea(&tmp).args(["done", &child1]).assert().success();
+    bea(&tmp)
+        .args(["--json", "ready", "--epic", &epic1])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Task for E1").not());
+}
+
+#[test]
+fn test_epic_show_displays_type() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "My Big Epic");
+
+    // JSON show should include type
+    bea(&tmp)
+        .args(["--json", "show", &epic_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"type\": \"epic\""));
+
+    // Human show should display "Epic:" prefix
+    bea(&tmp)
+        .args(["show", &epic_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Epic:"));
+}
+
+#[test]
+fn test_epic_list_with_epic_filter() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic1 = create_epic(&tmp, "Epic Alpha");
+    let _epic2 = create_epic(&tmp, "Epic Beta");
+    create_child_task(&tmp, "Child of Alpha", &epic1);
+    create_child_task(&tmp, "Standalone task", "");
+
+    // --epic filter on list shows only children of that epic
+    bea(&tmp)
+        .args(["--json", "list", "--epic", &epic1])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Child of Alpha"));
+}
