@@ -4,13 +4,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use super::super::app::{Filter, FocusPane, Mode};
+use super::super::app::{FocusPane, Mode};
 use super::super::style::Theme;
 
 pub(in crate::tui) struct BottomBarWidget<'a> {
     mode: &'a Mode,
     focus: &'a FocusPane,
-    filter: &'a Filter,
     error_message: Option<&'a str>,
     theme: &'a Theme,
 }
@@ -19,14 +18,12 @@ impl<'a> BottomBarWidget<'a> {
     pub fn new(
         mode: &'a Mode,
         focus: &'a FocusPane,
-        filter: &'a Filter,
         error_message: Option<&'a str>,
         theme: &'a Theme,
     ) -> Self {
         Self {
             mode,
             focus,
-            filter,
             error_message,
             theme,
         }
@@ -69,14 +66,7 @@ impl Widget for BottomBarWidget<'_> {
                     ("s", "status"),
                     ("d", "delete"),
                     ("/", "filter"),
-                    (
-                        "a",
-                        if self.filter.show_all {
-                            "hide done"
-                        } else {
-                            "show all"
-                        },
-                    ),
+                    ("m", "mode"),
                 ]
             }
             Mode::StatusSelect { .. } => {
@@ -131,9 +121,8 @@ mod tests {
     fn normal_mode_shows_quit_hint() {
         let mode = Mode::Normal;
         let focus = FocusPane::List;
-        let filter = Filter::default();
         let theme = Theme::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, None, &theme);
+        let widget = BottomBarWidget::new(&mode, &focus, None, &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -148,9 +137,8 @@ mod tests {
     fn detail_focus_shows_scroll() {
         let mode = Mode::Normal;
         let focus = FocusPane::Detail;
-        let filter = Filter::default();
         let theme = Theme::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, None, &theme);
+        let widget = BottomBarWidget::new(&mode, &focus, None, &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -164,9 +152,8 @@ mod tests {
     fn error_message_displayed() {
         let mode = Mode::Normal;
         let focus = FocusPane::List;
-        let filter = Filter::default();
         let theme = Theme::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, Some("something broke"), &theme);
+        let widget = BottomBarWidget::new(&mode, &focus, Some("something broke"), &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);

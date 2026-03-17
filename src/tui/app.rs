@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{ListState, Widget};
 
 use crate::graph::Graph;
-use crate::task::{Status, Task};
+use crate::task::{Status, Task, TaskType};
 
 use super::style::Theme;
 use super::widgets::{
@@ -42,18 +42,78 @@ pub enum Mode {
     ConfirmDelete { task_id: String, title: String },
 }
 
+/// List filtering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListMode {
+    /// Show only open/in-progress/blocked tasks (default).
+    #[default]
+    Open,
+    /// Show only tasks whose dependencies are all done (ready to work on).
+    Ready,
+    /// Show only epics.
+    Epics,
+    /// Show only done/cancelled tasks.
+    Archive,
+    /// Show everything.
+    All,
+}
+
+impl ListMode {
+    /// Cycle to the next mode.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Open => Self::Ready,
+            Self::Ready => Self::Epics,
+            Self::Epics => Self::Archive,
+            Self::Archive => Self::All,
+            Self::All => Self::Open,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Ready => "Ready",
+            Self::Epics => "Epics",
+            Self::Archive => "Archive",
+            Self::All => "All",
+        }
+    }
+}
+
 /// Active filters on the task list.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
     pub query: String,
-    pub show_all: bool,
+    pub list_mode: ListMode,
 }
 
 impl Filter {
-    /// Check if a task matches the current filter.
+    /// Check if a task matches the current filter (excluding Ready logic which needs the graph).
     pub(super) fn matches(&self, task: &Task, query_lower: &str) -> bool {
-        if !self.show_all && matches!(task.status, Status::Done | Status::Cancelled) {
-            return false;
+        match self.list_mode {
+            ListMode::Open => {
+                if matches!(task.status, Status::Done | Status::Cancelled) {
+                    return false;
+                }
+            }
+            ListMode::Archive => {
+                if !matches!(task.status, Status::Done | Status::Cancelled) {
+                    return false;
+                }
+            }
+            ListMode::Ready => {
+                // Ready pre-filters to open tasks only; graph check is done in apply_filter
+                if task.status != Status::Open || task.task_type != TaskType::Task {
+                    return false;
+                }
+            }
+            ListMode::Epics => {
+                if task.task_type != TaskType::Epic {
+                    return false;
+                }
+            }
+            ListMode::All => {}
         }
         if !query_lower.is_empty() {
             let in_title = task.title.to_lowercase().contains(query_lower);
@@ -67,10 +127,6 @@ impl Filter {
             }
         }
         true
-    }
-
-    pub(super) fn is_active(&self) -> bool {
-        !self.query.is_empty() || self.show_all
     }
 }
 
@@ -151,6 +207,18 @@ impl App {
             .all_tasks
             .iter()
             .filter(|t| self.filter.matches(t, &query_lower))
+            .filter(|t| {
+                // For Ready mode, additionally check that all deps are done
+                if self.filter.list_mode == ListMode::Ready {
+                    t.depends_on.iter().all(|dep_id| {
+                        self.task_map
+                            .get(dep_id)
+                            .is_some_and(|dep| dep.status == Status::Done)
+                    })
+                } else {
+                    true
+                }
+            })
             .cloned()
             .collect();
         let new_idx = selected_id
@@ -232,7 +300,6 @@ impl App {
         BottomBarWidget::new(
             &self.mode,
             &self.focus,
-            &self.filter,
             self.error_message.as_deref(),
             &self.theme,
         )
@@ -312,7 +379,7 @@ mod tests {
     #[test]
     fn test_filter_default_hides_done() {
         let app = make_app();
-        assert!(!app.filter.show_all);
+        assert_eq!(app.filter.list_mode, ListMode::Open);
         let has_done = app.tasks.iter().any(|t| t.status == Status::Done);
         assert!(!has_done);
     }

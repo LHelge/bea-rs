@@ -131,8 +131,8 @@ impl App {
                 };
                 Action::None
             }
-            KeyCode::Char('a') => {
-                self.filter.show_all = !self.filter.show_all;
+            KeyCode::Char('m') => {
+                self.filter.list_mode = self.filter.list_mode.next();
                 self.apply_filter();
                 Action::None
             }
@@ -296,6 +296,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::super::app::ListMode;
     use super::super::app::test_helpers::{make_app, make_key};
     use super::*;
     use crossterm::event::KeyCode;
@@ -416,12 +417,19 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_show_all() {
+    fn test_filter_mode_cycle() {
         let mut app = make_app();
-        let before = app.tasks.len();
-        app.handle_key(make_key(KeyCode::Char('a')));
-        assert!(app.filter.show_all);
-        assert!(app.tasks.len() >= before);
+        assert_eq!(app.filter.list_mode, ListMode::Open);
+        app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::Ready);
+        app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::Epics);
+        app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::Archive);
+        app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::All);
+        app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::Open);
     }
 
     #[test]

@@ -66,18 +66,14 @@ impl StatefulWidget for TaskListWidget<'_> {
             })
             .collect();
 
-        let title = if self.filter.is_active() {
+        let title = {
             let mut parts = vec![" Tasks".to_string()];
             if !self.filter.query.is_empty() {
                 parts.push(format!(" [{}]", self.filter.query));
             }
-            if self.filter.show_all {
-                parts.push(" (all)".to_string());
-            }
+            parts.push(format!(" ({})", self.filter.list_mode.label()));
             parts.push(format!(" ({}) ", self.tasks.len()));
             parts.join("")
-        } else {
-            format!(" Tasks ({}) ", self.tasks.len())
         };
 
         let list = List::new(items)
@@ -129,7 +125,7 @@ mod tests {
         let tasks = sample_tasks();
         let filter = Filter {
             query: "test".into(),
-            show_all: false,
+            ..Filter::default()
         };
         let theme = Theme::default();
         let widget = TaskListWidget::new(&tasks, &filter, Style::default(), &theme);
