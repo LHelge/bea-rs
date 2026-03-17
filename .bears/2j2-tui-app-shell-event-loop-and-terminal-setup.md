@@ -1,10 +1,10 @@
 ---
 id: 2j2
 title: 'TUI app shell: event loop and terminal setup'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.049228511Z
-updated: 2026-03-16T21:49:58.144074653Z
+updated: 2026-03-17T09:32:08.887318Z
 tags:
 - feature
 - tui

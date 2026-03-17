@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 
 use chrono::Utc;
 use owo_colors::OwoColorize;
@@ -565,27 +564,7 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     let original = service::get_task(tasks, id)?;
     let path = store::find_task_path(base, &original.id)?;
 
-    // Resolve editor
-    let editor = std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .unwrap_or_else(|_| "vi".into());
-
-    // Parse editor into executable and arguments (split on whitespace)
-    let parts: Vec<&str> = editor.split_whitespace().collect();
-    let (exe, args) = parts
-        .split_first()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "EDITOR is empty"))?;
-
-    let status = ProcessCommand::new(exe)
-        .args(args)
-        .arg(&path)
-        .status()
-        .map_err(Error::Io)?;
-
-    if !status.success() {
-        eprintln!("Editor exited with non-zero status, aborting.");
-        return Ok(());
-    }
+    crate::editor::open_in_editor(&path)?;
 
     // Re-read and validate
     let content = std::fs::read_to_string(&path).map_err(Error::Io)?;

@@ -1,10 +1,10 @@
 ---
 id: 7k7
 title: Keyboard navigation (j/k, tab, esc, quit)
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.065397026Z
-updated: 2026-03-16T21:49:58.165664673Z
+updated: 2026-03-17T09:37:57.477951Z
 tags:
 - feature
 - tui

@@ -1,10 +1,10 @@
 ---
 id: zdq
 title: Add ratatui + crossterm dependencies
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.043185394Z
-updated: 2026-03-16T21:49:49.043185394Z
+updated: 2026-03-17T09:29:37.630641Z
 tags:
 - feature
 - tui

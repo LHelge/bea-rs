@@ -1,10 +1,10 @@
 ---
 id: 3wz
 title: 'Action: edit task in $EDITOR'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.066570214Z
-updated: 2026-03-16T21:49:58.168955813Z
+updated: 2026-03-17T09:44:18.914196Z
 tags:
 - feature
 - tui

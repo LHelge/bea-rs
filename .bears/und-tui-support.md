@@ -2,10 +2,10 @@
 id: und
 title: TUI support
 type: epic
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:09.287614965Z
-updated: 2026-03-16T21:49:09.287614965Z
+updated: 2026-03-17T09:54:16.469432Z
 tags:
 - feature
 - tui

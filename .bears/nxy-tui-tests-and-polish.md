@@ -1,10 +1,10 @@
 ---
 id: nxy
 title: TUI tests and polish
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.079626128Z
-updated: 2026-03-16T21:50:05.090953570Z
+updated: 2026-03-17T09:54:16.469288Z
 tags:
 - feature
 - tui

@@ -205,6 +205,9 @@ pub enum Command {
 
     /// Start MCP server on stdio
     Mcp,
+
+    /// Launch interactive TUI
+    Tui,
 }
 
 #[derive(Subcommand, PartialEq)]

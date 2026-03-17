@@ -1,10 +1,10 @@
 ---
 id: zsp
 title: 'Left panel: task list with selection and scrolling'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.052029640Z
-updated: 2026-03-16T21:49:58.151209883Z
+updated: 2026-03-17T09:35:05.857839Z
 tags:
 - feature
 - tui

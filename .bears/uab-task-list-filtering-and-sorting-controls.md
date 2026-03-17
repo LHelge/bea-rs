@@ -1,10 +1,10 @@
 ---
 id: uab
 title: Task list filtering and sorting controls
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:49:49.074710743Z
-updated: 2026-03-16T21:49:58.178478517Z
+updated: 2026-03-17T09:54:16.463251Z
 tags:
 - feature
 - tui

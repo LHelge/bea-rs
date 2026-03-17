@@ -1,10 +1,10 @@
 ---
 id: gz9
 title: 'Action: create task with title prompt'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.069018032Z
-updated: 2026-03-16T21:49:58.172237636Z
+updated: 2026-03-17T09:44:18.931296Z
 tags:
 - feature
 - tui

@@ -1,10 +1,10 @@
 ---
 id: y4p
 title: 'Action: status change modal'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.071753738Z
-updated: 2026-03-16T21:49:58.176340126Z
+updated: 2026-03-17T09:44:18.942131Z
 tags:
 - feature
 - tui

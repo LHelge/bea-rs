@@ -31,7 +31,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             }
             return Ok(());
         }
-        Command::Mcp => unreachable!("MCP mode is handled in main"),
+        Command::Mcp | Command::Tui => unreachable!("handled in main"),
         _ => {}
     }
 
@@ -90,7 +90,11 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Search { query, all } => cmd::cmd_search(&tasks, &query, all, cli.json),
         Command::Edit { id } => cmd::cmd_edit(base, &tasks, &id, cli.json),
         // Already handled above
-        Command::Init | Command::Completions { .. } | Command::Version | Command::Mcp => {
+        Command::Init
+        | Command::Completions { .. }
+        | Command::Version
+        | Command::Mcp
+        | Command::Tui => {
             unreachable!()
         }
     }

@@ -1,10 +1,10 @@
 ---
 id: 5hd
 title: Wire up bea tui CLI command
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.076650196Z
-updated: 2026-03-16T21:49:58.180945702Z
+updated: 2026-03-17T09:44:18.907841Z
 tags:
 - feature
 - tui

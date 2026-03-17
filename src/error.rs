@@ -32,6 +32,9 @@ pub enum Error {
     #[error("invalid frontmatter in {path}: {reason}")]
     InvalidFrontmatter { path: PathBuf, reason: String },
 
+    #[error("editor failed: {reason}")]
+    EditorFailed { reason: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

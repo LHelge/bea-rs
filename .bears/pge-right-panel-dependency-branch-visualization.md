@@ -1,10 +1,10 @@
 ---
 id: pge
 title: 'Right panel: dependency branch visualization'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:49:49.058302523Z
-updated: 2026-03-16T21:49:58.156556877Z
+updated: 2026-03-17T09:37:57.484118Z
 tags:
 - feature
 - tui

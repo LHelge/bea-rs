@@ -1,10 +1,10 @@
 ---
 id: qj4
 title: 'Bottom bar: keyboard shortcut hints'
-status: open
+status: done
 priority: P1
 created: 2026-03-16T21:49:49.061269998Z
-updated: 2026-03-16T21:49:58.158811048Z
+updated: 2026-03-17T09:35:05.869929Z
 tags:
 - feature
 - tui
