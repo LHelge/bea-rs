@@ -4,7 +4,11 @@ use clap_complete::Shell;
 use crate::task::{Priority, Status};
 
 #[derive(Parser)]
-#[command(name = "bea", about = "bears — file-based task tracker")]
+#[command(
+    name = "bea",
+    about = "Bears 🐻🐻 - A file-based task tracker CLI and MCP server for AI agent workflows"
+)]
+#[command(version, propagate_version = true)]
 pub struct Args {
     #[command(subcommand)]
     pub command: Command,
@@ -199,9 +203,6 @@ pub enum Command {
         /// Shell to generate completions for
         shell: Shell,
     },
-
-    /// Print version information
-    Version,
 
     /// Start MCP server on stdio
     Mcp,

@@ -22,15 +22,6 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             clap_complete::generate(*shell, &mut Args::command(), "bea", &mut std::io::stdout());
             return Ok(());
         }
-        Command::Version => {
-            let version = env!("CARGO_PKG_VERSION");
-            if cli.json {
-                output(&serde_json::json!({ "version": version }), true)?;
-            } else {
-                println!("Bears {version}");
-            }
-            return Ok(());
-        }
         Command::Mcp | Command::Tui => unreachable!("handled in main"),
         _ => {}
     }
@@ -90,11 +81,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Search { query, all } => cmd::cmd_search(&tasks, &query, all, cli.json),
         Command::Edit { id } => cmd::cmd_edit(base, &tasks, &id, cli.json),
         // Already handled above
-        Command::Init
-        | Command::Completions { .. }
-        | Command::Version
-        | Command::Mcp
-        | Command::Tui => {
+        Command::Init | Command::Completions { .. } | Command::Mcp | Command::Tui => {
             unreachable!()
         }
     }
