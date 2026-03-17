@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::graph::{DepNode, Graph};
-use crate::task::Task;
+use crate::task::{Task, TaskType};
 
 use super::super::style::{self, Theme};
 
@@ -90,6 +90,66 @@ fn render_dep_node<'a>(
     let child_count = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
         render_dep_node(child, &child_prefix, i == child_count - 1, theme, lines);
+    }
+}
+
+/// Shows the dependency graph of all subtasks belonging to an epic.
+pub(in crate::tui) struct SubtaskGraphWidget<'a> {
+    task: &'a Task,
+    graph: &'a Graph,
+    task_map: &'a HashMap<String, Task>,
+    theme: &'a Theme,
+}
+
+impl<'a> SubtaskGraphWidget<'a> {
+    pub fn new(
+        task: &'a Task,
+        graph: &'a Graph,
+        task_map: &'a HashMap<String, Task>,
+        theme: &'a Theme,
+    ) -> Self {
+        Self {
+            task,
+            graph,
+            task_map,
+            theme,
+        }
+    }
+
+    pub fn lines(&self) -> Vec<Line<'a>> {
+        if self.task.task_type != TaskType::Epic {
+            return Vec::new();
+        }
+
+        // Collect child tasks (those with parent == this epic's id)
+        let mut children: Vec<&Task> = self
+            .task_map
+            .values()
+            .filter(|t| t.parent.as_deref() == Some(&self.task.id))
+            .collect();
+
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        children.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Subtasks",
+            self.theme.section_heading_style(),
+        )));
+
+        let count = children.len();
+        for (i, child) in children.iter().enumerate() {
+            let last = i == count - 1;
+            if let Some(tree) = self.graph.dep_tree(self.task_map, &child.id) {
+                render_dep_node(&tree, "", last, self.theme, &mut lines);
+            }
+        }
+
+        lines
     }
 }
 

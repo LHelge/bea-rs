@@ -11,7 +11,7 @@ use crate::task::Task;
 
 use super::super::style::Theme;
 use super::body::BodyWidget;
-use super::dep_tree::DepTreeWidget;
+use super::dep_tree::{DepTreeWidget, SubtaskGraphWidget};
 use super::task_info::TaskInfoWidget;
 
 /// Metrics fed back to App for scroll clamping.
@@ -71,10 +71,13 @@ impl TaskDetailWidget<'_> {
         let mut lines: Vec<Line> = Vec::new();
 
         // Sub-widget: task info (title + metadata)
-        lines.extend(TaskInfoWidget::new(task, self.theme).lines());
+        lines.extend(TaskInfoWidget::new(task, self.task_map, self.theme).lines());
 
         // Sub-widget: dependency tree
         lines.extend(DepTreeWidget::new(task, self.graph, self.task_map, self.theme).lines());
+
+        // Sub-widget: subtask graph (for epics)
+        lines.extend(SubtaskGraphWidget::new(task, self.graph, self.task_map, self.theme).lines());
 
         // Sub-widget: body
         lines.extend(BodyWidget::new(&task.body, self.theme).lines());
