@@ -1,4 +1,7 @@
 mod app;
+mod input;
+mod style;
+mod widgets;
 
 use std::collections::HashMap;
 use std::path::Path;
