@@ -1,26 +1,33 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget};
 
 use crate::task::{Task, TaskType};
 
 use super::super::app::Filter;
-use super::super::style::{priority_color, status_indicator};
+use super::super::style::{self, Theme};
 
 pub(in crate::tui) struct TaskListWidget<'a> {
     tasks: &'a [Task],
     filter: &'a Filter,
     border_style: Style,
+    theme: &'a Theme,
 }
 
 impl<'a> TaskListWidget<'a> {
-    pub fn new(tasks: &'a [Task], filter: &'a Filter, border_style: Style) -> Self {
+    pub fn new(
+        tasks: &'a [Task],
+        filter: &'a Filter,
+        border_style: Style,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             tasks,
             filter,
             border_style,
+            theme,
         }
     }
 }
@@ -33,8 +40,9 @@ impl StatefulWidget for TaskListWidget<'_> {
             .tasks
             .iter()
             .map(|task| {
-                let pri_color = priority_color(task.priority);
-                let indicator = status_indicator(&task.status);
+                let pri_color = self.theme.priority_color(task.priority);
+                let indicator = style::status_indicator(&task.status);
+                let st_color = self.theme.status_color(&task.status);
                 let type_prefix = if task.task_type == TaskType::Epic {
                     "◆ "
                 } else {
@@ -46,10 +54,10 @@ impl StatefulWidget for TaskListWidget<'_> {
                         format!("{} ", task.priority),
                         Style::default().fg(pri_color),
                     ),
-                    Span::styled(format!("{indicator} "), Style::default().fg(Color::White)),
+                    Span::styled(format!("{indicator} "), Style::default().fg(st_color)),
                     Span::styled(
                         format!("[{}] ", task.id),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(self.theme.id_color),
                     ),
                     Span::raw(format!("{type_prefix}{}", task.title)),
                 ]);
@@ -79,12 +87,8 @@ impl StatefulWidget for TaskListWidget<'_> {
                     .borders(Borders::ALL)
                     .border_style(self.border_style),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▶ ");
+            .highlight_style(self.theme.highlight_style())
+            .highlight_symbol(style::HIGHLIGHT_SYMBOL);
 
         StatefulWidget::render(list, area, buf, state);
     }
@@ -107,7 +111,8 @@ mod tests {
     fn renders_task_titles() {
         let tasks = sample_tasks();
         let filter = Filter::default();
-        let widget = TaskListWidget::new(&tasks, &filter, Style::default());
+        let theme = Theme::default();
+        let widget = TaskListWidget::new(&tasks, &filter, Style::default(), &theme);
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -126,7 +131,8 @@ mod tests {
             query: "test".into(),
             show_all: false,
         };
-        let widget = TaskListWidget::new(&tasks, &filter, Style::default());
+        let theme = Theme::default();
+        let widget = TaskListWidget::new(&tasks, &filter, Style::default(), &theme);
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -143,7 +149,8 @@ mod tests {
         task.task_type = TaskType::Epic;
         let tasks = vec![task];
         let filter = Filter::default();
-        let widget = TaskListWidget::new(&tasks, &filter, Style::default());
+        let theme = Theme::default();
+        let widget = TaskListWidget::new(&tasks, &filter, Style::default(), &theme);
 
         let area = Rect::new(0, 0, 50, 5);
         let mut buf = Buffer::empty(area);

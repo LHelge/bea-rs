@@ -1,25 +1,32 @@
 use std::collections::HashMap;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::graph::{DepNode, Graph};
-use crate::task::{Status, Task};
+use crate::task::Task;
 
-use super::super::style::status_indicator;
+use super::super::style::{self, Theme};
 
 pub(in crate::tui) struct DepTreeWidget<'a> {
     task: &'a Task,
     graph: &'a Graph,
     task_map: &'a HashMap<String, Task>,
+    theme: &'a Theme,
 }
 
 impl<'a> DepTreeWidget<'a> {
-    pub fn new(task: &'a Task, graph: &'a Graph, task_map: &'a HashMap<String, Task>) -> Self {
+    pub fn new(
+        task: &'a Task,
+        graph: &'a Graph,
+        task_map: &'a HashMap<String, Task>,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             task,
             graph,
             task_map,
+            theme,
         }
     }
 
@@ -32,14 +39,12 @@ impl<'a> DepTreeWidget<'a> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Dependencies",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            self.theme.section_heading_style(),
         )));
 
         if let Some(tree) = self.graph.dep_tree(self.task_map, &self.task.id) {
             for child in &tree.children {
-                render_dep_node(child, "", true, &mut lines);
+                render_dep_node(child, "", true, self.theme, &mut lines);
             }
         }
 
@@ -47,16 +52,16 @@ impl<'a> DepTreeWidget<'a> {
     }
 }
 
-fn render_dep_node<'a>(node: &DepNode<'a>, prefix: &str, last: bool, lines: &mut Vec<Line<'a>>) {
+fn render_dep_node<'a>(
+    node: &DepNode<'a>,
+    prefix: &str,
+    last: bool,
+    theme: &Theme,
+    lines: &mut Vec<Line<'a>>,
+) {
     let connector = if last { "└─ " } else { "├─ " };
 
-    let status_color = match node.task.status {
-        Status::Done => Color::Green,
-        Status::InProgress => Color::Yellow,
-        Status::Open => Color::White,
-        Status::Blocked => Color::Red,
-        Status::Cancelled => Color::DarkGray,
-    };
+    let st_color = theme.status_color(&node.task.status);
 
     let mut spans = vec![
         Span::styled(
@@ -64,13 +69,13 @@ fn render_dep_node<'a>(node: &DepNode<'a>, prefix: &str, last: bool, lines: &mut
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            status_indicator(&node.task.status),
-            Style::default().fg(status_color),
+            style::status_indicator(&node.task.status),
+            Style::default().fg(st_color),
         ),
         Span::raw(" "),
         Span::styled(
             format!("[{}] ", node.task.id),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.id_color),
         ),
         Span::raw(node.task.title.clone()),
     ];
@@ -84,7 +89,7 @@ fn render_dep_node<'a>(node: &DepNode<'a>, prefix: &str, last: bool, lines: &mut
     let child_prefix = format!("{prefix}{}  ", if last { " " } else { "│" });
     let child_count = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
-        render_dep_node(child, &child_prefix, i == child_count - 1, lines);
+        render_dep_node(child, &child_prefix, i == child_count - 1, theme, lines);
     }
 }
 
@@ -98,7 +103,8 @@ mod tests {
         let task = Task::new("a".into(), "No deps".into(), Priority::P1);
         let map: HashMap<String, Task> = [("a".into(), task.clone())].into();
         let graph = Graph::build(&map);
-        let widget = DepTreeWidget::new(&task, &graph, &map);
+        let theme = Theme::default();
+        let widget = DepTreeWidget::new(&task, &graph, &map, &theme);
         assert!(widget.lines().is_empty());
     }
 
@@ -110,7 +116,8 @@ mod tests {
 
         let map: HashMap<String, Task> = [("a".into(), parent.clone()), ("b".into(), child)].into();
         let graph = Graph::build(&map);
-        let widget = DepTreeWidget::new(&parent, &graph, &map);
+        let theme = Theme::default();
+        let widget = DepTreeWidget::new(&parent, &graph, &map, &theme);
         let lines = widget.lines();
 
         assert!(lines.len() >= 3); // blank + header + at least one dep node

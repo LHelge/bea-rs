@@ -3,12 +3,12 @@ use std::path::PathBuf;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
 use ratatui::widgets::{ListState, Widget};
 
 use crate::graph::Graph;
 use crate::task::{Status, Task};
 
+use super::style::Theme;
 use super::widgets::{
     BottomBarWidget, DetailMetrics, InputModalWidget, InputPromptWidget, StatusModalWidget,
     TaskDetailWidget, TaskListWidget,
@@ -90,6 +90,7 @@ pub struct App {
     pub(super) detail_content_height: u16,
     pub(super) detail_visible_height: u16,
     pub(super) last_selected_id: Option<String>,
+    pub(super) theme: Theme,
 }
 
 impl App {
@@ -122,6 +123,7 @@ impl App {
             detail_content_height: 0,
             detail_visible_height: 0,
             last_selected_id,
+            theme: Theme::default(),
         }
     }
 
@@ -173,12 +175,8 @@ impl App {
     }
 
     /// Border style depending on whether a pane is focused.
-    fn pane_border_style(&self, pane: FocusPane) -> Style {
-        if self.focus == pane {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        }
+    fn pane_border_style(&self, pane: FocusPane) -> ratatui::style::Style {
+        self.theme.border_style(self.focus == pane)
     }
 
     /// Render the full UI.
@@ -204,6 +202,7 @@ impl App {
                 &self.tasks,
                 &self.filter,
                 self.pane_border_style(FocusPane::List),
+                &self.theme,
             ),
             body[0],
             &mut self.list_state,
@@ -221,6 +220,7 @@ impl App {
             self.detail_scroll,
             self.pane_border_style(FocusPane::Detail),
             &mut metrics,
+            &self.theme,
         )
         .render(body[1], frame.buffer_mut());
 
@@ -234,37 +234,26 @@ impl App {
             &self.focus,
             &self.filter,
             self.error_message.as_deref(),
+            &self.theme,
         )
         .render(outer[1], frame.buffer_mut());
 
         // Modal overlays
         match &self.mode {
             Mode::StatusSelect { selected, .. } => {
-                (StatusModalWidget {
-                    selected: *selected,
-                })
-                .render(area, frame.buffer_mut());
+                StatusModalWidget::new(*selected, &self.theme).render(area, frame.buffer_mut());
             }
             Mode::CreateInput { input } => {
-                (InputModalWidget {
-                    title: " New task title ",
-                    input,
-                })
-                .render(area, frame.buffer_mut());
+                InputModalWidget::new(" New task title ", input, &self.theme)
+                    .render(area, frame.buffer_mut());
             }
             Mode::FilterInput { input } => {
-                (InputPromptWidget {
-                    title: " Filter tasks ",
-                    input,
-                })
-                .render(area, frame.buffer_mut());
+                InputPromptWidget::new(" Filter tasks ", input, &self.theme)
+                    .render(area, frame.buffer_mut());
             }
             Mode::ConfirmDelete { title, .. } => {
-                (InputModalWidget {
-                    title: &format!(" Delete \"{title}\"? (y/N) "),
-                    input: "",
-                })
-                .render(area, frame.buffer_mut());
+                InputModalWidget::new(&format!(" Delete \"{title}\"? (y/N) "), "", &self.theme)
+                    .render(area, frame.buffer_mut());
             }
             Mode::Normal => {}
         }

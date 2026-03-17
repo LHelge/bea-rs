@@ -1,10 +1,10 @@
 ---
 id: dj7
 title: Choose markdown rendering approach
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:59.384688779Z
-updated: 2026-03-16T21:56:07.744727737Z
+updated: 2026-03-17T20:52:45.127504749Z
 tags:
 - feature
 - tui

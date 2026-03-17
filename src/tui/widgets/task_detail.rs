@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use crate::graph::Graph;
 use crate::task::Task;
 
+use super::super::style::Theme;
 use super::body::BodyWidget;
 use super::dep_tree::DepTreeWidget;
 use super::task_info::TaskInfoWidget;
@@ -26,6 +27,7 @@ pub(in crate::tui) struct TaskDetailWidget<'a> {
     scroll: u16,
     border_style: Style,
     metrics: &'a mut DetailMetrics,
+    theme: &'a Theme,
 }
 
 impl<'a> TaskDetailWidget<'a> {
@@ -36,6 +38,7 @@ impl<'a> TaskDetailWidget<'a> {
         scroll: u16,
         border_style: Style,
         metrics: &'a mut DetailMetrics,
+        theme: &'a Theme,
     ) -> Self {
         Self {
             task,
@@ -44,6 +47,7 @@ impl<'a> TaskDetailWidget<'a> {
             scroll,
             border_style,
             metrics,
+            theme,
         }
     }
 }
@@ -67,13 +71,13 @@ impl TaskDetailWidget<'_> {
         let mut lines: Vec<Line> = Vec::new();
 
         // Sub-widget: task info (title + metadata)
-        lines.extend(TaskInfoWidget::new(task).lines());
+        lines.extend(TaskInfoWidget::new(task, self.theme).lines());
 
         // Sub-widget: dependency tree
-        lines.extend(DepTreeWidget::new(task, self.graph, self.task_map).lines());
+        lines.extend(DepTreeWidget::new(task, self.graph, self.task_map, self.theme).lines());
 
         // Sub-widget: body
-        lines.extend(BodyWidget::new(&task.body).lines());
+        lines.extend(BodyWidget::new(&task.body, self.theme).lines());
 
         // Compute wrapped content height
         let inner_width = area.width.saturating_sub(2) as usize;

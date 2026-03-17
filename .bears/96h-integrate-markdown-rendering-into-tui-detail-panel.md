@@ -1,10 +1,10 @@
 ---
 id: 96h
 title: Integrate markdown rendering into TUI detail panel
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:59.400668115Z
-updated: 2026-03-16T21:56:07.741953963Z
+updated: 2026-03-17T20:55:23.956239557Z
 tags:
 - feature
 - tui

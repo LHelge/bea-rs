@@ -1,29 +1,28 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::task::{Task, TaskType};
 
-use super::super::style::priority_color;
+use super::super::style::Theme;
 
 pub(in crate::tui) struct TaskInfoWidget<'a> {
     task: &'a Task,
+    theme: &'a Theme,
 }
 
 impl<'a> TaskInfoWidget<'a> {
-    pub fn new(task: &'a Task) -> Self {
-        Self { task }
+    pub fn new(task: &'a Task, theme: &'a Theme) -> Self {
+        Self { task, theme }
     }
 
     pub fn lines(&self) -> Vec<Line<'a>> {
         let mut lines = Vec::new();
-        let label_style = Style::default().fg(Color::Cyan);
+        let label_style = self.theme.label_style();
 
         // Title
         lines.push(Line::from(Span::styled(
             self.task.title.as_str(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            self.theme.title_style(),
         )));
         lines.push(Line::from(""));
 
@@ -38,7 +37,7 @@ impl<'a> TaskInfoWidget<'a> {
             Span::styled("Priority: ", label_style),
             Span::styled(
                 self.task.priority.to_string(),
-                Style::default().fg(priority_color(self.task.priority)),
+                Style::default().fg(self.theme.priority_color(self.task.priority)),
             ),
         ]));
 
@@ -96,7 +95,8 @@ mod tests {
     #[test]
     fn basic_task_info_lines() {
         let task = Task::new("abc".into(), "My Task".into(), Priority::P1);
-        let widget = TaskInfoWidget::new(&task);
+        let theme = Theme::default();
+        let widget = TaskInfoWidget::new(&task, &theme);
         let lines = widget.lines();
 
         // Title + blank + status + priority + created + updated = 6 minimum
@@ -116,7 +116,8 @@ mod tests {
     fn epic_shows_type() {
         let mut task = Task::new("abc".into(), "Epic".into(), Priority::P0);
         task.task_type = TaskType::Epic;
-        let widget = TaskInfoWidget::new(&task);
+        let theme = Theme::default();
+        let widget = TaskInfoWidget::new(&task, &theme);
         let lines = widget.lines();
 
         let text: String = lines
@@ -134,7 +135,8 @@ mod tests {
         task.tags = vec!["backend".into(), "auth".into()];
         task.assignee = "alice".into();
         task.parent = Some("xyz".into());
-        let widget = TaskInfoWidget::new(&task);
+        let theme = Theme::default();
+        let widget = TaskInfoWidget::new(&task, &theme);
         let lines = widget.lines();
 
         let text: String = lines
@@ -153,7 +155,8 @@ mod tests {
     #[test]
     fn optional_fields_hidden_when_absent() {
         let task = Task::new("abc".into(), "Plain".into(), Priority::P3);
-        let widget = TaskInfoWidget::new(&task);
+        let theme = Theme::default();
+        let widget = TaskInfoWidget::new(&task, &theme);
         let lines = widget.lines();
 
         let text: String = lines

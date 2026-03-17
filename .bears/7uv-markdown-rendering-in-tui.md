@@ -2,10 +2,10 @@
 id: 7uv
 title: Markdown rendering in TUI
 type: epic
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:29.826406210Z
-updated: 2026-03-16T21:55:29.826406210Z
+updated: 2026-03-17T20:55:23.956482008Z
 tags:
 - feature
 - tui

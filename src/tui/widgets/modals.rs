@@ -1,18 +1,25 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
 };
 
-use super::super::style::ALL_STATUSES;
+use super::super::style::{ALL_STATUSES, Theme};
 
 /// Status selection modal rendered centered on screen.
-pub(in crate::tui) struct StatusModalWidget {
+pub(in crate::tui) struct StatusModalWidget<'a> {
     pub selected: usize,
+    pub theme: &'a Theme,
 }
 
-impl Widget for StatusModalWidget {
+impl<'a> StatusModalWidget<'a> {
+    pub fn new(selected: usize, theme: &'a Theme) -> Self {
+        Self { selected, theme }
+    }
+}
+
+impl Widget for StatusModalWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let modal_width = 30u16;
         let modal_height = (ALL_STATUSES.len() as u16) + 2;
@@ -39,13 +46,9 @@ impl Widget for StatusModalWidget {
                 Block::default()
                     .title(" Set Status ")
                     .borders(Borders::ALL)
-                    .style(Style::default().bg(Color::Black)),
+                    .style(Style::default().bg(self.theme.modal_bg)),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(self.theme.highlight_style());
 
         StatefulWidget::render(list, modal_area, buf, &mut modal_list_state);
     }
@@ -55,6 +58,17 @@ impl Widget for StatusModalWidget {
 pub(in crate::tui) struct InputModalWidget<'a> {
     pub title: &'a str,
     pub input: &'a str,
+    pub theme: &'a Theme,
+}
+
+impl<'a> InputModalWidget<'a> {
+    pub fn new(title: &'a str, input: &'a str, theme: &'a Theme) -> Self {
+        Self {
+            title,
+            input,
+            theme,
+        }
+    }
 }
 
 impl Widget for InputModalWidget<'_> {
@@ -65,7 +79,7 @@ impl Widget for InputModalWidget<'_> {
         let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
         let modal_area = Rect::new(x, y, modal_width, modal_height);
 
-        render_text_box(buf, modal_area, self.title, self.input);
+        render_text_box(buf, modal_area, self.title, self.input, self.theme);
     }
 }
 
@@ -73,6 +87,17 @@ impl Widget for InputModalWidget<'_> {
 pub(in crate::tui) struct InputPromptWidget<'a> {
     pub title: &'a str,
     pub input: &'a str,
+    pub theme: &'a Theme,
+}
+
+impl<'a> InputPromptWidget<'a> {
+    pub fn new(title: &'a str, input: &'a str, theme: &'a Theme) -> Self {
+        Self {
+            title,
+            input,
+            theme,
+        }
+    }
 }
 
 impl Widget for InputPromptWidget<'_> {
@@ -84,12 +109,12 @@ impl Widget for InputPromptWidget<'_> {
             3,
         );
 
-        render_text_box(buf, input_area, self.title, self.input);
+        render_text_box(buf, input_area, self.title, self.input, self.theme);
     }
 }
 
 /// Shared helper: clear area, render a bordered text box with optional input scrolling.
-fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str) {
+fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str, theme: &Theme) {
     Clear.render(area, buf);
 
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -106,8 +131,8 @@ fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str) {
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .style(Style::default().bg(Color::Black)),
+                .style(Style::default().bg(theme.modal_bg)),
         )
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(theme.title_fg))
         .render(area, buf);
 }

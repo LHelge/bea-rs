@@ -1,16 +1,18 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::super::app::{Filter, FocusPane, Mode};
+use super::super::style::Theme;
 
 pub(in crate::tui) struct BottomBarWidget<'a> {
     mode: &'a Mode,
     focus: &'a FocusPane,
     filter: &'a Filter,
     error_message: Option<&'a str>,
+    theme: &'a Theme,
 }
 
 impl<'a> BottomBarWidget<'a> {
@@ -19,12 +21,14 @@ impl<'a> BottomBarWidget<'a> {
         focus: &'a FocusPane,
         filter: &'a Filter,
         error_message: Option<&'a str>,
+        theme: &'a Theme,
     ) -> Self {
         Self {
             mode,
             focus,
             filter,
             error_message,
+            theme,
         }
     }
 }
@@ -34,10 +38,18 @@ impl Widget for BottomBarWidget<'_> {
         // Show error message if present
         if let Some(msg) = self.error_message {
             let bar = Paragraph::new(Line::from(vec![
-                Span::styled(" ERROR ", Style::default().fg(Color::White).bg(Color::Red)),
-                Span::styled(format!(" {msg} "), Style::default().fg(Color::Red)),
+                Span::styled(
+                    " ERROR ",
+                    Style::default()
+                        .fg(self.theme.bar_error_fg)
+                        .bg(self.theme.bar_error_bg),
+                ),
+                Span::styled(
+                    format!(" {msg} "),
+                    Style::default().fg(self.theme.bar_error_msg),
+                ),
             ]))
-            .style(Style::default().bg(Color::Black));
+            .style(Style::default().bg(self.theme.bar_bg));
             bar.render(area, buf);
             return;
         }
@@ -92,11 +104,13 @@ impl Widget for BottomBarWidget<'_> {
 
             spans.push(Span::styled(
                 key_text,
-                Style::default().fg(Color::Black).bg(Color::White),
+                Style::default()
+                    .fg(self.theme.bar_key_fg)
+                    .bg(self.theme.bar_key_bg),
             ));
             spans.push(Span::styled(
                 desc_text,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.bar_desc_fg),
             ));
             if i < hints.len() - 1 {
                 spans.push(Span::raw(" "));
@@ -104,7 +118,7 @@ impl Widget for BottomBarWidget<'_> {
             used_width += entry_width;
         }
 
-        let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
+        let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(self.theme.bar_bg));
         bar.render(area, buf);
     }
 }
@@ -118,7 +132,8 @@ mod tests {
         let mode = Mode::Normal;
         let focus = FocusPane::List;
         let filter = Filter::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, None);
+        let theme = Theme::default();
+        let widget = BottomBarWidget::new(&mode, &focus, &filter, None, &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -134,7 +149,8 @@ mod tests {
         let mode = Mode::Normal;
         let focus = FocusPane::Detail;
         let filter = Filter::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, None);
+        let theme = Theme::default();
+        let widget = BottomBarWidget::new(&mode, &focus, &filter, None, &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -149,7 +165,8 @@ mod tests {
         let mode = Mode::Normal;
         let focus = FocusPane::List;
         let filter = Filter::default();
-        let widget = BottomBarWidget::new(&mode, &focus, &filter, Some("something broke"));
+        let theme = Theme::default();
+        let widget = BottomBarWidget::new(&mode, &focus, &filter, Some("something broke"), &theme);
 
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
