@@ -13,6 +13,9 @@ pub enum Error {
     #[error("ambiguous prefix '{prefix}' matches multiple tasks: {matches}")]
     AmbiguousPrefix { prefix: String, matches: String },
 
+    #[error("task {0} is not an epic — --plan only works on epics")]
+    NotAnEpic(String),
+
     #[error("adding dependency would create a cycle: {from} -> {to}")]
     CycleDetected { from: String, to: String },
 

@@ -1,10 +1,10 @@
 ---
 id: w58
 title: Add topological sort scoped to epic children in graph.rs
-status: open
+status: done
 priority: P1
 created: 2026-03-18T22:55:23.701712172Z
-updated: 2026-03-18T22:55:23.701712172Z
+updated: 2026-03-18T23:04:39.444140447Z
 tags:
 - graph
 parent: 27y

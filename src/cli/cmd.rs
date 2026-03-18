@@ -182,7 +182,11 @@ pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool) -> Result<()> {
+    if plan {
+        return cmd_show_plan(tasks, id, json);
+    }
+
     let t = service::get_task(tasks, id)?;
     let eff = service::effective_priorities(tasks);
     let ep = eff.get(&t.id);
@@ -263,6 +267,24 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<(
         );
         if !t.body.is_empty() {
             println!("\n{}", t.body);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let plan = service::plan_epic(tasks, id)?;
+
+    if json {
+        let eff = service::effective_priorities(tasks);
+        let details: Vec<_> = plan.iter().map(|t| t.detail(eff.get(&t.id))).collect();
+        output(&details, true)?;
+    } else {
+        for (i, t) in plan.iter().enumerate() {
+            print!("# {}. {}\n\n", i + 1, t.title);
+            if !t.body.is_empty() {
+                print!("{}\n\n", t.body);
+            }
         }
     }
     Ok(())

@@ -169,6 +169,90 @@ impl Graph {
         })
     }
 
+    /// Topological sort over a subset of task IDs.
+    /// Only dependency edges between tasks in the subset are considered.
+    /// Tie-breaking: priority (P0 first), then creation date (oldest first).
+    pub fn topo_sort_subset<'a>(
+        &self,
+        subset: &HashSet<String>,
+        tasks: &'a HashMap<String, Task>,
+    ) -> Vec<&'a Task> {
+        if subset.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute in-degrees considering only intra-subset edges
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        for id in subset {
+            in_degree.insert(id.as_str(), 0);
+        }
+        for id in subset {
+            if let Some(deps) = self.edges.get(id) {
+                for dep in deps {
+                    if subset.contains(dep) {
+                        *in_degree.entry(id.as_str()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        // Seed with zero-in-degree nodes, sorted by priority then created
+        let mut queue: Vec<&str> = in_degree
+            .iter()
+            .filter(|&(_, deg)| *deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        queue.sort_by(|a, b| {
+            let ta = tasks.get(*a);
+            let tb = tasks.get(*b);
+            match (ta, tb) {
+                (Some(ta), Some(tb)) => ta
+                    .priority
+                    .cmp(&tb.priority)
+                    .then(ta.created.cmp(&tb.created)),
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+
+        let mut result: Vec<&'a Task> = Vec::new();
+        while !queue.is_empty() {
+            let current = queue.remove(0);
+            if let Some(task) = tasks.get(current) {
+                result.push(task);
+            }
+
+            // Decrement in-degree for tasks that depend on current
+            if let Some(dependents) = self.reverse.get(current) {
+                let mut newly_ready: Vec<&str> = Vec::new();
+                for dep in dependents {
+                    if subset.contains(dep)
+                        && let Some(deg) = in_degree.get_mut(dep.as_str())
+                    {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            newly_ready.push(dep.as_str());
+                        }
+                    }
+                }
+                // Sort newly ready by priority then created
+                newly_ready.sort_by(|a, b| {
+                    let ta = tasks.get(*a);
+                    let tb = tasks.get(*b);
+                    match (ta, tb) {
+                        (Some(ta), Some(tb)) => ta
+                            .priority
+                            .cmp(&tb.priority)
+                            .then(ta.created.cmp(&tb.created)),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                queue.extend(newly_ready);
+            }
+        }
+
+        result
+    }
+
     /// Get adjacency list for JSON output.
     pub fn adjacency_list(&self) -> HashMap<&str, Vec<&str>> {
         self.edges
@@ -574,5 +658,87 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+    }
+
+    #[test]
+    fn test_topo_sort_linear_chain() {
+        // c depends on b, b depends on a → expect [a, b, c]
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec![]),
+            make_task("b", Status::Open, Priority::P1, vec!["a"]),
+            make_task("c", Status::Open, Priority::P1, vec!["b"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_topo_sort_diamond() {
+        // d has no deps, b depends on d, c depends on d, a depends on b and c
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b", "c"]),
+            make_task("b", Status::Open, Priority::P1, vec!["d"]),
+            make_task("c", Status::Open, Priority::P1, vec!["d"]),
+            make_task("d", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
+        // d must come first, a must come last
+        assert_eq!(ids[0], "d");
+        assert_eq!(ids[ids.len() - 1], "a");
+    }
+
+    #[test]
+    fn test_topo_sort_independent() {
+        // No deps among subset, sorted by priority then created
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P2, vec![]),
+            make_task("b", Status::Open, Priority::P0, vec![]),
+            make_task("c", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
+        // P0 first, then P1, then P2
+        assert_eq!(ids, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn test_topo_sort_single_task() {
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].id, "a");
+    }
+
+    #[test]
+    fn test_topo_sort_empty() {
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = HashSet::new();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn test_topo_sort_ignores_external_deps() {
+        // b depends on "ext" which is not in the subset
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec![]),
+            make_task("b", Status::Open, Priority::P1, vec!["ext"]),
+            make_task("ext", Status::Done, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        assert_eq!(sorted.len(), 2);
     }
 }

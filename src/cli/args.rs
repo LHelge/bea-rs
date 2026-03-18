@@ -98,6 +98,10 @@ pub enum Command {
     Show {
         /// Task ID
         id: String,
+
+        /// Output subtasks in execution order as markdown
+        #[arg(long)]
+        plan: bool,
     },
 
     /// Update task fields

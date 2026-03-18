@@ -1,10 +1,10 @@
 ---
 id: axs
 title: Add plan_epic service function in service.rs
-status: open
+status: done
 priority: P1
 created: 2026-03-18T22:55:27.025664694Z
-updated: 2026-03-18T22:55:27.025664694Z
+updated: 2026-03-18T23:04:39.457918664Z
 tags:
 - service
 depends_on:

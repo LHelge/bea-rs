@@ -1,10 +1,10 @@
 ---
 id: syf
 title: Add --plan flag to Show command and cmd_show handler
-status: open
+status: done
 priority: P1
 created: 2026-03-18T22:55:30.214265842Z
-updated: 2026-03-18T22:55:30.214265842Z
+updated: 2026-03-18T23:04:39.461090311Z
 tags:
 - cli
 depends_on:

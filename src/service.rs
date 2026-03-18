@@ -304,6 +304,33 @@ pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgre
     EpicProgress { done, total }
 }
 
+/// Return children of a parent task in topological execution order.
+/// Works for any task with children, not restricted to epics.
+pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Result<Vec<&'a Task>> {
+    // Validate parent exists and is an epic
+    let resolved = store::resolve_prefix(tasks, parent_id)?;
+    let parent = tasks
+        .get(&resolved)
+        .ok_or_else(|| Error::TaskNotFound(parent_id.to_string()))?;
+    if !parent.task_type.is_epic() {
+        return Err(Error::NotAnEpic(resolved));
+    }
+
+    // Collect child IDs
+    let child_ids: HashSet<String> = tasks
+        .values()
+        .filter(|t| t.parent.as_deref() == Some(resolved.as_str()))
+        .map(|t| t.id.clone())
+        .collect();
+
+    if child_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let graph = Graph::build(tasks);
+    Ok(graph.topo_sort_subset(&child_ids, tasks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +447,58 @@ mod tests {
         set_status(tmp.path(), &tasks, &child2.id, Status::Done).unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
+
+    #[test]
+    fn test_plan_epic_linear_chain() {
+        let mut c1 = make_child("c1", "e1", Status::Open);
+        c1.depends_on = vec![];
+        let mut c2 = make_child("c2", "e1", Status::Open);
+        c2.depends_on = vec!["c1".to_string()];
+        let mut c3 = make_child("c3", "e1", Status::Open);
+        c3.depends_on = vec!["c2".to_string()];
+
+        let tasks = task_map(vec![make_epic("e1"), c1, c2, c3]);
+        let plan = plan_epic(&tasks, "e1").unwrap();
+        let ids: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn test_plan_epic_independent_children() {
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            make_child("c1", "e1", Status::Open),
+            make_child("c2", "e1", Status::Open),
+        ]);
+        let plan = plan_epic(&tasks, "e1").unwrap();
+        assert_eq!(plan.len(), 2);
+    }
+
+    #[test]
+    fn test_plan_epic_no_children() {
+        let tasks = task_map(vec![make_epic("e1")]);
+        let plan = plan_epic(&tasks, "e1").unwrap();
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn test_plan_epic_not_found() {
+        let tasks = task_map(vec![]);
+        let result = plan_epic(&tasks, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plan_epic_non_epic_parent() {
+        // plan_epic rejects non-epic parents
+        let parent = make_task("p1", Status::Open);
+        let tasks = task_map(vec![
+            parent,
+            make_child("c1", "p1", Status::Open),
+            make_child("c2", "p1", Status::Done),
+        ]);
+        let result = plan_epic(&tasks, "p1");
+        assert!(result.is_err());
     }
 }

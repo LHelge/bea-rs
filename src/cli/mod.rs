@@ -50,7 +50,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         } => cmd::cmd_list(&tasks, status, priority, tag, epic, all, cli.json),
         Command::Ready { tag, epic, limit } => cmd::cmd_ready(&tasks, tag, epic, limit, cli.json),
         Command::Epics => cmd::cmd_epics(&tasks, cli.json),
-        Command::Show { id } => cmd::cmd_show(&tasks, &id, cli.json),
+        Command::Show { id, plan } => cmd::cmd_show(&tasks, &id, plan, cli.json),
         Command::Update {
             id,
             status,
