@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bears": {
+      "command": "cargo",
+      "args": ["run", "--", "mcp"]
+    }
+  }
+}
