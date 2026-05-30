@@ -583,7 +583,8 @@ pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: b
 pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     // Resolve prefix and load task
     let original = service::get_task(tasks, id)?;
-    let path = store::find_task_path(base, &original.id)?;
+    let original_id = original.id.clone();
+    let path = store::find_task_path(base, &original_id)?;
 
     crate::editor::open_in_editor(&path)?;
 
@@ -596,6 +597,16 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
             return Ok(());
         }
     };
+
+    // Reject id changes — they would orphan the original file
+    if edited.id != original_id {
+        eprintln!(
+            "Editing the id field is not allowed (was '{}', got '{}'). \
+             Revert the id change and retry.",
+            original_id, edited.id
+        );
+        return Ok(());
+    }
 
     // Check if anything changed
     if task::render_task(&original) == task::render_task(&edited) {

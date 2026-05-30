@@ -900,3 +900,55 @@ fn test_epic_list_with_epic_filter() {
         .success()
         .stdout(predicate::str::contains("Child of Alpha"));
 }
+
+/// cs7: editing the id field in bea edit must not orphan the original file.
+#[test]
+fn test_edit_id_change_rejected_no_orphan() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Orphan test task");
+
+    // Create an editor script that replaces the id field with "zzzz"
+    let script = tmp.path().join("id-changer.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nsed 's/^id:.*/id: zzzz/' \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    bea(&tmp)
+        .env("EDITOR", script.to_str().unwrap())
+        .args(["edit", &id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("id field is not allowed"));
+
+    // The original file must still exist (no orphan)
+    let bears_dir = tmp.path().join(".bears");
+    let files: Vec<_> = std::fs::read_dir(&bears_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+        .collect();
+    // Exactly one file: the original. Not two (no new zzzz file).
+    assert_eq!(
+        files.len(),
+        1,
+        "expected 1 task file, found {}: {:?}",
+        files.len(),
+        files.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
+    // And it starts with the original id
+    let file_name = files[0].file_name();
+    let name = file_name.to_string_lossy();
+    assert!(
+        name.starts_with(&id),
+        "original file should be named {id}-*.md, got {name}"
+    );
+}
