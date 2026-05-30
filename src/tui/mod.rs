@@ -1,6 +1,7 @@
 mod app;
 mod input;
 mod style;
+pub(crate) mod watcher;
 mod widgets;
 
 use std::collections::HashMap;
