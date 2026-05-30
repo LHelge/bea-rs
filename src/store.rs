@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,16 +8,23 @@ use crate::error::{Error, Result};
 use crate::task::{self, Task};
 
 const BEARS_DIR: &str = ".bears";
+const ARCHIVE_SUBDIR: &str = "archive";
 
 /// Returns the `.bears/` directory path relative to the given base.
 pub fn tasks_dir(base: &Path) -> PathBuf {
     base.join(BEARS_DIR)
 }
 
-/// Initialize a new `.bears/` directory and `.bears.yml` config.
+/// Returns the `.bears/archive/` directory path relative to the given base.
+pub fn archive_dir(base: &Path) -> PathBuf {
+    tasks_dir(base).join(ARCHIVE_SUBDIR)
+}
+
+/// Initialize a new `.bears/` directory (and `.bears/archive/`) and `.bears.yml` config.
 pub fn init(base: &Path) -> Result<PathBuf> {
     let dir = base.join(BEARS_DIR);
     fs::create_dir_all(&dir)?;
+    fs::create_dir_all(dir.join(ARCHIVE_SUBDIR))?;
     crate::config::create_default(base)?;
     Ok(dir)
 }
@@ -68,6 +75,145 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
     }
 
     Ok(tasks)
+}
+
+/// Load all archived tasks from the `.bears/archive/` directory.
+/// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
+/// Returns an empty map (not an error) if the archive dir does not exist yet.
+// Will be consumed by the archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
+    let dir = archive_dir(base);
+    if !dir.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            paths.push(path);
+        }
+    }
+
+    let mut join_set = JoinSet::new();
+    for path in paths {
+        join_set.spawn(async move {
+            let content = tokio::fs::read_to_string(&path).await;
+            (path, content)
+        });
+    }
+
+    let mut tasks = HashMap::new();
+    while let Some(result) = join_set.join_next().await {
+        let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let content = content?;
+        match task::parse_task(&content) {
+            Ok(t) => {
+                if tasks.contains_key(&t.id) {
+                    eprintln!(
+                        "warning: duplicate archived task ID {} in {}",
+                        t.id,
+                        path.display()
+                    );
+                    continue;
+                }
+                tasks.insert(t.id.clone(), t);
+            }
+            Err(e) => {
+                eprintln!("warning: skipping archived {}: {e}", path.display());
+            }
+        }
+    }
+
+    Ok(tasks)
+}
+
+/// Find the file path for an archived task by its exact ID.
+// Will be consumed by the archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn find_archived_path(base: &Path, id: &str) -> Result<PathBuf> {
+    let dir = archive_dir(base);
+    if !dir.exists() {
+        return Err(Error::TaskNotFound(id.into()));
+    }
+    let prefix = format!("{id}-");
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".md") {
+            return Ok(entry.path());
+        }
+    }
+
+    Err(Error::TaskNotFound(id.into()))
+}
+
+/// Move a task file from `.bears/` to `.bears/archive/`.
+// Will be consumed by the archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn move_to_archive(base: &Path, id: &str) -> Result<()> {
+    let adir = archive_dir(base);
+    fs::create_dir_all(&adir)?;
+    let src = find_task_path(base, id)?;
+    let filename = src
+        .file_name()
+        .ok_or_else(|| Error::TaskNotFound(id.into()))?;
+    let dst = adir.join(filename);
+    fs::rename(src, dst)?;
+    Ok(())
+}
+
+/// Move a task file from `.bears/archive/` back to `.bears/`.
+// Will be consumed by the archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn move_from_archive(base: &Path, id: &str) -> Result<()> {
+    let src = find_archived_path(base, id)?;
+    let filename = src
+        .file_name()
+        .ok_or_else(|| Error::TaskNotFound(id.into()))?;
+    let dst = tasks_dir(base).join(filename);
+    fs::rename(src, dst)?;
+    Ok(())
+}
+
+/// Return the set of ALL known task IDs — both active and archived.
+/// Used during ID generation so new IDs never collide with archived ones.
+// Will be consumed by the archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub async fn all_known_ids(base: &Path) -> Result<HashSet<String>> {
+    let active = load_all(base).await?;
+    let archived = load_archived(base).await?;
+    let mut ids: HashSet<String> = active.into_keys().collect();
+    ids.extend(archived.into_keys());
+    Ok(ids)
+}
+
+/// Return archived task IDs by scanning filenames only (no YAML parsing).
+/// Used synchronously to extend the collision set during task creation.
+pub fn archived_id_set(base: &Path) -> HashSet<String> {
+    let dir = archive_dir(base);
+    if !dir.exists() {
+        return HashSet::new();
+    }
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return HashSet::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".md") {
+                return None;
+            }
+            // filename format: {id}-{slug}.md — extract the id prefix
+            name.split('-').next().map(|id| id.to_string())
+        })
+        .collect()
 }
 
 /// Find the file path for a task by its ID prefix.
@@ -402,5 +548,105 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks["tk02"].task_type, TaskType::Task);
         assert_eq!(tasks["ep02"].task_type, TaskType::Epic);
+    }
+
+    // ── Archive storage layer tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_all_ignores_archive_subdir() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        // Save an active task
+        let active = Task::new("ac01".into(), "Active task".into(), Priority::P2);
+        save(tmp.path(), &active).unwrap();
+
+        // Write a task file directly into the archive subdir
+        let archived = Task::new("ar01".into(), "Archived task".into(), Priority::P3);
+        let archived_content = crate::task::render_task(&archived);
+        fs::write(
+            archive_dir(tmp.path()).join(crate::task::filename(&archived)),
+            archived_content,
+        )
+        .unwrap();
+
+        // load_all must only return the active task, not the archived one
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks.contains_key("ac01"));
+        assert!(!tasks.contains_key("ar01"));
+    }
+
+    #[test]
+    fn test_move_to_archive_and_back() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let t = Task::new("mv01".into(), "Move me".into(), Priority::P1);
+        save(tmp.path(), &t).unwrap();
+
+        // File exists in active dir
+        assert!(find_task_path(tmp.path(), "mv01").is_ok());
+        assert!(find_archived_path(tmp.path(), "mv01").is_err());
+
+        // Move to archive
+        move_to_archive(tmp.path(), "mv01").unwrap();
+        assert!(find_task_path(tmp.path(), "mv01").is_err());
+        assert!(find_archived_path(tmp.path(), "mv01").is_ok());
+
+        // Move back from archive
+        move_from_archive(tmp.path(), "mv01").unwrap();
+        assert!(find_task_path(tmp.path(), "mv01").is_ok());
+        assert!(find_archived_path(tmp.path(), "mv01").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_archived() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        // Save two tasks and archive one
+        let t1 = Task::new("ar01".into(), "Archive this".into(), Priority::P2);
+        save(tmp.path(), &t1).unwrap();
+        let t2 = Task::new("ac01".into(), "Keep active".into(), Priority::P1);
+        save(tmp.path(), &t2).unwrap();
+
+        move_to_archive(tmp.path(), "ar01").unwrap();
+
+        let archived = load_archived(tmp.path()).await.unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(archived.contains_key("ar01"));
+
+        let active = load_all(tmp.path()).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(active.contains_key("ac01"));
+    }
+
+    #[tokio::test]
+    async fn test_load_archived_empty_when_no_archive_dir() {
+        let tmp = TempDir::new().unwrap();
+        // Don't call init — no .bears/ or archive/ exists
+        // Manually create just .bears/ without archive subdir
+        fs::create_dir_all(tasks_dir(tmp.path())).unwrap();
+        let archived = load_archived(tmp.path()).await.unwrap();
+        assert!(archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_all_known_ids_includes_archived() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let t1 = Task::new("id01".into(), "Active".into(), Priority::P2);
+        save(tmp.path(), &t1).unwrap();
+        let t2 = Task::new("id02".into(), "To archive".into(), Priority::P1);
+        save(tmp.path(), &t2).unwrap();
+
+        move_to_archive(tmp.path(), "id02").unwrap();
+
+        let ids = all_known_ids(tmp.path()).await.unwrap();
+        assert!(ids.contains("id01"), "active id should be included");
+        assert!(ids.contains("id02"), "archived id should be included");
+        assert_eq!(ids.len(), 2);
     }
 }
