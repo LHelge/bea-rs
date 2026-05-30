@@ -24,7 +24,9 @@ pub fn create_task(
     task_type: TaskType,
 ) -> Result<Task> {
     let config = config::load(base)?;
-    let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
+    let mut existing_ids: HashSet<String> = tasks.keys().cloned().collect();
+    // Also exclude archived IDs so new tasks never reuse an archived ID.
+    existing_ids.extend(store::archived_id_set(base));
     let id = task::generate_id(&existing_ids, config.id_length as usize);
 
     let unknown: Vec<String> = depends_on
