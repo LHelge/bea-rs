@@ -113,18 +113,35 @@ impl Widget for InputPromptWidget<'_> {
     }
 }
 
+/// Truncate `input` to fit within `inner_width` columns, using character-based counting.
+///
+/// If the input exceeds `inner_width` characters, a `…` prefix is prepended and
+/// the last `inner_width - 1` characters of `input` are shown. This avoids byte-slicing
+/// mid-codepoint panics for multi-byte UTF-8 input (accented chars, emoji, etc.).
+pub(in crate::tui) fn truncate_input_for_display(input: &str, inner_width: usize) -> String {
+    let char_count = input.chars().count();
+    if char_count > inner_width && inner_width > 1 {
+        let tail_len = inner_width - 1; // one column reserved for the '…' prefix
+        let tail: String = input
+            .chars()
+            .rev()
+            .take(tail_len)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("…{tail}")
+    } else {
+        input.to_string()
+    }
+}
+
 /// Shared helper: clear area, render a bordered text box with optional input scrolling.
 fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str, theme: &Theme) {
     Clear.render(area, buf);
 
     let inner_width = area.width.saturating_sub(2) as usize;
-    let display_text = if input.len() > inner_width && inner_width > 1 {
-        let tail_len = inner_width - 1;
-        let start = input.len() - tail_len;
-        format!("…{}", &input[start..])
-    } else {
-        input.to_string()
-    };
+    let display_text = truncate_input_for_display(input, inner_width);
 
     Paragraph::new(display_text)
         .block(
@@ -135,4 +152,74 @@ fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str, theme
         )
         .style(Style::default().fg(theme.title_fg))
         .render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_input_for_display;
+
+    #[test]
+    fn short_input_returned_unchanged() {
+        assert_eq!(truncate_input_for_display("hello", 10), "hello");
+    }
+
+    #[test]
+    fn exact_fit_not_truncated() {
+        assert_eq!(truncate_input_for_display("hello", 5), "hello");
+    }
+
+    #[test]
+    fn ascii_truncation_adds_ellipsis() {
+        // "abcdefghij" is 10 chars, inner_width=5 → "…fghij" (tail_len=4 → "…ghij")
+        let result = truncate_input_for_display("abcdefghij", 5);
+        assert!(result.starts_with('…'), "should start with ellipsis");
+        assert_eq!(
+            result.chars().count(),
+            5,
+            "should be exactly inner_width chars"
+        );
+    }
+
+    /// Regression: multi-byte UTF-8 input must not panic and must display correctly.
+    #[test]
+    fn multibyte_utf8_no_panic_and_correct_tail() {
+        // Each of these chars is 2–4 bytes in UTF-8; byte-slicing at a computed
+        // byte offset would panic with 'byte index N is not a char boundary'.
+        let input = "café naïve résumé 🦀 done";
+        let inner_width = 8;
+        // Must not panic
+        let result = truncate_input_for_display(input, inner_width);
+        // Result must fit within inner_width chars and start with '…'
+        assert!(
+            result.starts_with('…'),
+            "result should start with ellipsis: {result:?}"
+        );
+        assert_eq!(
+            result.chars().count(),
+            inner_width,
+            "result should be exactly inner_width chars: {result:?}"
+        );
+        // The tail should be the last (inner_width - 1) chars of input
+        let expected_tail: String = input
+            .chars()
+            .rev()
+            .take(inner_width - 1)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        assert!(
+            result.ends_with(&expected_tail),
+            "result {result:?} should end with {expected_tail:?}"
+        );
+    }
+
+    /// Emoji input: single emoji is 1 char (multiple bytes); truncation must not panic.
+    #[test]
+    fn emoji_only_input_no_panic() {
+        let input = "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀"; // 10 crabs, each 4 bytes
+        let result = truncate_input_for_display(input, 5);
+        assert!(result.starts_with('…'));
+        assert_eq!(result.chars().count(), 5);
+    }
 }
