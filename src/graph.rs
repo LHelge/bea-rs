@@ -196,13 +196,20 @@ impl Graph {
             }
         }
 
-        // Seed with zero-in-degree nodes, sorted by priority then created
-        let mut queue: Vec<&str> = in_degree
+        // Seed with zero-in-degree nodes, sorted by priority then created.
+        // Use VecDeque for O(1) front-pop (Vec::remove(0) is O(n)).
+        // NOTE: newly-ready nodes are sorted among themselves and appended to the
+        // back of the queue rather than merged into the existing entries, so the
+        // overall ordering is only approximately priority-sorted when independent
+        // batches interleave. This is intentional: the fully-correct merge would
+        // require a priority-queue rebuild on every step and is not worth the
+        // complexity for the plan display use-case.
+        let mut seed: Vec<&str> = in_degree
             .iter()
             .filter(|&(_, deg)| *deg == 0)
             .map(|(&id, _)| id)
             .collect();
-        queue.sort_by(|a, b| {
+        seed.sort_by(|a, b| {
             let ta = tasks.get(*a);
             let tb = tasks.get(*b);
             match (ta, tb) {
@@ -213,10 +220,9 @@ impl Graph {
                 _ => std::cmp::Ordering::Equal,
             }
         });
-
+        let mut queue: VecDeque<&str> = seed.into_iter().collect();
         let mut result: Vec<&'a Task> = Vec::new();
-        while !queue.is_empty() {
-            let current = queue.remove(0);
+        while let Some(current) = queue.pop_front() {
             if let Some(task) = tasks.get(current) {
                 result.push(task);
             }
@@ -234,7 +240,7 @@ impl Graph {
                         }
                     }
                 }
-                // Sort newly ready by priority then created
+                // Sort newly ready by priority then created before appending
                 newly_ready.sort_by(|a, b| {
                     let ta = tasks.get(*a);
                     let tb = tasks.get(*b);
