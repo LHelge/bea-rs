@@ -47,7 +47,7 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
         }
     }
 
-    // Read and parse all files in parallel
+    // Read all files in parallel
     let mut join_set = JoinSet::new();
     for path in paths {
         join_set.spawn(async move {
@@ -56,9 +56,18 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
         });
     }
 
-    let mut tasks = HashMap::new();
+    // Collect all results first, then sort by path so the in-memory winner
+    // for a duplicate ID is the lexicographically-first filename — matching
+    // the deterministic rule used by find_task_path.
+    let mut results = Vec::new();
     while let Some(result) = join_set.join_next().await {
         let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        results.push((path, content));
+    }
+    results.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut tasks = HashMap::new();
+    for (path, content) in results {
         let content = content?;
         match task::parse_task(&content) {
             Ok(t) => {
@@ -116,9 +125,16 @@ pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
         });
     }
 
-    let mut tasks = HashMap::new();
+    // Collect and sort by path for the same determinism as load_all.
+    let mut results = Vec::new();
     while let Some(result) = join_set.join_next().await {
         let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        results.push((path, content));
+    }
+    results.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut tasks = HashMap::new();
+    for (path, content) in results {
         let content = content?;
         match task::parse_task(&content) {
             Ok(t) => {
@@ -149,6 +165,7 @@ pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
 }
 
 /// Find the file path for an archived task by its exact ID.
+/// Uses the same lexicographic-first rule as find_task_path.
 // Will be consumed by the archive CLI/MCP commands (separate task).
 #[allow(dead_code)]
 pub fn find_archived_path(base: &Path, id: &str) -> Result<PathBuf> {
@@ -158,16 +175,21 @@ pub fn find_archived_path(base: &Path, id: &str) -> Result<PathBuf> {
     }
     let prefix = format!("{id}-");
 
+    let mut matches: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(&prefix) && name.ends_with(".md") {
-            return Ok(entry.path());
+            matches.push(entry.path());
         }
     }
 
-    Err(Error::TaskNotFound(id.into()))
+    matches.sort();
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::TaskNotFound(id.into()))
 }
 
 /// Move a task file from `.bears/` to `.bears/archive/`.
@@ -235,20 +257,28 @@ pub fn archived_id_set(base: &Path) -> HashSet<String> {
 }
 
 /// Find the file path for a task by its ID prefix.
+/// When multiple files share the same ID prefix (duplicate-ID situation),
+/// returns the lexicographically first filename so the on-disk winner is
+/// deterministic and matches the winner chosen by load_all.
 pub fn find_task_path(base: &Path, id: &str) -> Result<PathBuf> {
     let dir = tasks_dir(base);
     let prefix = format!("{id}-");
 
+    let mut matches: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(&prefix) && name.ends_with(".md") {
-            return Ok(entry.path());
+            matches.push(entry.path());
         }
     }
 
-    Err(Error::TaskNotFound(id.into()))
+    matches.sort();
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::TaskNotFound(id.into()))
 }
 
 /// Load a single task by exact ID (used in tests and for file-level operations).
@@ -592,6 +622,52 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks["tk02"].task_type, TaskType::Task);
         assert_eq!(tasks["ep02"].task_type, TaskType::Epic);
+    }
+
+    /// Two files that share the same task ID (a corrupt state that can arise
+    /// e.g. from a botched manual edit) must be resolved deterministically:
+    /// load_all keeps the task from the lexicographically-first filename, and
+    /// find_task_path returns that same file — so memory and disk agree.
+    #[tokio::test]
+    async fn test_load_all_duplicate_id_deterministic() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(BEARS_DIR);
+
+        // Build a minimal valid frontmatter block for a shared ID "dup1".
+        // "aaa" slug sorts before "zzz", so "dup1-aaa-slug.md" must win.
+        let make_content = |title: &str| {
+            format!(
+                "---\nid: dup1\ntitle: {title}\nstatus: open\npriority: P2\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n"
+            )
+        };
+
+        let first_file = dir.join("dup1-aaa-slug.md"); // lex-first
+        let second_file = dir.join("dup1-zzz-slug.md"); // lex-second
+
+        fs::write(&first_file, make_content("First file")).unwrap();
+        fs::write(&second_file, make_content("Second file")).unwrap();
+
+        // load_all: only one entry for "dup1", and it comes from the lex-first file
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "duplicate should be deduplicated to one entry"
+        );
+        assert_eq!(
+            tasks["dup1"].title, "First file",
+            "lex-first file must win in load_all"
+        );
+
+        // find_task_path must return the same lex-first file
+        let path = find_task_path(tmp.path(), "dup1").unwrap();
+        assert!(
+            path.ends_with("dup1-aaa-slug.md"),
+            "find_task_path must return lex-first file, got: {}",
+            path.display()
+        );
     }
 
     // ── Archive storage layer tests ──────────────────────────────────
