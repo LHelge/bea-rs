@@ -263,14 +263,9 @@ pub fn build_graph(tasks: &HashMap<String, Task>) -> Graph {
     Graph::build(tasks)
 }
 
-/// Compute effective priorities for all tasks.
+/// Compute effective priorities for all tasks in a single O(V+E) pass.
 pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
-    let graph = Graph::build(tasks);
-    let mut map = HashMap::new();
-    for id in tasks.keys() {
-        map.insert(id.clone(), graph.effective_priority(id, tasks));
-    }
-    map
+    Graph::build(tasks).effective_priorities_all(tasks)
 }
 
 /// Progress of an epic: how many children are done vs total.
