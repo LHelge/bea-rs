@@ -83,32 +83,12 @@ impl std::str::FromStr for TaskType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Priority {
     P0,
     P1,
     P2,
     P3,
-}
-
-impl Ord for Priority {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let rank = |p: &Priority| -> u8 {
-            match p {
-                Priority::P0 => 0,
-                Priority::P1 => 1,
-                Priority::P2 => 2,
-                Priority::P3 => 3,
-            }
-        };
-        rank(self).cmp(&rank(other))
-    }
-}
-
-impl PartialOrd for Priority {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl fmt::Display for Priority {
