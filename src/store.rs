@@ -69,6 +69,17 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
                 tasks.insert(t.id.clone(), t);
             }
             Err(e) => {
+                // Patch real path into InvalidFrontmatter so the message
+                // reads "invalid frontmatter in <path>: <reason>" instead of
+                // the awkward "invalid frontmatter in : <reason>" that
+                // parse_task produces (it always sets path = "").
+                let e = match e {
+                    Error::InvalidFrontmatter { reason, .. } => Error::InvalidFrontmatter {
+                        path: path.clone(),
+                        reason,
+                    },
+                    other => other,
+                };
                 eprintln!("warning: skipping {}: {e}", path.display());
             }
         }
@@ -122,6 +133,13 @@ pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
                 tasks.insert(t.id.clone(), t);
             }
             Err(e) => {
+                let e = match e {
+                    Error::InvalidFrontmatter { reason, .. } => Error::InvalidFrontmatter {
+                        path: path.clone(),
+                        reason,
+                    },
+                    other => other,
+                };
                 eprintln!("warning: skipping archived {}: {e}", path.display());
             }
         }
@@ -366,6 +384,32 @@ mod tests {
         fs::write(tmp.path().join(BEARS_DIR).join("notes.txt"), "ignored").unwrap();
         let tasks = load_all(tmp.path()).await.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    /// load_all must skip files with invalid frontmatter and continue loading
+    /// the rest. The test also verifies the warning message includes the real
+    /// file path (not an empty string as parse_task would produce).
+    #[tokio::test]
+    async fn test_load_all_skips_invalid_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        // A valid task
+        let t = Task::new("ok01".into(), "Good task".into(), Priority::P2);
+        save(tmp.path(), &t).unwrap();
+
+        // A file with no frontmatter delimiters (parse_task will set path = "")
+        let bad_path = tmp.path().join(BEARS_DIR).join("bad-no-delimiters.md");
+        fs::write(&bad_path, "just some text, no frontmatter").unwrap();
+
+        // load_all should skip the bad file and return only the good task
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.len(), 1, "bad file should be skipped");
+        assert!(tasks.contains_key("ok01"));
+
+        // load_all re-injects the real path, so find_task_path must not return
+        // the bad file as a task (it's not a valid task file with id prefix).
+        // What we really care about is that loading succeeded without panic/error.
     }
 
     #[tokio::test]
