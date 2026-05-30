@@ -7,48 +7,66 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// Generate `Display` and `FromStr` for an enum whose serde string forms are
+/// the single source of truth.  Each arm is `Variant => "string"`.
+/// The error message prefix (e.g. `"invalid status"`) is passed as `$err_prefix`.
+macro_rules! impl_str_enum {
+    (
+        $ty:ty,
+        $err_prefix:literal,
+        $( $variant:path => $s:literal ),+ $(,)?
+    ) => {
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let s = match self {
+                    $( $variant => $s, )+
+                };
+                f.write_str(s)
+            }
+        }
+
+        impl std::str::FromStr for $ty {
+            type Err = String;
+            fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+                match s {
+                    $( $s => Ok($variant), )+
+                    _ => Err(format!("{}: {s}", $err_prefix)),
+                }
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Status {
+    #[serde(rename = "open")]
     Open,
+    #[serde(rename = "in_progress")]
     InProgress,
+    #[serde(rename = "done")]
     Done,
+    #[serde(rename = "blocked")]
     Blocked,
+    #[serde(rename = "cancelled")]
     Cancelled,
 }
 
-impl fmt::Display for Status {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Status::Open => write!(f, "open"),
-            Status::InProgress => write!(f, "in_progress"),
-            Status::Done => write!(f, "done"),
-            Status::Blocked => write!(f, "blocked"),
-            Status::Cancelled => write!(f, "cancelled"),
-        }
-    }
-}
-
-impl std::str::FromStr for Status {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "open" => Ok(Status::Open),
-            "in_progress" => Ok(Status::InProgress),
-            "done" => Ok(Status::Done),
-            "blocked" => Ok(Status::Blocked),
-            "cancelled" => Ok(Status::Cancelled),
-            _ => Err(format!("invalid status: {s}")),
-        }
-    }
-}
+impl_str_enum!(
+    Status,
+    "invalid status",
+    Status::Open       => "open",
+    Status::InProgress => "in_progress",
+    Status::Done       => "done",
+    Status::Blocked    => "blocked",
+    Status::Cancelled  => "cancelled",
+);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum TaskType {
     #[default]
+    #[serde(rename = "task")]
     Task,
+    #[serde(rename = "epic")]
     Epic,
 }
 
@@ -62,59 +80,33 @@ impl TaskType {
     }
 }
 
-impl fmt::Display for TaskType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TaskType::Task => write!(f, "task"),
-            TaskType::Epic => write!(f, "epic"),
-        }
-    }
-}
-
-impl std::str::FromStr for TaskType {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "task" => Ok(TaskType::Task),
-            "epic" => Ok(TaskType::Epic),
-            _ => Err(format!("invalid task type: {s}")),
-        }
-    }
-}
+impl_str_enum!(
+    TaskType,
+    "invalid task type",
+    TaskType::Task => "task",
+    TaskType::Epic => "epic",
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Priority {
+    #[serde(rename = "P0")]
     P0,
+    #[serde(rename = "P1")]
     P1,
+    #[serde(rename = "P2")]
     P2,
+    #[serde(rename = "P3")]
     P3,
 }
 
-impl fmt::Display for Priority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Priority::P0 => write!(f, "P0"),
-            Priority::P1 => write!(f, "P1"),
-            Priority::P2 => write!(f, "P2"),
-            Priority::P3 => write!(f, "P3"),
-        }
-    }
-}
-
-impl std::str::FromStr for Priority {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "P0" => Ok(Priority::P0),
-            "P1" => Ok(Priority::P1),
-            "P2" => Ok(Priority::P2),
-            "P3" => Ok(Priority::P3),
-            _ => Err(format!("invalid priority: {s}")),
-        }
-    }
-}
+impl_str_enum!(
+    Priority,
+    "invalid priority",
+    Priority::P0 => "P0",
+    Priority::P1 => "P1",
+    Priority::P2 => "P2",
+    Priority::P3 => "P3",
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -740,5 +732,69 @@ updated: 2026-03-15T10:30:00Z
         let s = t.summary(None);
         let json = serde_json::to_value(&s).unwrap();
         assert!(json.get("type").is_none());
+    }
+
+    /// Verify that Display, FromStr, and serde all agree on the exact string
+    /// forms for every variant — one source of truth.
+    #[test]
+    fn test_enum_string_roundtrip() {
+        // Status
+        let status_cases: &[(Status, &str)] = &[
+            (Status::Open, "open"),
+            (Status::InProgress, "in_progress"),
+            (Status::Done, "done"),
+            (Status::Blocked, "blocked"),
+            (Status::Cancelled, "cancelled"),
+        ];
+        for (variant, s) in status_cases {
+            // Display matches
+            assert_eq!(variant.to_string(), *s, "Status Display mismatch");
+            // FromStr round-trips
+            assert_eq!(
+                &s.parse::<Status>().unwrap(),
+                variant,
+                "Status FromStr mismatch"
+            );
+            // serde JSON matches
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json.as_str().unwrap(), *s, "Status serde mismatch");
+            let de: Status = serde_json::from_value(json).unwrap();
+            assert_eq!(&de, variant, "Status serde round-trip mismatch");
+        }
+
+        // Priority
+        let priority_cases: &[(Priority, &str)] = &[
+            (Priority::P0, "P0"),
+            (Priority::P1, "P1"),
+            (Priority::P2, "P2"),
+            (Priority::P3, "P3"),
+        ];
+        for (variant, s) in priority_cases {
+            assert_eq!(variant.to_string(), *s, "Priority Display mismatch");
+            assert_eq!(
+                &s.parse::<Priority>().unwrap(),
+                variant,
+                "Priority FromStr mismatch"
+            );
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json.as_str().unwrap(), *s, "Priority serde mismatch");
+            let de: Priority = serde_json::from_value(json).unwrap();
+            assert_eq!(&de, variant, "Priority serde round-trip mismatch");
+        }
+
+        // TaskType
+        let type_cases: &[(TaskType, &str)] = &[(TaskType::Task, "task"), (TaskType::Epic, "epic")];
+        for (variant, s) in type_cases {
+            assert_eq!(variant.to_string(), *s, "TaskType Display mismatch");
+            assert_eq!(
+                &s.parse::<TaskType>().unwrap(),
+                variant,
+                "TaskType FromStr mismatch"
+            );
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json.as_str().unwrap(), *s, "TaskType serde mismatch");
+            let de: TaskType = serde_json::from_value(json).unwrap();
+            assert_eq!(&de, variant, "TaskType serde round-trip mismatch");
+        }
     }
 }
