@@ -129,9 +129,7 @@ fn color_tags(tags: &[String]) -> String {
     joined.if_supports_color(Stdout, |t| t.dimmed()).to_string()
 }
 
-fn output<T: Serialize>(value: &T, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(value)?);
-    }
+fn output<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

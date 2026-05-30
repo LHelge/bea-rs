@@ -17,10 +17,7 @@ use super::{color_id, color_priority, color_status, color_tags, format_priority,
 pub fn cmd_init(base: &Path, json: bool) -> Result<()> {
     let dir = store::init(base)?;
     if json {
-        output(
-            &serde_json::json!({ "path": dir.display().to_string() }),
-            true,
-        )?;
+        output(&serde_json::json!({ "path": dir.display().to_string() }))?;
     } else {
         println!("Initialized bears in {}", dir.display());
     }
@@ -54,7 +51,7 @@ pub fn cmd_create(
     )?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!("Created task {} — {}", t.id, t.title);
     }
@@ -82,7 +79,7 @@ pub fn cmd_list(
 
     if json {
         let summaries: Vec<_> = filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-        output(&summaries, true)?;
+        output(&summaries)?;
     } else {
         if filtered.is_empty() {
             println!("No tasks found.");
@@ -129,7 +126,7 @@ pub fn cmd_ready(
 
     if json {
         let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-        output(&summaries, true)?;
+        output(&summaries)?;
     } else {
         if ready.is_empty() {
             println!("No tasks ready.");
@@ -157,7 +154,7 @@ pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
             .iter()
             .map(|t| t.epic_summary(service::epic_progress(tasks, &t.id)))
             .collect();
-        output(&out, true)?;
+        output(&out)?;
     } else if epics.is_empty() {
         println!("No epics found.");
     } else {
@@ -192,7 +189,7 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool)
     let ep = eff.get(&t.id);
 
     if json {
-        output(&t.detail(ep), true)?;
+        output(&t.detail(ep))?;
     } else {
         if t.task_type.is_epic() {
             let p = service::epic_progress(tasks, &t.id);
@@ -278,7 +275,7 @@ fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<
     if json {
         let eff = service::effective_priorities(tasks);
         let details: Vec<_> = plan.iter().map(|t| t.detail(eff.get(&t.id))).collect();
-        output(&details, true)?;
+        output(&details)?;
     } else {
         for (i, t) in plan.iter().enumerate() {
             print!("# {}. {}\n\n", i + 1, t.title);
@@ -308,7 +305,7 @@ pub fn cmd_update(
     )?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!("Updated task {} — {}", t.id, t.title);
     }
@@ -325,7 +322,7 @@ pub fn cmd_status(
     let t = service::set_status(base, tasks, id, status)?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!(
             "[{}] {} → {}",
@@ -347,7 +344,7 @@ pub fn cmd_dep_add(
     let t = service::add_dependency(base, tasks, id, depends_on)?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!("[{}] now depends on [{}]", id, depends_on);
     }
@@ -364,7 +361,7 @@ pub fn cmd_dep_remove(
     let t = service::remove_dependency(base, tasks, id, depends_on)?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!("[{}] no longer depends on [{}]", id, depends_on);
     }
@@ -379,7 +376,7 @@ pub fn cmd_dep_tree(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Resu
 
     if json {
         let json_tree = DepNodeJson::from_dep_node(&tree);
-        output(&json_tree, true)?;
+        output(&json_tree)?;
     } else {
         let eff: HashMap<String, Priority> = tasks
             .keys()
@@ -477,7 +474,7 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
 
     if json {
         let adj = graph.adjacency_list();
-        output(&adj, true)?;
+        output(&adj)?;
         return Ok(());
     }
 
@@ -532,7 +529,7 @@ pub fn cmd_prune(
     let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
-        output(&summaries, true)?;
+        output(&summaries)?;
     } else {
         if deleted.is_empty() {
             println!("No tasks to prune.");
@@ -549,7 +546,7 @@ pub fn cmd_delete(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bo
     let t = service::delete_task(base, tasks, id)?;
 
     if json {
-        output(&t.summary(None), true)?;
+        output(&t.summary(None))?;
     } else {
         println!("Deleted task {} — {}", t.id, t.title);
     }
@@ -561,7 +558,7 @@ pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: b
 
     if json {
         let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
-        output(&summaries, true)?;
+        output(&summaries)?;
     } else {
         if results.is_empty() {
             println!("No tasks matching \"{query}\".");
@@ -612,7 +609,7 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     store::save(base, &edited)?;
 
     if json {
-        output(&edited.summary(None), true)?;
+        output(&edited.summary(None))?;
     } else {
         println!("Edited task {} — {}", edited.id, edited.title);
     }
