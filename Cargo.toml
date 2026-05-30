@@ -17,6 +17,8 @@ chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive"] }
 clap_complete = "4.6.0"
 crossterm = "0.29.0"
+notify = "8.2.0"
+notify-debouncer-mini = "0.7.0"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 rand = "0.10.0"
 ratatui = "0.30.0"
