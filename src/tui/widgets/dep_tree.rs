@@ -82,6 +82,11 @@ fn render_dep_node<'a>(
 
     if node.cycle {
         spans.push(Span::styled(" (cycle)", Style::default().fg(Color::Red)));
+    } else if node.seen {
+        spans.push(Span::styled(
+            " (see above)",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     lines.push(Line::from(spans));
