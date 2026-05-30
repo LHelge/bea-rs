@@ -877,10 +877,60 @@ mod tests {
         assert_eq!(sorted.len(), 2);
     }
 
-    // --- DAG rendering: linear node count assertion --------------------------------
+    // --- Coupled-graph regression guards ------------------------------------------
+    //
+    // Fast structural tests (always run) verify that algorithmic fixes hold for
+    // small representative graphs without any timing dependency.
+    //
+    // Heavy timing tests are marked `#[ignore]` and must be run explicitly with
+    //   cargo test -- --ignored
+    // They use std::time::Instant with generous bounds; any reasonable hardware
+    // should satisfy them.
 
     fn count_nodes(node: &DepNode<'_>) -> usize {
         1 + node.children.iter().map(count_nodes).sum::<usize>()
+    }
+
+    /// Fast structural check: effective priorities on a long chain are correct.
+    /// If effective_priorities_all were O(V²) or O(V*E), the values would still
+    /// be correct but the large graph below would timeout — this test documents
+    /// expected values on a chain without relying on timing.
+    #[test]
+    fn test_effective_priority_long_chain_correct() {
+        // Build chain: t0 <- t1 <- t2 <- ... <- t19
+        // t19 has priority P0; all others have P3.
+        // effective(t0) should be P0 (propagated from t19 through the chain).
+        let n = 20usize;
+        let mut task_list = Vec::new();
+        for i in 0..n {
+            let priority = if i == n - 1 {
+                Priority::P0
+            } else {
+                Priority::P3
+            };
+            task_list.push(make_task(&format!("t{i}"), Status::Open, priority, vec![]));
+        }
+        // Wire chain: t_{i+1} depends on t_i
+        for i in 0..n - 1 {
+            task_list[i + 1].depends_on = vec![format!("t{i}")];
+        }
+        let tasks = make_tasks(task_list);
+        let graph = Graph::build(&tasks);
+
+        // effective(t0) must be P0 (t19 depends transitively on t0's output)
+        let eff = graph.effective_priorities_all(&tasks);
+        assert_eq!(
+            eff["t0"],
+            Priority::P0,
+            "t0 effective priority should be P0"
+        );
+        assert_eq!(
+            eff["t9"],
+            Priority::P0,
+            "t9 effective priority should be P0"
+        );
+        // t19 has own P0
+        assert_eq!(eff["t19"], Priority::P0);
     }
 
     #[test]
@@ -922,6 +972,151 @@ mod tests {
             node_count <= v + e,
             "node_count={node_count} exceeded V+E={} — exponential blowup detected",
             v + e
+        );
+    }
+
+    // --- #[ignore]'d timing benchmarks (run with: cargo test -- --ignored) --------
+    //
+    // These build a densely coupled graph of N tasks and assert that the key
+    // operations complete well within a generous wall-clock bound. They are
+    // `#[ignore]` to avoid slowing down the default `cargo test` run.
+
+    /// Build N tasks wired as a full "staircase": task i depends on task i-1,
+    /// plus every 5th task depends on a shared "bottom" task.
+    fn make_dense_tasks(n: usize) -> HashMap<String, Task> {
+        let mut list = Vec::with_capacity(n + 1);
+        // Shared bottom-of-chain task
+        list.push(make_task("bottom", Status::Done, Priority::P2, vec![]));
+        for i in 0..n {
+            let id = format!("t{i:04}");
+            let priority = if i % 10 == 0 {
+                Priority::P0
+            } else {
+                Priority::P3
+            };
+            list.push(make_task(&id, Status::Open, priority, vec![]));
+        }
+        // Wire dependencies after creation (make_task takes &str slice)
+        let mut map: HashMap<String, Task> = list.into_iter().map(|t| (t.id.clone(), t)).collect();
+        for i in 0..n {
+            let id = format!("t{i:04}");
+            let mut deps = vec!["bottom".to_string()];
+            if i > 0 {
+                deps.push(format!("t{:04}", i - 1));
+            }
+            map.get_mut(&id).unwrap().depends_on = deps;
+        }
+        map
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_effective_priorities_large_graph() {
+        // 500-node staircase — each node depends on 1-2 predecessors.
+        // effective_priorities_all should finish in well under 1 second.
+        let n = 500;
+        let tasks = make_dense_tasks(n);
+        let graph = Graph::build(&tasks);
+
+        let start = std::time::Instant::now();
+        let eff = graph.effective_priorities_all(&tasks);
+        let elapsed = start.elapsed();
+
+        assert_eq!(eff.len(), n + 1); // n tasks + bottom
+        assert!(
+            elapsed.as_millis() < 500,
+            "effective_priorities_all on {n} tasks took {}ms (expected <500ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_ready_large_graph() {
+        // 500-node staircase. Only t0000 is truly ready (all deps done = bottom only).
+        // Graph::ready should finish in well under 1 second.
+        let n = 500;
+        let tasks = make_dense_tasks(n);
+        let graph = Graph::build(&tasks);
+
+        let start = std::time::Instant::now();
+        let ready = graph.ready(&tasks, None, None, None);
+        let elapsed = start.elapsed();
+
+        // t0000 depends only on "bottom" (done), so it must be ready
+        assert!(
+            ready.iter().any(|t| t.id == "t0000"),
+            "t0000 should be in the ready list"
+        );
+        assert!(
+            elapsed.as_millis() < 500,
+            "graph.ready on {n} tasks took {}ms (expected <500ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_dep_tree_diamond_deep() {
+        // Build a deep 6-layer binary diamond: layer 0 → layer 1 (×2) → ... → layer 5 (1 node).
+        // Without the `seen` fix this would be exponential (2^5 = 32 leaf expansions).
+        // With the fix, node count should stay linear in V+E.
+        let layers = 6usize;
+        // layer 0: 1 node (root)
+        // layer k: 2^k nodes, each depending on all nodes in layer k+1
+        // layer 5: 1 node (shared leaf)
+        // We'll use owned ids; can't use &str in make_task with dynamic strings directly.
+        // Build manually.
+        let mut map: HashMap<String, Task> = HashMap::new();
+        let root = make_task("root", Status::Open, Priority::P1, vec![]);
+        map.insert("root".to_string(), root);
+
+        let mut layer_ids: Vec<Vec<String>> = Vec::new();
+        // layer 0 = root
+        layer_ids.push(vec!["root".to_string()]);
+        // layers 1..=layers-1
+        for l in 1..layers {
+            let count = if l == layers - 1 {
+                1
+            } else {
+                2usize.pow(l as u32)
+            };
+            let ids: Vec<String> = (0..count).map(|i| format!("l{l}_{i}")).collect();
+            layer_ids.push(ids);
+        }
+
+        // Create all tasks (no deps yet)
+        for ids in &layer_ids {
+            for id in ids {
+                let t = make_task(id, Status::Open, Priority::P1, vec![]);
+                map.insert(id.clone(), t);
+            }
+        }
+        // Wire: each node in layer l depends on all nodes in layer l+1
+        for l in 0..layers - 1 {
+            let next = layer_ids[l + 1].clone();
+            for id in &layer_ids[l] {
+                map.get_mut(id).unwrap().depends_on = next.clone();
+            }
+        }
+
+        let graph = Graph::build(&map);
+        let start = std::time::Instant::now();
+        let tree = graph.dep_tree(&map, "root").unwrap();
+        let elapsed = start.elapsed();
+
+        let node_count = count_nodes(&tree);
+        let v = map.len();
+        let e: usize = map.values().map(|t| t.depends_on.len()).sum();
+        assert!(
+            node_count <= v + e,
+            "node_count={node_count} exceeded V+E={} — exponential blowup",
+            v + e
+        );
+        assert!(
+            elapsed.as_millis() < 500,
+            "dep_tree on {layers}-layer diamond took {}ms (expected <500ms)",
+            elapsed.as_millis()
         );
     }
 }
