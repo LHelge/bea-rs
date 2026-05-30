@@ -36,6 +36,9 @@ impl Graph {
     }
 
     /// Return tasks that are ready: status is Open and all dependencies are Done.
+    ///
+    /// Effective priorities are computed once in O(V+E) rather than per-task
+    /// inside the sort comparator.
     pub fn ready<'a>(
         &self,
         tasks: &'a HashMap<String, Task>,
@@ -43,6 +46,8 @@ impl Graph {
         limit: Option<usize>,
         epic: Option<&str>,
     ) -> Vec<&'a Task> {
+        let eff = self.effective_priorities_all(tasks);
+
         let mut result: Vec<&Task> = tasks
             .values()
             .filter(|t| t.status == Status::Open)
@@ -58,10 +63,13 @@ impl Graph {
             .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
             .collect();
 
-        // Sort by effective priority (P0 first), then by creation date (oldest first)
+        // Sort by effective priority (P0 first), then by creation date (oldest first).
+        // The priority map was computed once above — no repeated BFS in the comparator.
         result.sort_by(|a, b| {
-            self.effective_priority(&a.id, tasks)
-                .cmp(&self.effective_priority(&b.id, tasks))
+            eff.get(&a.id)
+                .copied()
+                .unwrap_or(a.priority)
+                .cmp(&eff.get(&b.id).copied().unwrap_or(b.priority))
                 .then(a.created.cmp(&b.created))
         });
 
@@ -72,32 +80,102 @@ impl Graph {
         result
     }
 
-    /// Compute the effective priority of a task.
+    /// Compute the effective priority of a single task.
     /// This is the minimum (highest urgency) of the task's own priority and
     /// the priorities of all tasks that depend on it, transitively.
+    ///
+    /// For bulk computation prefer [`Graph::effective_priorities_all`] which
+    /// runs in O(V+E) instead of O(V+E) per call.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn effective_priority(&self, id: &str, tasks: &HashMap<String, Task>) -> Priority {
-        let own = tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3);
+        self.effective_priorities_all(tasks)
+            .remove(id)
+            .unwrap_or_else(|| tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3))
+    }
 
-        let mut best = own;
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(id.to_string());
+    /// Compute effective priorities for ALL tasks in a single O(V+E) pass.
+    ///
+    /// `effective(x) = min(own(x), min over direct dependents y of effective(y))`
+    ///
+    /// We process nodes in reverse-topological order (dependents before their
+    /// dependencies) so that by the time we visit a node its dependents are
+    /// already resolved. Nodes that participate in a cycle are not reached by
+    /// the topological pass and keep their own priority as a safe fallback.
+    pub fn effective_priorities_all(
+        &self,
+        tasks: &HashMap<String, Task>,
+    ) -> HashMap<String, Priority> {
+        // --- Step 1: Kahn topological sort over *all* known nodes ---------------
+        // We sort forward along `edges` (A depends-on B → edge A→B).
+        // Collect every node id from both maps.
+        let all_ids: HashSet<&str> = self
+            .edges
+            .keys()
+            .chain(self.reverse.keys())
+            .map(String::as_str)
+            .collect();
 
-        while let Some(current) = queue.pop_front() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            if let Some(dependents) = self.reverse.get(&current) {
-                for dep in dependents {
-                    if let Some(t) = tasks.get(dep.as_str()) {
-                        best = best.min(t.priority);
+        // in_degree counts how many dependencies each node has (intra-graph only).
+        let mut in_degree: HashMap<&str, usize> = all_ids.iter().map(|&id| (id, 0)).collect();
+        for id in &all_ids {
+            if let Some(deps) = self.edges.get(*id) {
+                for dep in deps {
+                    if all_ids.contains(dep.as_str()) {
+                        *in_degree.entry(id).or_default() += 1;
                     }
-                    queue.push_back(dep.clone());
                 }
             }
         }
 
-        best
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut topo_order: Vec<&str> = Vec::with_capacity(all_ids.len());
+        while let Some(current) = queue.pop_front() {
+            topo_order.push(current);
+            if let Some(dependents) = self.reverse.get(current) {
+                for dep in dependents {
+                    if let Some(d) = in_degree.get_mut(dep.as_str()) {
+                        *d -= 1;
+                        if *d == 0 {
+                            queue.push_back(dep.as_str());
+                        }
+                    }
+                }
+            }
+        }
+        // Any id not reached by Kahn's is in a cycle — will use own priority.
+
+        // --- Step 2: propagate in reverse-topological order ---------------------
+        // Process dependents first (end of topo_order) down to dependencies (start).
+        let mut eff: HashMap<String, Priority> = HashMap::with_capacity(all_ids.len());
+
+        // Seed: every node starts with its own priority.
+        for &id in &all_ids {
+            let own = tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3);
+            eff.insert(id.to_string(), own);
+        }
+
+        // Walk in reverse topological order: process dependents before dependencies.
+        for &id in topo_order.iter().rev() {
+            // Collect the best priority among all direct dependents of `id`.
+            let best_dependent: Option<Priority> = self
+                .reverse
+                .get(id)
+                .into_iter()
+                .flat_map(|s| s.iter())
+                .filter_map(|dep_id| eff.get(dep_id.as_str()).copied())
+                .min();
+
+            if let Some(best) = best_dependent {
+                let entry = eff.entry(id.to_string()).or_insert(Priority::P3);
+                *entry = (*entry).min(best);
+            }
+        }
+
+        eff
     }
 
     /// Check if adding an edge from -> to would create a cycle.

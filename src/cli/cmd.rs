@@ -380,10 +380,7 @@ pub fn cmd_dep_tree(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Resu
         let json_tree = DepNodeJson::from_dep_node(&tree);
         output(&json_tree)?;
     } else {
-        let eff: HashMap<String, Priority> = tasks
-            .keys()
-            .map(|id| (id.clone(), graph.effective_priority(id, tasks)))
-            .collect();
+        let eff = graph.effective_priorities_all(tasks);
         println!(
             "Dependency tree for {}:\n",
             tree.task.title.if_supports_color(Stdout, |t| t.bold())
@@ -485,11 +482,8 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
         return Ok(());
     }
 
-    // Compute effective priorities
-    let eff: HashMap<String, Priority> = tasks
-        .keys()
-        .map(|id| (id.clone(), graph.effective_priority(id, tasks)))
-        .collect();
+    // Compute effective priorities once in O(V+E)
+    let eff = graph.effective_priorities_all(tasks);
 
     // Roots: tasks that no other task depends on
     let all_deps: HashSet<&str> = tasks
