@@ -552,6 +552,13 @@ mod tests {
 
     // ── Archive storage layer tests ──────────────────────────────────
 
+    #[test]
+    fn test_init_creates_archive_dir() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        assert!(archive_dir(tmp.path()).exists());
+    }
+
     #[tokio::test]
     async fn test_load_all_ignores_archive_subdir() {
         let tmp = TempDir::new().unwrap();
