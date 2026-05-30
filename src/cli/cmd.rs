@@ -341,12 +341,13 @@ pub fn cmd_dep_add(
     depends_on: &str,
     json: bool,
 ) -> Result<()> {
+    let resolved_dep = store::resolve_prefix(tasks, depends_on)?;
     let t = service::add_dependency(base, tasks, id, depends_on)?;
 
     if json {
         output(&t.summary(None))?;
     } else {
-        println!("[{}] now depends on [{}]", id, depends_on);
+        println!("[{}] now depends on [{}]", t.id, resolved_dep);
     }
     Ok(())
 }
@@ -358,12 +359,13 @@ pub fn cmd_dep_remove(
     depends_on: &str,
     json: bool,
 ) -> Result<()> {
+    let resolved_dep = store::resolve_prefix(tasks, depends_on)?;
     let t = service::remove_dependency(base, tasks, id, depends_on)?;
 
     if json {
         output(&t.summary(None))?;
     } else {
-        println!("[{}] no longer depends on [{}]", id, depends_on);
+        println!("[{}] no longer depends on [{}]", t.id, resolved_dep);
     }
     Ok(())
 }
