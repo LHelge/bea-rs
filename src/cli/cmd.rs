@@ -419,6 +419,12 @@ fn print_tree(
             " {}",
             "[CYCLE]".if_supports_color(Stdout, |s| s.style(style))
         )
+    } else if node.seen {
+        let style = Style::new().dimmed();
+        format!(
+            " {}",
+            "(see above)".if_supports_color(Stdout, |s| s.style(style))
+        )
     } else {
         String::new()
     };

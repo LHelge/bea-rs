@@ -209,10 +209,17 @@ impl Graph {
     }
 
     /// Build a dependency tree for display.
-    /// Cycle-safe: nodes already on the current path are emitted as leaf markers.
+    ///
+    /// Uses two sets to bound rendering:
+    /// - `visiting` (path-local): cycle detection — a node on the current
+    ///   recursion path is emitted as a leaf with `cycle: true`.
+    /// - `seen` (render-global): DAG deduplication — a node already fully
+    ///   expanded on *any* earlier path is emitted as a leaf with `seen: true`
+    ///   (and no children), preventing exponential blowup on diamond shapes.
     pub fn dep_tree<'a>(&self, tasks: &'a HashMap<String, Task>, id: &str) -> Option<DepNode<'a>> {
-        let mut visited = HashSet::new();
-        self.dep_tree_inner(tasks, id, &mut visited)
+        let mut visiting = HashSet::new();
+        let mut seen = HashSet::new();
+        self.dep_tree_inner(tasks, id, &mut visiting, &mut seen)
     }
 
     fn dep_tree_inner<'a>(
@@ -220,22 +227,36 @@ impl Graph {
         tasks: &'a HashMap<String, Task>,
         id: &str,
         visiting: &mut HashSet<String>,
+        seen: &mut HashSet<String>,
     ) -> Option<DepNode<'a>> {
         let task = tasks.get(id)?;
 
         if !visiting.insert(id.to_string()) {
-            // Already on the current recursion path — cycle detected
+            // Already on the current recursion path — cycle detected.
             return Some(DepNode {
                 task,
                 children: Vec::new(),
                 cycle: true,
+                seen: false,
+            });
+        }
+
+        if !seen.insert(id.to_string()) {
+            // Already fully expanded on an earlier path — emit a reference leaf
+            // to avoid re-expanding (prevents exponential blowup on diamonds).
+            visiting.remove(id);
+            return Some(DepNode {
+                task,
+                children: Vec::new(),
+                cycle: false,
+                seen: true,
             });
         }
 
         let children = task
             .depends_on
             .iter()
-            .filter_map(|dep_id| self.dep_tree_inner(tasks, dep_id, visiting))
+            .filter_map(|dep_id| self.dep_tree_inner(tasks, dep_id, visiting, seen))
             .collect();
 
         visiting.remove(id);
@@ -244,6 +265,7 @@ impl Graph {
             task,
             children,
             cycle: false,
+            seen: false,
         })
     }
 
@@ -352,8 +374,11 @@ impl Graph {
 pub struct DepNode<'a> {
     pub task: &'a Task,
     pub children: Vec<DepNode<'a>>,
-    /// True when this node was already seen on the current path (cycle).
+    /// True when this node was already seen on the **current path** (cycle).
     pub cycle: bool,
+    /// True when this node was already fully expanded on an **earlier path**
+    /// (DAG diamond deduplication). Distinct from `cycle`.
+    pub seen: bool,
 }
 
 #[derive(Serialize)]
@@ -365,6 +390,8 @@ pub struct DepNodeJson {
     pub children: Vec<DepNodeJson>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cycle: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
 }
 
 impl DepNodeJson {
@@ -380,6 +407,7 @@ impl DepNodeJson {
                 .map(DepNodeJson::from_dep_node)
                 .collect(),
             cycle: node.cycle,
+            seen: node.seen,
         }
     }
 }
@@ -660,7 +688,9 @@ mod tests {
 
     #[test]
     fn test_dep_tree_no_cycle() {
-        // Diamond: a -> b, a -> c, b -> d, c -> d (no cycle — d appears twice but not cyclic)
+        // Diamond: a -> b, a -> c, b -> d, c -> d (no cycle).
+        // With DAG deduplication, d is fully expanded under the FIRST child that
+        // visits it and emitted as a `seen` reference leaf under the second.
         let tasks = make_tasks(vec![
             make_task("a", Status::Open, Priority::P1, vec!["b", "c"]),
             make_task("b", Status::Open, Priority::P1, vec!["d"]),
@@ -670,14 +700,35 @@ mod tests {
         let graph = Graph::build(&tasks);
         let tree = graph.dep_tree(&tasks, "a").unwrap();
         assert!(!tree.cycle);
-        // d should appear under both b and c, and neither should be marked as cycle
+        assert!(!tree.seen);
+        // Both b and c appear under a (neither is cycle or seen at that level)
+        assert_eq!(tree.children.len(), 2);
         for child in &tree.children {
             assert!(!child.cycle);
-            for grandchild in &child.children {
-                assert_eq!(grandchild.task.id, "d");
-                assert!(!grandchild.cycle);
-            }
+            // Each should have exactly one child for d
+            assert_eq!(child.children.len(), 1);
+            let d_node = &child.children[0];
+            assert_eq!(d_node.task.id, "d");
+            assert!(!d_node.cycle);
+            // d is expanded fully the first time; second occurrence is `seen`
         }
+        // Exactly one of the two d appearances is seen (the second visit)
+        let d_nodes: Vec<_> = tree
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .collect();
+        assert_eq!(d_nodes.len(), 2);
+        let seen_count = d_nodes.iter().filter(|n| n.seen).count();
+        let full_count = d_nodes.iter().filter(|n| !n.seen && !n.cycle).count();
+        assert_eq!(
+            seen_count, 1,
+            "exactly one d occurrence should be a seen-ref"
+        );
+        assert_eq!(
+            full_count, 1,
+            "exactly one d occurrence should be fully expanded"
+        );
     }
 
     #[test]
@@ -824,5 +875,53 @@ mod tests {
         let subset: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         let sorted = graph.topo_sort_subset(&subset, &tasks);
         assert_eq!(sorted.len(), 2);
+    }
+
+    // --- DAG rendering: linear node count assertion --------------------------------
+
+    fn count_nodes(node: &DepNode<'_>) -> usize {
+        1 + node.children.iter().map(count_nodes).sum::<usize>()
+    }
+
+    #[test]
+    fn test_dep_tree_deep_diamond_linear_node_count() {
+        // Build a "double-fan" diamond: root depends on L layers, each layer
+        // node depends on all nodes in the next layer, converging to a single
+        // shared leaf at the bottom.
+        //
+        //   root
+        //    |
+        //   L1a, L1b          (both depend on L2a, L2b)
+        //       |
+        //   L2a, L2b          (both depend on leaf)
+        //       |
+        //    leaf
+        //
+        // Without deduplication the tree would expand leaf 4 times (2^2).
+        // With the `seen` fix it appears at most once as a full node plus
+        // `seen`-ref placeholders — total node count stays bounded by O(V+E).
+        let tasks = make_tasks(vec![
+            make_task("root", Status::Open, Priority::P1, vec!["l1a", "l1b"]),
+            make_task("l1a", Status::Open, Priority::P1, vec!["l2a", "l2b"]),
+            make_task("l1b", Status::Open, Priority::P1, vec!["l2a", "l2b"]),
+            make_task("l2a", Status::Open, Priority::P1, vec!["leaf"]),
+            make_task("l2b", Status::Open, Priority::P1, vec!["leaf"]),
+            make_task("leaf", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "root").unwrap();
+
+        // 6 distinct nodes → maximum rendered nodes = 6 (V) + 4 (E where
+        // second-visit refs are emitted) = at most V+E = 10. In practice we
+        // get exactly V + (number of seen-ref appearances) which is at most
+        // V+E, well below the exponential 2^layers.
+        let node_count = count_nodes(&tree);
+        let v = tasks.len(); // 6
+        let e: usize = tasks.values().map(|t| t.depends_on.len()).sum(); // 8
+        assert!(
+            node_count <= v + e,
+            "node_count={node_count} exceeded V+E={} — exponential blowup detected",
+            v + e
+        );
     }
 }
