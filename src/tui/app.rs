@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{ListState, Widget};
 
-use crate::graph::Graph;
+use crate::graph::{self, Graph};
 use crate::task::{Status, Task, TaskType};
 
 use super::style::Theme;
@@ -103,7 +103,8 @@ impl Filter {
                 }
             }
             ListMode::Ready => {
-                // Ready pre-filters to open tasks only; graph check is done in apply_filter
+                // Quick pre-filter before the full readiness check (graph::is_task_ready)
+                // that is applied in apply_filter.
                 if task.status != Status::Open || task.task_type != TaskType::Task {
                     return false;
                 }
@@ -208,16 +209,9 @@ impl App {
             .iter()
             .filter(|t| self.filter.matches(t, &query_lower))
             .filter(|t| {
-                // For Ready mode, additionally check that all deps are done
-                if self.filter.list_mode == ListMode::Ready {
-                    t.depends_on.iter().all(|dep_id| {
-                        self.task_map
-                            .get(dep_id)
-                            .is_some_and(|dep| dep.status == Status::Done)
-                    })
-                } else {
-                    true
-                }
+                // For Ready mode, delegate to the canonical graph predicate so the
+                // rule lives in exactly one place.
+                self.filter.list_mode != ListMode::Ready || graph::is_task_ready(&self.task_map, t)
             })
             .cloned()
             .collect();
@@ -382,5 +376,69 @@ mod tests {
         assert_eq!(app.filter.list_mode, ListMode::Open);
         let has_done = app.tasks.iter().any(|t| t.status == Status::Done);
         assert!(!has_done);
+    }
+
+    /// The TUI Ready filter must agree with `graph::is_task_ready` on every task.
+    /// Specifically: a task with an unsatisfied dep must be excluded, and one
+    /// whose deps are all Done must be included.
+    #[test]
+    fn test_ready_filter_agrees_with_is_task_ready() {
+        use crate::graph;
+        use crate::task::{Priority, Task};
+
+        // Build a small set of tasks with varying readiness:
+        //  - "ready":    Open, dep on "done_dep" (Done)  → ready
+        //  - "blocked":  Open, dep on "open_dep" (Open)  → NOT ready
+        //  - "missing":  Open, dep on "ghost" (absent)   → NOT ready
+        //  - "done_dep": Done, no deps                   → not even Open
+        //  - "open_dep": Open, no deps                   → ready itself, but blocks "blocked"
+        let mut tasks_vec = Vec::new();
+        let make = |id: &str, status: Status, deps: Vec<&str>| {
+            let mut t = Task::new(id.to_string(), format!("Task {id}"), Priority::P1);
+            t.status = status;
+            t.depends_on = deps.into_iter().map(String::from).collect();
+            t
+        };
+        tasks_vec.push(make("ready", Status::Open, vec!["done_dep"]));
+        tasks_vec.push(make("blocked", Status::Open, vec!["open_dep"]));
+        tasks_vec.push(make("missing", Status::Open, vec!["ghost"]));
+        tasks_vec.push(make("done_dep", Status::Done, vec![]));
+        tasks_vec.push(make("open_dep", Status::Open, vec![]));
+
+        let task_map: HashMap<String, Task> = tasks_vec
+            .iter()
+            .map(|t| (t.id.clone(), t.clone()))
+            .collect();
+
+        let mut app = App::new(tasks_vec, task_map.clone(), std::path::PathBuf::from("."));
+        app.filter.list_mode = ListMode::Ready;
+        app.apply_filter();
+
+        let tui_ready_ids: std::collections::HashSet<&str> =
+            app.tasks.iter().map(|t| t.id.as_str()).collect();
+
+        for task in task_map.values() {
+            let predicate = graph::is_task_ready(&task_map, task);
+            let in_tui = tui_ready_ids.contains(task.id.as_str());
+            assert_eq!(
+                predicate, in_tui,
+                "TUI Ready filter and graph::is_task_ready disagree on task '{}'",
+                task.id
+            );
+        }
+
+        // Explicit spot-checks for clarity
+        assert!(
+            tui_ready_ids.contains("ready"),
+            "'ready' task should appear in TUI Ready list"
+        );
+        assert!(
+            !tui_ready_ids.contains("blocked"),
+            "'blocked' task (unsatisfied dep) must NOT appear in TUI Ready list"
+        );
+        assert!(
+            !tui_ready_ids.contains("missing"),
+            "'missing' task (absent dep) must NOT appear in TUI Ready list"
+        );
     }
 }
