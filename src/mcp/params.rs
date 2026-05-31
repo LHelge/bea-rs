@@ -87,3 +87,9 @@ pub struct PruneParams {
     /// Also delete done tasks (default: only cancelled)
     pub include_done: Option<bool>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PlanEpicParams {
+    /// Epic task ID
+    pub id: String,
+}
