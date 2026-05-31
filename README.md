@@ -95,6 +95,17 @@ Create the `.bears/` directory and `.bears.yml` config in the current directory.
 bea init
 ```
 
+Optionally scaffold coding-agent integration files with one or more harness flags:
+
+```sh
+bea init --claude    # CLAUDE.md + .mcp.json + .claude/skills/ + .claude/agents/
+bea init --copilot   # .github/copilot-instructions.md + .github/mcp.json + .github/skills/ + .github/agents/
+bea init --codex     # AGENTS.md
+bea init --claude --copilot   # combine flags
+```
+
+Flags are **idempotent**: re-running them on an already-initialized directory is safe and refreshes the files. When merging `.mcp.json` / `.github/mcp.json`, any pre-existing unrelated server entries are preserved. The generated MCP server entry always uses `bea mcp` (not `cargo run`).
+
 ### `bea create`
 ```sh
 bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--body "..."] [--epic]

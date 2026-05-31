@@ -1680,3 +1680,205 @@ fn test_sweep_skips_tasks_with_active_dependents() {
         .stdout(predicate::str::contains("Base dep"))
         .stdout(predicate::str::contains("Depends on base"));
 }
+
+// ─── Task sy3: init scaffolding e2e tests ────────────────────────────────────
+
+/// `bea init --claude` scaffolds CLAUDE.md, .mcp.json, skill, and agent files.
+#[test]
+fn test_init_claude_scaffolds_expected_files() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+
+    assert!(
+        tmp.path().join("CLAUDE.md").exists(),
+        "CLAUDE.md must be created by --claude"
+    );
+    assert!(
+        tmp.path().join(".mcp.json").exists(),
+        ".mcp.json must be created by --claude"
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/skills/bears-planning/SKILL.md")
+            .exists(),
+        "SKILL.md must be created"
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/skills/bears-planning/references/cli-fallback.md")
+            .exists(),
+        "cli-fallback.md must be created"
+    );
+    assert!(
+        tmp.path().join(".claude/agents/planner.md").exists(),
+        "planner.md must be created"
+    );
+}
+
+/// `bea init --copilot` scaffolds copilot-instructions.md, .github/mcp.json, skill, and agent files.
+#[test]
+fn test_init_copilot_scaffolds_expected_files() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--copilot"]).assert().success();
+
+    assert!(
+        tmp.path().join(".github/copilot-instructions.md").exists(),
+        ".github/copilot-instructions.md must be created"
+    );
+    assert!(
+        tmp.path().join(".github/mcp.json").exists(),
+        ".github/mcp.json must be created"
+    );
+    assert!(
+        tmp.path()
+            .join(".github/skills/bears-planning/SKILL.md")
+            .exists(),
+        "SKILL.md must be created"
+    );
+    assert!(
+        tmp.path()
+            .join(".github/skills/bears-planning/references/cli-fallback.md")
+            .exists(),
+        "cli-fallback.md must be created"
+    );
+    assert!(
+        tmp.path().join(".github/agents/planner.agent.md").exists(),
+        "planner.agent.md must be created"
+    );
+}
+
+/// `bea init --codex` scaffolds AGENTS.md but no .mcp.json.
+#[test]
+fn test_init_codex_scaffolds_expected_files() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--codex"]).assert().success();
+
+    assert!(
+        tmp.path().join("AGENTS.md").exists(),
+        "AGENTS.md must be created by --codex"
+    );
+    assert!(
+        !tmp.path().join(".mcp.json").exists(),
+        ".mcp.json must NOT be created by --codex alone"
+    );
+}
+
+/// Combining flags scaffolds files for all requested harnesses.
+#[test]
+fn test_init_combined_flags_scaffold_both() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["init", "--claude", "--copilot"])
+        .assert()
+        .success();
+
+    assert!(tmp.path().join("CLAUDE.md").exists());
+    assert!(tmp.path().join(".mcp.json").exists());
+    assert!(tmp.path().join(".github/copilot-instructions.md").exists());
+    assert!(tmp.path().join(".github/mcp.json").exists());
+}
+
+/// Running `bea init --claude` on an already-initialized directory is idempotent.
+#[test]
+fn test_init_claude_on_already_initialized_dir_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+    let first_mcp = std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap();
+
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+    let second_mcp = std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap();
+
+    assert_eq!(
+        first_mcp, second_mcp,
+        ".mcp.json must be identical after re-init"
+    );
+}
+
+/// `.mcp.json` merge preserves a pre-existing unrelated server entry.
+#[test]
+fn test_init_claude_mcp_json_preserves_existing_server() {
+    let tmp = TempDir::new().unwrap();
+
+    let pre_existing = serde_json::json!({
+        "mcpServers": {
+            "my-other-tool": { "command": "other", "args": ["serve"] }
+        }
+    });
+    std::fs::write(
+        tmp.path().join(".mcp.json"),
+        serde_json::to_string_pretty(&pre_existing).unwrap(),
+    )
+    .unwrap();
+
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+
+    let result: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+            .unwrap();
+    let servers = result["mcpServers"].as_object().unwrap();
+    assert!(servers.contains_key("bears"), "bears entry must be present");
+    assert!(
+        servers.contains_key("my-other-tool"),
+        "pre-existing server must be preserved"
+    );
+}
+
+/// The scaffolded `.mcp.json` uses `bea mcp` (not `cargo run …`).
+#[test]
+fn test_init_claude_mcp_json_uses_bea_mcp() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+            .unwrap();
+    let bears = &mcp["mcpServers"]["bears"];
+    assert_eq!(bears["command"].as_str().unwrap(), "bea");
+    assert_eq!(bears["args"][0].as_str().unwrap(), "mcp");
+}
+
+/// `bea init --copilot`: .github/mcp.json uses `bea mcp`.
+#[test]
+fn test_init_copilot_mcp_json_uses_bea_mcp() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--copilot"]).assert().success();
+
+    let mcp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join(".github/mcp.json")).unwrap(),
+    )
+    .unwrap();
+    let bears = &mcp["servers"]["bears"];
+    assert_eq!(bears["command"].as_str().unwrap(), "bea");
+    assert_eq!(bears["args"][0].as_str().unwrap(), "mcp");
+}
+
+/// Guard the packaging gotcha: template source files must exist on disk so that
+/// `cargo package` includes them (the `include_str!` macros embed them at compile
+/// time; if the files are missing from the published crate, users get a compile
+/// error when building from crates.io).
+#[test]
+fn test_template_source_files_exist_on_disk() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let expected_templates = [
+        "templates/claude/CLAUDE.md",
+        "templates/claude/mcp.json",
+        "templates/claude/skills/bears-planning/SKILL.md",
+        "templates/claude/skills/bears-planning/references/cli-fallback.md",
+        "templates/claude/agents/planner.md",
+        "templates/copilot/copilot-instructions.md",
+        "templates/copilot/mcp.json",
+        "templates/copilot/skills/bears-planning/SKILL.md",
+        "templates/copilot/skills/bears-planning/references/cli-fallback.md",
+        "templates/copilot/agents/planner.agent.md",
+        "templates/codex/AGENTS.md",
+    ];
+
+    for rel_path in &expected_templates {
+        let full = manifest_dir.join(rel_path);
+        assert!(
+            full.exists(),
+            "template source file missing (would break cargo package): {rel_path}"
+        );
+    }
+}
