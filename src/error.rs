@@ -39,14 +39,10 @@ pub enum Error {
     EditorFailed { reason: String },
 
     /// The task cannot be archived because active tasks depend on it.
-    // Will be consumed by archive CLI/MCP commands (separate task).
-    #[allow(dead_code)]
     #[error("task {id} is not archivable — active dependents: {}", blockers.join(", "))]
     NotArchivable { id: String, blockers: Vec<String> },
 
     /// The task is not found in the archive.
-    // Will be consumed by archive CLI/MCP commands (separate task).
-    #[allow(dead_code)]
     #[error("task not found in archive: {0}")]
     NotArchived(String),
 

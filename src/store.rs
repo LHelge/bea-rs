@@ -100,8 +100,6 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
 /// Load all archived tasks from the `.bears/archive/` directory.
 /// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
 /// Returns an empty map (not an error) if the archive dir does not exist yet.
-// Will be consumed by the archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
     let dir = archive_dir(base);
     if !dir.exists() {
@@ -166,8 +164,6 @@ pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
 
 /// Find the file path for an archived task by its exact ID.
 /// Uses the same lexicographic-first rule as find_task_path.
-// Will be consumed by the archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub fn find_archived_path(base: &Path, id: &str) -> Result<PathBuf> {
     let dir = archive_dir(base);
     if !dir.exists() {
@@ -193,8 +189,6 @@ pub fn find_archived_path(base: &Path, id: &str) -> Result<PathBuf> {
 }
 
 /// Move a task file from `.bears/` to `.bears/archive/`.
-// Will be consumed by the archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub fn move_to_archive(base: &Path, id: &str) -> Result<()> {
     let adir = archive_dir(base);
     fs::create_dir_all(&adir)?;
@@ -208,8 +202,6 @@ pub fn move_to_archive(base: &Path, id: &str) -> Result<()> {
 }
 
 /// Move a task file from `.bears/archive/` back to `.bears/`.
-// Will be consumed by the archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub fn move_from_archive(base: &Path, id: &str) -> Result<()> {
     let src = find_archived_path(base, id)?;
     let filename = src
@@ -218,18 +210,6 @@ pub fn move_from_archive(base: &Path, id: &str) -> Result<()> {
     let dst = tasks_dir(base).join(filename);
     fs::rename(src, dst)?;
     Ok(())
-}
-
-/// Return the set of ALL known task IDs — both active and archived.
-/// Used during ID generation so new IDs never collide with archived ones.
-// Will be consumed by the archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
-pub async fn all_known_ids(base: &Path) -> Result<HashSet<String>> {
-    let active = load_all(base).await?;
-    let archived = load_archived(base).await?;
-    let mut ids: HashSet<String> = active.into_keys().collect();
-    ids.extend(archived.into_keys());
-    Ok(ids)
 }
 
 /// Return archived task IDs by scanning filenames only (no YAML parsing).
@@ -757,23 +737,5 @@ mod tests {
         fs::create_dir_all(tasks_dir(tmp.path())).unwrap();
         let archived = load_archived(tmp.path()).await.unwrap();
         assert!(archived.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_all_known_ids_includes_archived() {
-        let tmp = TempDir::new().unwrap();
-        init(tmp.path()).unwrap();
-
-        let t1 = Task::new("id01".into(), "Active".into(), Priority::P2);
-        save(tmp.path(), &t1).unwrap();
-        let t2 = Task::new("id02".into(), "To archive".into(), Priority::P1);
-        save(tmp.path(), &t2).unwrap();
-
-        move_to_archive(tmp.path(), "id02").unwrap();
-
-        let ids = all_known_ids(tmp.path()).await.unwrap();
-        assert!(ids.contains("id01"), "active id should be included");
-        assert!(ids.contains("id02"), "archived id should be included");
-        assert_eq!(ids.len(), 2);
     }
 }

@@ -365,8 +365,10 @@ pub fn build_graph(tasks: &HashMap<String, Task>) -> Graph {
 ///
 /// For epics the check is the same — the caller is responsible for deciding
 /// whether to cascade to children before calling this predicate.
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
+//
+// Public predicate exercised by the unit tests; the CLI/MCP archive paths go
+// through `archive_task`/`archive_all` (which need the blocker list, not a bool).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_archivable(task: &Task, tasks: &HashMap<String, Task>) -> bool {
     let settled = task.status == Status::Done || task.status == Status::Cancelled;
     if !settled {
@@ -404,8 +406,6 @@ fn active_blockers(id: &str, tasks: &HashMap<String, Task>, graph: &Graph) -> Ve
 ///   the caller may sweep afterwards with `archive_all`.
 ///
 /// On failure returns `Error::NotArchivable` listing active dependents.
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub fn archive_task(
     base: &Path,
     tasks: &HashMap<String, Task>,
@@ -462,8 +462,6 @@ pub fn archive_task(
 /// the working set and retry, because archiving one task may make another
 /// archivable (e.g. a chain where the head depends on a now-archived task that
 /// was its only active dependent).
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub fn archive_all(base: &Path, tasks: &HashMap<String, Task>) -> Result<Vec<String>> {
     let mut remaining: HashMap<String, Task> = tasks.clone();
     let mut total_archived: Vec<String> = Vec::new();
@@ -500,8 +498,6 @@ pub fn archive_all(base: &Path, tasks: &HashMap<String, Task>) -> Result<Vec<Str
 /// the parent epic (if archived) so the restored task has no missing deps.
 ///
 /// The `id_or_prefix` is matched against the archive (not the active task map).
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub async fn restore_task(base: &Path, id_or_prefix: &str) -> Result<Vec<String>> {
     let archived = store::load_archived(base).await?;
 
@@ -544,8 +540,6 @@ pub async fn restore_task(base: &Path, id_or_prefix: &str) -> Result<Vec<String>
 }
 
 /// Get an archived task by ID or prefix (read-only, for show/inspect).
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub async fn get_archived_task(base: &Path, id_or_prefix: &str) -> Result<Task> {
     let archived = store::load_archived(base).await?;
     let id = store::resolve_prefix(&archived, id_or_prefix)
@@ -553,22 +547,9 @@ pub async fn get_archived_task(base: &Path, id_or_prefix: &str) -> Result<Task> 
     Ok(archived[&id].clone())
 }
 
-/// Archive all tasks with status Done or Cancelled (thin alias for `archive_all`).
-///
-/// Equivalent to `archive_all` — both archive every task that is settled and
-/// has no active dependents. Provided as an explicit named entry point that
-/// matches the spec for the 9ra task.
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
-pub fn archive_done(base: &Path, tasks: &HashMap<String, Task>) -> Result<Vec<String>> {
-    archive_all(base, tasks)
-}
-
 /// List archived tasks sorted by `updated` descending (most recently updated first).
 ///
 /// If `limit` is `Some(n)`, at most `n` tasks are returned.
-// Will be consumed by archive CLI/MCP commands (separate task).
-#[allow(dead_code)]
 pub async fn list_archive(base: &Path, limit: Option<usize>) -> Result<Vec<Task>> {
     let archived = store::load_archived(base).await?;
     let mut tasks: Vec<Task> = archived.into_values().collect();
@@ -1850,50 +1831,7 @@ mod tests {
         assert_ne!(t2.id, t.id, "new task must not reuse archived ID");
     }
 
-    // ─── archive_done / list_archive tests ───────────────────────────────────
-
-    #[tokio::test]
-    async fn test_archive_done_is_alias_for_archive_all() {
-        // archive_done should behave identically to archive_all
-        let tmp = tempfile::TempDir::new().unwrap();
-        store::init(tmp.path()).unwrap();
-
-        let tasks = HashMap::new();
-        let t1 = create_task(
-            tmp.path(),
-            &tasks,
-            "Done task".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Task,
-        )
-        .unwrap();
-
-        let tasks = store::load_all(tmp.path()).await.unwrap();
-        let _t2 = create_task(
-            tmp.path(),
-            &tasks,
-            "Open task".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Task,
-        )
-        .unwrap();
-
-        let tasks = store::load_all(tmp.path()).await.unwrap();
-        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
-        let tasks = store::load_all(tmp.path()).await.unwrap();
-
-        let archived_ids = archive_done(tmp.path(), &tasks).unwrap();
-        assert_eq!(archived_ids.len(), 1);
-        assert!(archived_ids.contains(&t1.id));
-    }
+    // ─── list_archive tests ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_list_archive_sorted_by_updated_desc() {
