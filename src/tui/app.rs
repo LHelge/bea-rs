@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{ListState, Widget};
 
-use crate::graph::{self, Graph};
+use crate::graph;
 use crate::task::{Status, Task, TaskType};
 
 use super::style::Theme;
@@ -146,7 +146,6 @@ pub struct App {
     pub archived_tasks: Vec<Task>,
     pub tasks: Vec<Task>,
     pub task_map: HashMap<String, Task>,
-    pub graph: Graph,
     pub list_state: ListState,
     pub base: PathBuf,
     pub mode: Mode,
@@ -162,7 +161,6 @@ pub struct App {
 
 impl App {
     pub fn new(tasks: Vec<Task>, task_map: HashMap<String, Task>, base: PathBuf) -> Self {
-        let graph = Graph::build(&task_map);
         let filter = Filter::default();
         let query_lower = filter.query.to_lowercase();
         let filtered: Vec<Task> = tasks
@@ -180,7 +178,6 @@ impl App {
             archived_tasks: Vec::new(),
             tasks: filtered,
             task_map,
-            graph,
             list_state,
             base,
             mode: Mode::Normal,
@@ -232,7 +229,6 @@ impl App {
         let old_id = self.selected_task().map(|t| t.id.clone());
         let old_idx = self.list_state.selected();
 
-        self.graph = Graph::build(&task_map);
         self.all_tasks = tasks;
         self.task_map = task_map;
         self.apply_filter_with_fallback(old_id.as_deref(), old_idx);
