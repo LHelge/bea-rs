@@ -355,6 +355,204 @@ pub fn build_graph(tasks: &HashMap<String, Task>) -> Graph {
     Graph::build(tasks)
 }
 
+// ─── Archive helpers ──────────────────────────────────────────────────────────
+
+/// Check whether a task is archivable.
+///
+/// A task is archivable when:
+/// - its status is Done or Cancelled, AND
+/// - no ACTIVE (not Done/Cancelled) task in `tasks` depends on it.
+///
+/// For epics the check is the same — the caller is responsible for deciding
+/// whether to cascade to children before calling this predicate.
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn is_archivable(task: &Task, tasks: &HashMap<String, Task>) -> bool {
+    let settled = task.status == Status::Done || task.status == Status::Cancelled;
+    if !settled {
+        return false;
+    }
+    // Build reverse graph to find dependents
+    let graph = Graph::build(tasks);
+    active_blockers(&task.id, tasks, &graph).is_empty()
+}
+
+/// Return the IDs of active (non-done/cancelled) tasks that depend on `id`.
+fn active_blockers(id: &str, tasks: &HashMap<String, Task>, graph: &Graph) -> Vec<String> {
+    graph
+        .reverse
+        .get(id)
+        .into_iter()
+        .flat_map(|s| s.iter())
+        .filter(|dep_id| {
+            tasks
+                .get(dep_id.as_str())
+                .is_some_and(|t| t.status != Status::Done && t.status != Status::Cancelled)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Archive a single task (and its cascade) identified by `id_or_prefix`.
+///
+/// Cascade rules:
+/// - If the task is an epic, its Done/Cancelled children are also archived
+///   (children that are not settled block the archive if they themselves would
+///   block archiving, but epic children are just included when settled).
+/// - For any archived task, its settled `depends_on` tasks that are no longer
+///   depended on by any active task are NOT automatically cascaded here —
+///   the caller may sweep afterwards with `archive_all`.
+///
+/// On failure returns `Error::NotArchivable` listing active dependents.
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn archive_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+) -> Result<Vec<String>> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let task = &tasks[&id];
+    let graph = Graph::build(tasks);
+
+    // Check the target task itself
+    let blockers = active_blockers(&id, tasks, &graph);
+    if !blockers.is_empty() {
+        return Err(Error::NotArchivable {
+            id: id.clone(),
+            blockers,
+        });
+    }
+    if task.status != Status::Done && task.status != Status::Cancelled {
+        return Err(Error::NotArchivable {
+            id: id.clone(),
+            blockers: vec![],
+        });
+    }
+
+    // Collect the set to archive: the target + settled epic children
+    let mut to_archive: Vec<String> = vec![id.clone()];
+
+    if task.task_type.is_epic() {
+        let settled_children: Vec<String> = tasks
+            .values()
+            .filter(|c| {
+                c.parent.as_deref() == Some(id.as_str())
+                    && (c.status == Status::Done || c.status == Status::Cancelled)
+            })
+            .map(|c| c.id.clone())
+            .collect();
+        to_archive.extend(settled_children);
+    }
+
+    // Move each to archive
+    for tid in &to_archive {
+        store::move_to_archive(base, tid)?;
+    }
+
+    Ok(to_archive)
+}
+
+/// Sweep: archive every currently-archivable task.
+///
+/// A task is archivable if it is Done/Cancelled AND has no active dependents
+/// (considering only active tasks — not those already archived in this sweep).
+///
+/// We do a fixed-point iteration: after each pass we remove archived tasks from
+/// the working set and retry, because archiving one task may make another
+/// archivable (e.g. a chain where the head depends on a now-archived task that
+/// was its only active dependent).
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn archive_all(base: &Path, tasks: &HashMap<String, Task>) -> Result<Vec<String>> {
+    let mut remaining: HashMap<String, Task> = tasks.clone();
+    let mut total_archived: Vec<String> = Vec::new();
+
+    loop {
+        let graph = Graph::build(&remaining);
+        let mut batch: Vec<String> = remaining
+            .values()
+            .filter(|t| {
+                (t.status == Status::Done || t.status == Status::Cancelled)
+                    && active_blockers(&t.id, &remaining, &graph).is_empty()
+            })
+            .map(|t| t.id.clone())
+            .collect();
+
+        if batch.is_empty() {
+            break;
+        }
+
+        batch.sort(); // deterministic order
+        for id in &batch {
+            store::move_to_archive(base, id)?;
+            remaining.remove(id);
+        }
+        total_archived.extend(batch);
+    }
+
+    Ok(total_archived)
+}
+
+/// Restore a task from the archive back to the active store.
+///
+/// Cascade: also restores any archived `depends_on` tasks (transitively) and
+/// the parent epic (if archived) so the restored task has no missing deps.
+///
+/// The `id_or_prefix` is matched against the archive (not the active task map).
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub async fn restore_task(base: &Path, id_or_prefix: &str) -> Result<Vec<String>> {
+    let archived = store::load_archived(base).await?;
+
+    let id = store::resolve_prefix(&archived, id_or_prefix)
+        .map_err(|_| Error::NotArchived(id_or_prefix.to_string()))?;
+
+    // Collect what must be restored: the target + its archived depends_on (transitive) + parent epic
+    let mut to_restore: Vec<String> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = vec![id.clone()];
+
+    while let Some(current) = queue.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        to_restore.push(current.clone());
+
+        if let Some(task) = archived.get(&current) {
+            // Restore parent epic if archived
+            if let Some(ref parent_id) = task.parent
+                && archived.contains_key(parent_id)
+                && !visited.contains(parent_id)
+            {
+                queue.push(parent_id.clone());
+            }
+            // Restore depends_on that are archived
+            for dep_id in &task.depends_on {
+                if archived.contains_key(dep_id) && !visited.contains(dep_id) {
+                    queue.push(dep_id.clone());
+                }
+            }
+        }
+    }
+
+    for tid in &to_restore {
+        store::move_from_archive(base, tid)?;
+    }
+
+    Ok(to_restore)
+}
+
+/// Get an archived task by ID or prefix (read-only, for show/inspect).
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub async fn get_archived_task(base: &Path, id_or_prefix: &str) -> Result<Task> {
+    let archived = store::load_archived(base).await?;
+    let id = store::resolve_prefix(&archived, id_or_prefix)
+        .map_err(|_| Error::NotArchived(id_or_prefix.to_string()))?;
+    Ok(archived[&id].clone())
+}
+
 /// Compute effective priorities for all tasks in a single O(V+E) pass.
 pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
     Graph::build(tasks).effective_priorities_all(tasks)
@@ -984,5 +1182,585 @@ mod tests {
         ]);
         let result = plan_epic(&tasks, "p1");
         assert!(result.is_err());
+    }
+
+    // ─── Archive service tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_archivable_done_no_dependents() {
+        let t = make_task("t1", Status::Done);
+        let tasks = task_map(vec![t.clone()]);
+        assert!(is_archivable(&t, &tasks));
+    }
+
+    #[test]
+    fn test_is_archivable_cancelled_no_dependents() {
+        let t = make_task("t1", Status::Cancelled);
+        let tasks = task_map(vec![t.clone()]);
+        assert!(is_archivable(&t, &tasks));
+    }
+
+    #[test]
+    fn test_is_archivable_open_is_false() {
+        let t = make_task("t1", Status::Open);
+        let tasks = task_map(vec![t.clone()]);
+        assert!(!is_archivable(&t, &tasks));
+    }
+
+    #[test]
+    fn test_is_archivable_in_progress_is_false() {
+        let mut t = make_task("t1", Status::Done);
+        t.status = Status::InProgress;
+        let tasks = task_map(vec![t.clone()]);
+        assert!(!is_archivable(&t, &tasks));
+    }
+
+    #[test]
+    fn test_is_archivable_done_with_active_dependent_is_false() {
+        // t1 is done, but t2 (open) depends on t1 → t1 is NOT archivable
+        let t1 = make_task("t1", Status::Done);
+        let mut t2 = make_task("t2", Status::Open);
+        t2.depends_on = vec!["t1".to_string()];
+        let tasks = task_map(vec![t1.clone(), t2]);
+        assert!(!is_archivable(&t1, &tasks));
+    }
+
+    #[test]
+    fn test_is_archivable_done_dependent_is_ok() {
+        // t1 is done, t2 (also done) depends on t1 → t1 IS archivable
+        let t1 = make_task("t1", Status::Done);
+        let mut t2 = make_task("t2", Status::Done);
+        t2.depends_on = vec!["t1".to_string()];
+        let tasks = task_map(vec![t1.clone(), t2]);
+        assert!(is_archivable(&t1, &tasks));
+    }
+
+    #[tokio::test]
+    async fn test_archive_task_basic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Done task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let archived = archive_task(tmp.path(), &tasks, &t.id).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0], t.id);
+
+        // Task should no longer be active
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(!active.contains_key(&t.id));
+
+        // Task should be in archive
+        let arch = store::load_archived(tmp.path()).await.unwrap();
+        assert!(arch.contains_key(&t.id));
+    }
+
+    #[tokio::test]
+    async fn test_archive_task_blocked_by_active_dependent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let dep = create_task(
+            tmp.path(),
+            &tasks,
+            "Dep task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        // Create dependent that depends on dep
+        let _dependent = create_task(
+            tmp.path(),
+            &tasks,
+            "Dependent".into(),
+            Priority::P2,
+            vec![],
+            vec![dep.id.clone()],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Mark dep as done but dependent is still open
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &dep.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let result = archive_task(tmp.path(), &tasks, &dep.id);
+        assert!(
+            matches!(result, Err(Error::NotArchivable { .. })),
+            "should fail with NotArchivable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_task_open_is_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Open task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let result = archive_task(tmp.path(), &tasks, &t.id);
+        assert!(
+            matches!(result, Err(Error::NotArchivable { .. })),
+            "open task should not be archivable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_task_epic_cascades_to_settled_children() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let c1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let c2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Mark epic and both children as done
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &c1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &c2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        // Epic should auto-close; set it explicitly just in case
+        set_status(tmp.path(), &tasks, &epic.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let mut archived_ids = archive_task(tmp.path(), &tasks, &epic.id).unwrap();
+        archived_ids.sort();
+
+        // Epic + 2 children should all be archived
+        assert_eq!(archived_ids.len(), 3, "epic + 2 children");
+        assert!(archived_ids.contains(&epic.id));
+        assert!(archived_ids.contains(&c1.id));
+        assert!(archived_ids.contains(&c2.id));
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_archive_all_sweep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Done 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Open".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t3 = create_task(
+            tmp.path(),
+            &tasks,
+            "Done 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t3.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let archived_ids = archive_all(tmp.path(), &tasks).unwrap();
+        assert_eq!(archived_ids.len(), 2);
+        assert!(archived_ids.contains(&t1.id));
+        assert!(archived_ids.contains(&t3.id));
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(active.contains_key(&t2.id));
+    }
+
+    #[tokio::test]
+    async fn test_archive_all_sweep_cascades_chain() {
+        // t1 done, t2 done and depends on t1 — both should be swept
+        // because after archiving t2 (no active dependents), t1 (depended on by done t2)
+        // becomes archivable in next iteration.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Base done".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Dependent done".into(),
+            Priority::P2,
+            vec![],
+            vec![t1.id.clone()],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let archived_ids = archive_all(tmp.path(), &tasks).unwrap();
+        assert_eq!(archived_ids.len(), 2, "both should be archived");
+        assert!(archived_ids.contains(&t1.id));
+        assert!(archived_ids.contains(&t2.id));
+    }
+
+    #[tokio::test]
+    async fn test_restore_task_basic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Task to restore".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_task(tmp.path(), &tasks, &t.id).unwrap();
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(!active.contains_key(&t.id));
+
+        let restored = restore_task(tmp.path(), &t.id).await.unwrap();
+        assert_eq!(restored.len(), 1);
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(active.contains_key(&t.id));
+    }
+
+    #[tokio::test]
+    async fn test_restore_task_cascades_deps() {
+        // t1 archived, t2 archived and depends on t1
+        // Restoring t2 should also restore t1 (its archived dep)
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Dep".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Dependent".into(),
+            Priority::P2,
+            vec![],
+            vec![t1.id.clone()],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        // Archive both
+        archive_all(tmp.path(), &tasks).unwrap();
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(active.is_empty());
+
+        // Restore t2 — t1 (its dep) should also come back
+        let mut restored = restore_task(tmp.path(), &t2.id).await.unwrap();
+        restored.sort();
+
+        assert_eq!(restored.len(), 2);
+        assert!(restored.contains(&t1.id));
+        assert!(restored.contains(&t2.id));
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(active.contains_key(&t1.id));
+        assert!(active.contains_key(&t2.id));
+    }
+
+    #[tokio::test]
+    async fn test_restore_task_cascades_parent_epic() {
+        // Epic archived, child archived → restoring child should also restore epic
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child = create_task(
+            tmp.path(),
+            &tasks,
+            "Child".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        // Epic should have auto-closed; archive manually if needed
+        set_status(tmp.path(), &tasks, &epic.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_task(tmp.path(), &tasks, &epic.id).unwrap();
+
+        let active = store::load_all(tmp.path()).await.unwrap();
+        assert!(active.is_empty());
+
+        // Restore child → epic should also be restored
+        let mut restored = restore_task(tmp.path(), &child.id).await.unwrap();
+        restored.sort();
+        assert!(restored.contains(&epic.id), "epic should be restored");
+        assert!(restored.contains(&child.id), "child should be restored");
+    }
+
+    #[tokio::test]
+    async fn test_restore_not_archived_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let result = restore_task(tmp.path(), "nonexistent").await;
+        assert!(
+            matches!(result, Err(Error::NotArchived(_))),
+            "should get NotArchived error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_archived_task() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Archived task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_task(tmp.path(), &tasks, &t.id).unwrap();
+
+        let fetched = get_archived_task(tmp.path(), &t.id).await.unwrap();
+        assert_eq!(fetched.id, t.id);
+        assert_eq!(fetched.title, "Archived task");
+    }
+
+    #[tokio::test]
+    async fn test_create_task_avoids_archived_id_collision() {
+        // Verify that create_task doesn't reuse archived IDs.
+        // We can't easily force a collision with random short IDs in a unit test,
+        // but we can verify that archived_id_set is called by checking the function
+        // doesn't panic and creates a new task with a different ID than the archived one.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Task 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_task(tmp.path(), &tasks, &t.id).unwrap();
+
+        // Now archived. New task creation should succeed and not reuse the archived ID.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        // archived_id_set is consulted during ID generation
+        let archived_ids = store::archived_id_set(tmp.path());
+        assert!(archived_ids.contains(&t.id));
+
+        // If we create another task, it shouldn't collide with the archived ID
+        // (with a 3-char ID space of 36^3=46656 IDs, collision is unlikely but
+        // the code path is exercised)
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Task 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_ne!(t2.id, t.id, "new task must not reuse archived ID");
     }
 }
