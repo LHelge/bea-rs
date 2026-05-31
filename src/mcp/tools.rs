@@ -292,13 +292,24 @@ impl BeaMcp {
         )
     }
 
-    #[tool(description = "Get the full dependency graph as an adjacency list")]
-    async fn get_graph(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+    #[tool(description = "Get the dependency graph as a bounded adjacency list. \
+        Excludes isolated and done/cancelled nodes by default.")]
+    async fn get_graph(
+        &self,
+        Parameters(params): Parameters<GetGraphParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
                 let graph = service::build_graph(&tasks);
-                let adj = graph.adjacency_list();
+                let include_done = params.include_done.unwrap_or(false);
+                let limit = params.limit.map(|v| v as usize);
+                let adj = graph.bounded_adjacency_list(
+                    &tasks,
+                    include_done,
+                    params.epic.as_deref(),
+                    limit,
+                );
                 ok_json(serde_json::json!(adj))
             }
             .await,
@@ -685,9 +696,122 @@ mod tests {
         .await
         .unwrap();
 
-        let graph = mcp.get_graph().await.unwrap();
+        let graph = mcp
+            .get_graph(Parameters(GetGraphParams {
+                include_done: None,
+                epic: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
         let json = extract_json(&graph);
         assert!(json.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_tool_get_graph_bounded() {
+        let (_tmp, mcp) = setup();
+
+        // Create A -> B dependency (both active)
+        let t_a = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "A".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_a = extract_json(&t_a)["id"].as_str().unwrap().to_string();
+
+        mcp.create_task(Parameters(CreateTaskParams {
+            title: "B".into(),
+            priority: None,
+            tags: None,
+            depends_on: Some(vec![id_a.clone()]),
+            parent: None,
+            body: None,
+            task_type: None,
+        }))
+        .await
+        .unwrap();
+
+        // Create a done isolated task C (no deps, no dependents)
+        let t_c = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "C (isolated)".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_c = extract_json(&t_c)["id"].as_str().unwrap().to_string();
+        mcp.complete_task(Parameters(TaskIdParams { id: id_c.clone() }))
+            .await
+            .unwrap();
+
+        // Create an open isolated task D (no edges)
+        let t_d = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "D (isolated open)".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_d = extract_json(&t_d)["id"].as_str().unwrap().to_string();
+
+        // Default get_graph: excludes done (C) and isolated (D)
+        let graph = mcp
+            .get_graph(Parameters(GetGraphParams {
+                include_done: None,
+                epic: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let json = extract_json(&graph);
+        let obj = json.as_object().unwrap();
+        // A and B should be in the graph (they have an edge between them)
+        assert!(obj.contains_key(id_a.as_str()), "A should be in graph");
+        // C is done → excluded
+        assert!(
+            !obj.contains_key(id_c.as_str()),
+            "done task C should be excluded"
+        );
+        // D is isolated (no edges) → excluded
+        assert!(
+            !obj.contains_key(id_d.as_str()),
+            "isolated task D should be excluded"
+        );
+
+        // include_done=true: C is now eligible, but C is still isolated → still excluded
+        let graph_all = mcp
+            .get_graph(Parameters(GetGraphParams {
+                include_done: Some(true),
+                epic: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let obj_all = extract_json(&graph_all);
+        let obj_all = obj_all.as_object().unwrap();
+        // C is done but still isolated → excluded
+        assert!(
+            !obj_all.contains_key(id_c.as_str()),
+            "isolated done task C should still be excluded"
+        );
     }
 
     #[tokio::test]

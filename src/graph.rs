@@ -374,7 +374,8 @@ impl Graph {
         result
     }
 
-    /// Get adjacency list for JSON output.
+    /// Get adjacency list for JSON output (full, unfiltered).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn adjacency_list(&self) -> HashMap<&str, Vec<&str>> {
         self.edges
             .iter()
@@ -383,6 +384,83 @@ impl Graph {
                 (k.as_str(), deps)
             })
             .collect()
+    }
+
+    /// Get a bounded adjacency list suitable for MCP/JSON output.
+    ///
+    /// Excludes:
+    /// - Done/cancelled tasks by default (unless `include_done` is true)
+    /// - Isolated nodes that have no dependencies and no dependents within
+    ///   the included set
+    ///
+    /// Optional filters:
+    /// - `epic`: include only children of the given epic ID (plus the epic itself)
+    /// - `limit`: cap the number of nodes in the output
+    pub fn bounded_adjacency_list<'a>(
+        &'a self,
+        tasks: &'a HashMap<String, Task>,
+        include_done: bool,
+        epic: Option<&str>,
+        limit: Option<usize>,
+    ) -> HashMap<&'a str, Vec<&'a str>> {
+        use crate::task::Status;
+
+        // Step 1: build the eligible node set
+        let eligible: HashSet<&str> = tasks
+            .values()
+            .filter(|t| {
+                // Status filter
+                if !include_done && (t.status == Status::Done || t.status == Status::Cancelled) {
+                    return false;
+                }
+                // Epic filter: if specified, include only direct children + the epic itself
+                if let Some(e) = epic {
+                    return t.id == e || t.parent.as_deref() == Some(e);
+                }
+                true
+            })
+            .map(|t| t.id.as_str())
+            .collect();
+
+        // Step 2: compute intra-eligible edges
+        // A node is connected if it has at least one dep or dependent within eligible set
+        let mut connected: HashSet<&str> = HashSet::new();
+        for &id in &eligible {
+            if let Some(deps) = self.edges.get(id) {
+                for dep in deps {
+                    if eligible.contains(dep.as_str()) {
+                        connected.insert(id);
+                        connected.insert(dep.as_str());
+                    }
+                }
+            }
+        }
+
+        // Step 3: build adjacency map for connected nodes only
+        let mut result: Vec<(&str, Vec<&str>)> = connected
+            .iter()
+            .map(|&id| {
+                let deps: Vec<&str> = self
+                    .edges
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|s| s.iter())
+                    .filter(|dep| eligible.contains(dep.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+                (id, deps)
+            })
+            .collect();
+
+        // Sort deterministically by id for stable output
+        result.sort_by_key(|(id, _)| *id);
+
+        // Apply limit
+        if let Some(limit) = limit {
+            result.truncate(limit);
+        }
+
+        result.into_iter().collect()
     }
 }
 
@@ -733,6 +811,44 @@ mod tests {
         let adj = graph.adjacency_list();
         assert_eq!(adj.get("a").unwrap().len(), 1);
         assert!(adj.get("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_bounded_adjacency_list_excludes_done_and_isolated() {
+        // Graph:
+        //   a (open) -> b (open)   ← connected pair
+        //   c (done)               ← isolated done node
+        //   d (open, isolated)     ← isolated open node
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec![]),
+            make_task("c", Status::Done, Priority::P1, vec![]),
+            make_task("d", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+
+        // Default: exclude done, exclude isolated
+        let adj = graph.bounded_adjacency_list(&tasks, false, None, None);
+        assert!(adj.contains_key("a"), "connected open node a should appear");
+        assert!(adj.contains_key("b"), "connected open node b should appear");
+        assert!(!adj.contains_key("c"), "done node c should be excluded");
+        assert!(
+            !adj.contains_key("d"),
+            "isolated open node d should be excluded"
+        );
+
+        // include_done=true: c is now eligible but still isolated → excluded
+        let adj_all = graph.bounded_adjacency_list(&tasks, true, None, None);
+        assert!(adj_all.contains_key("a"));
+        assert!(adj_all.contains_key("b"));
+        assert!(
+            !adj_all.contains_key("c"),
+            "isolated done node c excluded even with include_done=true"
+        );
+        assert!(
+            !adj_all.contains_key("d"),
+            "isolated open node d still excluded with include_done=true"
+        );
     }
 
     #[test]
