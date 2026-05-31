@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **CLI mode** (`bea <command>`): Human-friendly interface for managing tasks
 2. **MCP server mode** (`bea mcp`): Exposes the same functionality as MCP tool calls over stdio for AI agents
+3. **Interactive TUI** (`bea tui`): A full-screen `ratatui` terminal UI for browsing and managing tasks, with live refresh when `.bears/` changes on disk
 
 ## Commands
 
@@ -44,29 +45,40 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): 
 
 ```
 src/
-  main.rs          # Entry point: dispatch to CLI or MCP server
+  main.rs          # Entry point: dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs         # CLI module root and dispatch
     args.rs        # clap command and argument definitions
-    cmd.rs         # Command handlers (list, show, create, etc.)
+    cmd.rs         # Command handlers (list, show, create, edit, graph, etc.)
   mcp/
     mod.rs         # MCP module root and server setup
     params.rs      # Tool parameter structs (serde + JSON Schema)
     tools.rs       # MCP tool implementations and tests
-  service.rs       # Business logic: create, update, epic progress, auto-close
-  store.rs         # Core: parse .bears/ dir, read/write task files
-  task.rs          # Task struct, frontmatter serde, ID generation
-  graph.rs         # Dependency graph: build, query ready, cycle detection
+  tui/             # Interactive ratatui terminal UI (`bea tui`)
+    mod.rs         # TUI event loop and app wiring
+    app.rs         # App state, filtering (reuses graph::is_task_ready), key handling
+    input.rs       # Key/event input handling
+    style.rs       # Theme and colors
+    watcher.rs     # Debounced .bears/ file watcher (notify) for live refresh
+    widgets/       # task list/detail/info, dep tree, modals, body, bottom bar
+  service.rs       # Business logic: create, update, reparent, epic progress, auto-close
+  store.rs         # Core: parse .bears/ dir, read/write task files, archive layer
+  task.rs          # Task struct, frontmatter serde, enums, ID generation
+  graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
+  scaffold.rs      # `bea init` harness-integration scaffolding (Claude/Copilot/Codex)
   config.rs        # .bears.yml configuration loading
+  editor.rs        # $EDITOR integration for `bea edit`
   error.rs         # thiserror error types
+templates/         # Embedded harness templates (via include_str!) for init scaffolding
 ```
 
 ### Core design principles
 
-- `store.rs`, `service.rs`, and `graph.rs` are the core library. CLI and MCP are thin frontends.
+- `store.rs`, `service.rs`, and `graph.rs` are the core library. CLI, MCP, and TUI are thin frontends.
 - Re-parse the entire `.bears/` directory from scratch on every invocation — no caching, no daemon.
 - `--json` flag on all CLI commands outputs JSON instead of human text.
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
+- Effective-priority and ready computation are single-pass O(V+E); dep-tree rendering expands each node once (DAG, not exponential). `get_graph` returns a *bounded* adjacency list (excludes done/cancelled and isolated nodes) to keep agent payloads small.
 
 ### Storage format
 
@@ -94,7 +106,7 @@ Parse frontmatter by splitting on `---` delimiters, using `serde_yaml` for the Y
 
 ### ID generation
 
-Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions; regenerate if needed.
+Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks; regenerate if needed.
 
 ### `ready` command
 
@@ -102,7 +114,7 @@ The key command for agent workflows. Returns tasks where status is `open`, type 
 
 ### Epic behavior
 
-Epics group child tasks via the `parent` field. `bea epics` / `list_epics` shows epics with progress (done/total children). When all children of an epic are completed, the epic is automatically marked as done. Epics are excluded from `ready` results.
+Epics group child tasks via the `parent` field (set at create time, or changed later via `update --parent <id|"">` / the `parent` field on `update_task`). `bea epics` / `list_epics` shows epics with progress (done / total non-cancelled children). An epic auto-closes when every child is *resolved* — i.e. `done` **or** `cancelled` (cancelled children are non-blocking and excluded from the total). Auto-close runs on both the `set_status` and `update_task` status paths and cascades up through nested epics. Epics are excluded from `ready` results.
 
 ### Cycle detection
 
@@ -113,11 +125,11 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 | Tool | Key params |
 |------|------------|
 | `list_ready` | `limit?`, `tag?`, `epic?` |
-| `list_all_tasks` | `status?`, `priority?`, `tag?`, `epic?` |
+| `list_all_tasks` | `status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?` |
 | `list_epics` | — |
 | `get_task` | `id` |
 | `create_task` | `title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?` |
-| `update_task` | `id`, `status?`, `priority?`, `tags?`, `assignee?`, `body?` |
+| `update_task` | `id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?` |
 | `start_task` | `id` |
 | `complete_task` | `id` |
 | `cancel_task` | `id` |
@@ -125,8 +137,11 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 | `add_dependency` | `id`, `depends_on` |
 | `remove_dependency` | `id`, `depends_on` |
 | `delete_task` | `id` |
-| `search_tasks` | `query` |
-| `get_graph` | — |
+| `search_tasks` | `query`, `limit?`, `active_only?` |
+| `plan_epic` | `id` |
+| `get_graph` | `include_done?`, `epic?`, `limit?` |
+
+On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it leaves the parent unchanged. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks.
 
 ## Dependencies
 
@@ -140,6 +155,10 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 - `rmcp` — MCP SDK (server, macros, transport-io features)
 - `schemars` — JSON Schema generation for MCP tool parameter types
 - `owo-colors` — terminal color output
+- `ratatui`, `crossterm` — interactive TUI rendering and terminal/event handling
+- `tui-markdown` — markdown rendering inside the TUI
+- `notify`, `notify-debouncer-mini` — debounced `.bears/` filesystem watching for live TUI refresh
+- `shell-words` — parse the `$EDITOR` command for `bea edit`
 
 Keep the dependency tree small. Compilation should be fast.
 
@@ -155,7 +174,10 @@ Keep the dependency tree small. Compilation should be fast.
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed)
-- Unit tests in `service.rs`: epic progress, auto-close
-- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/delete/deps/validation
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting
+- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation
+- Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
+- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding
+- Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
 - Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output
 - MCP tools also verified end-to-end via live MCP sessions
