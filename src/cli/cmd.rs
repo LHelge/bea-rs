@@ -516,7 +516,8 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
     let graph = service::build_graph(tasks);
 
     if json {
-        let adj = graph.adjacency_list();
+        // Use bounded adjacency list: exclude isolated nodes; `--all` controls done/cancelled.
+        let adj = graph.bounded_adjacency_list(tasks, all, None, None);
         output(&adj)?;
         return Ok(());
     }

@@ -101,3 +101,13 @@ pub struct PlanEpicParams {
     /// Epic task ID
     pub id: String,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetGraphParams {
+    /// Include done and cancelled tasks (default: false)
+    pub include_done: Option<bool>,
+    /// Filter to direct children of a given epic ID
+    pub epic: Option<String>,
+    /// Max number of nodes to return
+    pub limit: Option<u64>,
+}
