@@ -21,6 +21,16 @@ const CLAUDE_MD: &str = include_str!("../templates/claude/CLAUDE.md");
 /// `.mcp.json` exists; for existing files we merge only the `bears` entry).
 const CLAUDE_MCP_SEED: &str = include_str!("../templates/claude/mcp.json");
 
+/// Embedded template for the Claude bears-planning skill.
+const CLAUDE_SKILL_MD: &str = include_str!("../templates/claude/skills/bears-planning/SKILL.md");
+
+/// Embedded CLI fallback reference for the Claude bears-planning skill.
+const CLAUDE_SKILL_CLI_FALLBACK: &str =
+    include_str!("../templates/claude/skills/bears-planning/references/cli-fallback.md");
+
+/// Embedded template for the Claude planner agent.
+const CLAUDE_AGENT_PLANNER: &str = include_str!("../templates/claude/agents/planner.md");
+
 /// Embedded template content for the Copilot instruction file.
 const COPILOT_MD: &str = include_str!("../templates/copilot/copilot-instructions.md");
 
@@ -77,10 +87,24 @@ pub struct Harness {
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
-static CLAUDE_FILES: &[ScaffoldFile] = &[ScaffoldFile {
-    target: "CLAUDE.md",
-    content: CLAUDE_MD,
-}];
+static CLAUDE_FILES: &[ScaffoldFile] = &[
+    ScaffoldFile {
+        target: "CLAUDE.md",
+        content: CLAUDE_MD,
+    },
+    ScaffoldFile {
+        target: ".claude/skills/bears-planning/SKILL.md",
+        content: CLAUDE_SKILL_MD,
+    },
+    ScaffoldFile {
+        target: ".claude/skills/bears-planning/references/cli-fallback.md",
+        content: CLAUDE_SKILL_CLI_FALLBACK,
+    },
+    ScaffoldFile {
+        target: ".claude/agents/planner.md",
+        content: CLAUDE_AGENT_PLANNER,
+    },
+];
 
 static COPILOT_FILES: &[ScaffoldFile] = &[ScaffoldFile {
     target: ".github/copilot-instructions.md",
@@ -334,6 +358,68 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
                 .unwrap();
         assert!(mcp["mcpServers"]["bears"].is_object());
+    }
+
+    /// `bea init --claude` writes the skill, cli-fallback reference, and agent
+    /// files, with the production `bea mcp` MCP server form.
+    #[test]
+    fn test_scaffold_claude_skill_and_agent() {
+        let tmp = TempDir::new().unwrap();
+        let written = scaffold(tmp.path(), &["claude"]).unwrap();
+
+        // Skill file
+        let skill_path = tmp.path().join(".claude/skills/bears-planning/SKILL.md");
+        assert!(
+            written.iter().any(|p| p == &skill_path),
+            "SKILL.md must be in written list"
+        );
+        assert!(skill_path.exists(), "SKILL.md must be created");
+        let skill = fs::read_to_string(&skill_path).unwrap();
+        assert!(
+            skill.contains("bears-planning"),
+            "SKILL.md must contain skill name"
+        );
+        assert!(
+            skill.contains("mcp__bears__"),
+            "SKILL.md must reference MCP tools"
+        );
+
+        // CLI fallback reference
+        let cli_ref_path = tmp
+            .path()
+            .join(".claude/skills/bears-planning/references/cli-fallback.md");
+        assert!(
+            written.iter().any(|p| p == &cli_ref_path),
+            "cli-fallback.md must be in written list"
+        );
+        assert!(cli_ref_path.exists(), "cli-fallback.md must be created");
+        let cli_ref = fs::read_to_string(&cli_ref_path).unwrap();
+        assert!(
+            cli_ref.contains("bea create"),
+            "cli-fallback.md must contain bea create"
+        );
+
+        // Agent file
+        let agent_path = tmp.path().join(".claude/agents/planner.md");
+        assert!(
+            written.iter().any(|p| p == &agent_path),
+            "planner.md must be in written list"
+        );
+        assert!(agent_path.exists(), "planner.md must be created");
+        let agent = fs::read_to_string(&agent_path).unwrap();
+        assert!(agent.contains("planner"), "agent must have name");
+        assert!(
+            agent.contains("mcp__bears__"),
+            "agent must reference MCP tools"
+        );
+
+        // .mcp.json uses production form: command="bea", args=["mcp"]
+        let mcp: Value =
+            serde_json::from_str(&fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        let bears = &mcp["mcpServers"]["bears"];
+        assert_eq!(bears["command"], "bea", "must use production binary form");
+        assert_eq!(bears["args"][0], "mcp", "must use 'mcp' subcommand");
     }
 
     /// Unknown harness labels are silently skipped — no panic or error.
