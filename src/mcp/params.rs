@@ -111,3 +111,21 @@ pub struct GetGraphParams {
     /// Max number of nodes to return
     pub limit: Option<u64>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArchiveTaskParams {
+    /// Task ID or prefix to archive. Omit to sweep all archivable tasks.
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RestoreTaskParams {
+    /// Archived task ID or prefix to restore
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListArchivedParams {
+    /// Max number of archived tasks to return (most recently updated first)
+    pub limit: Option<u64>,
+}

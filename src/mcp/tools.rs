@@ -335,6 +335,61 @@ impl BeaMcp {
         )
     }
 
+    #[tool(description = "Archive a task (and its settled epic children) by ID, \
+        or sweep all archivable tasks when no ID is given. \
+        Only Done/Cancelled tasks with no active dependents can be archived. \
+        Archived tasks are hidden from all active-task tools.")]
+    async fn archive_task(
+        &self,
+        Parameters(params): Parameters<ArchiveTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let archived_ids = match params.id {
+                    Some(ref id) => service::archive_task(&self.base, &tasks, id)?,
+                    None => service::archive_all(&self.base, &tasks)?,
+                };
+                ok_json(serde_json::json!(archived_ids))
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Restore an archived task (and its archived dependencies/parent epic) \
+        back to the active store."
+    )]
+    async fn restore_task(
+        &self,
+        Parameters(params): Parameters<RestoreTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let restored_ids = service::restore_task(&self.base, &params.id).await?;
+                ok_json(serde_json::json!(restored_ids))
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "List archived tasks sorted by most recently updated. \
+        Use limit to cap the number returned.")]
+    async fn list_archived(
+        &self,
+        Parameters(params): Parameters<ListArchivedParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let limit = params.limit.map(|v| v as usize);
+                let archived = service::list_archive(&self.base, limit).await?;
+                let summaries: Vec<_> = archived.iter().map(|t| t.summary(None)).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
+    }
+
     #[tool(description = "List all epics with progress summary")]
     async fn list_epics(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
@@ -360,7 +415,10 @@ impl ServerHandler for BeaMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("bears", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "bears is a file-based task tracker. Use tools to manage tasks and dependencies."
+                "bears is a file-based task tracker. Use tools to manage tasks and dependencies. \
+                Completed or cancelled tasks can be archived with archive_task to keep the active \
+                list clean. Use list_archived to browse the archive and restore_task to bring a \
+                task back to active."
                     .to_string(),
             )
     }
@@ -1308,6 +1366,405 @@ mod tests {
                 assignee: None,
                 body: None,
                 parent: Some("nonexistent".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    // ─── Archive tool tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tool_archive_hides_from_list_and_ready() {
+        let (_tmp, mcp) = setup();
+
+        // Create two tasks: t1 (no deps), t2 depends on t1
+        let t1 = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Base task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id1 = extract_json(&t1)["id"].as_str().unwrap().to_string();
+
+        mcp.create_task(Parameters(CreateTaskParams {
+            title: "Dependent task".into(),
+            priority: None,
+            tags: None,
+            depends_on: Some(vec![id1.clone()]),
+            parent: None,
+            body: None,
+            task_type: None,
+        }))
+        .await
+        .unwrap();
+
+        // Complete t1 so it's archivable (no active tasks depend on a done task... wait,
+        // t2 depends on t1 and t2 is open — t1 is NOT archivable yet)
+        mcp.complete_task(Parameters(TaskIdParams { id: id1.clone() }))
+            .await
+            .unwrap();
+
+        // t1 is done but t2 (open) depends on it — archive should fail
+        let fail = mcp
+            .archive_task(Parameters(ArchiveTaskParams {
+                id: Some(id1.clone()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(fail.is_error, Some(true));
+
+        // Complete t2 as well — now t1 has no active dependents
+        let all = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        let arr = extract_json(&all);
+        let id2 = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["title"] == "Dependent task")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id2.clone() }))
+            .await
+            .unwrap();
+
+        // Now archive t1 — t2 is done so t1 has no active dependents
+        let archived = mcp
+            .archive_task(Parameters(ArchiveTaskParams {
+                id: Some(id1.clone()),
+            }))
+            .await
+            .unwrap();
+        assert!(!archived.is_error.unwrap_or(false));
+        let archived_ids = extract_json(&archived);
+        assert!(archived_ids.as_array().unwrap().iter().any(|v| v == &id1));
+
+        // t1 should no longer appear in list_all_tasks
+        let all2 = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        let arr2 = extract_json(&all2);
+        assert!(
+            arr2.as_array().unwrap().iter().all(|x| x["id"] != id1),
+            "archived task must not appear in list_all_tasks"
+        );
+
+        // t1 should appear in list_archived
+        let listed = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: None }))
+            .await
+            .unwrap();
+        let arr3 = extract_json(&listed);
+        assert!(
+            arr3.as_array().unwrap().iter().any(|x| x["id"] == id1),
+            "archived task must appear in list_archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_archive_sweep_no_id() {
+        let (_tmp, mcp) = setup();
+
+        // Create two independent tasks, both done
+        let t1 = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Done 1".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id1 = extract_json(&t1)["id"].as_str().unwrap().to_string();
+
+        let t2 = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Done 2".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id2 = extract_json(&t2)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id1.clone() }))
+            .await
+            .unwrap();
+        mcp.complete_task(Parameters(TaskIdParams { id: id2.clone() }))
+            .await
+            .unwrap();
+
+        // Sweep: no id → archive all archivable tasks
+        let result = mcp
+            .archive_task(Parameters(ArchiveTaskParams { id: None }))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let ids = extract_json(&result);
+        let ids_arr = ids.as_array().unwrap();
+        assert!(ids_arr.len() >= 2, "both done tasks should be archived");
+        assert!(ids_arr.iter().any(|v| v == &id1));
+        assert!(ids_arr.iter().any(|v| v == &id2));
+
+        // Active list should be empty
+        let all = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&all).as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_tool_restore_task_brings_back_to_active() {
+        let (_tmp, mcp) = setup();
+
+        // Create a task, complete it, archive it
+        let t = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Will be archived".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&t)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        // Verify it's archived and not active
+        let archived_before = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: None }))
+            .await
+            .unwrap();
+        let arr = extract_json(&archived_before);
+        assert!(arr.as_array().unwrap().iter().any(|x| x["id"] == id));
+
+        let active_before = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&active_before)
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["id"] != id)
+        );
+
+        // Restore
+        let restored = mcp
+            .restore_task(Parameters(RestoreTaskParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert!(!restored.is_error.unwrap_or(false));
+        let restored_ids = extract_json(&restored);
+        assert!(restored_ids.as_array().unwrap().iter().any(|v| v == &id));
+
+        // Now it should be active again and list_ready should see it (status=done, won't be ready,
+        // but it IS in the active list)
+        let active_after = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&active_after)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["id"] == id),
+            "restored task must appear in active list"
+        );
+
+        // And gone from archive
+        let archived_after = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: None }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&archived_after)
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["id"] != id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_restore_then_ready() {
+        // Archive a done task that had no deps, restore it (status=done → won't be ready),
+        // then open it to verify it shows in list_ready.
+        let (_tmp, mcp) = setup();
+
+        let t = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Restore me".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&t)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        // Restore the task
+        mcp.restore_task(Parameters(RestoreTaskParams { id: id.clone() }))
+            .await
+            .unwrap();
+
+        // Re-open the task so it becomes ready
+        mcp.update_task(Parameters(UpdateTaskParams {
+            id: id.clone(),
+            title: None,
+            status: Some("open".into()),
+            priority: None,
+            tags: None,
+            assignee: None,
+            body: None,
+            parent: None,
+        }))
+        .await
+        .unwrap();
+
+        // Now it should appear in list_ready
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        let arr = extract_json(&ready);
+        assert!(
+            arr.as_array().unwrap().iter().any(|x| x["id"] == id),
+            "restored and reopened task must appear in list_ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_archived_with_limit() {
+        let (_tmp, mcp) = setup();
+
+        for title in &["A", "B", "C"] {
+            let t = mcp
+                .create_task(Parameters(CreateTaskParams {
+                    title: (*title).into(),
+                    priority: None,
+                    tags: None,
+                    depends_on: None,
+                    parent: None,
+                    body: None,
+                    task_type: None,
+                }))
+                .await
+                .unwrap();
+            let id = extract_json(&t)["id"].as_str().unwrap().to_string();
+            mcp.complete_task(Parameters(TaskIdParams { id: id.clone() }))
+                .await
+                .unwrap();
+            mcp.archive_task(Parameters(ArchiveTaskParams { id: Some(id) }))
+                .await
+                .unwrap();
+        }
+
+        let all = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: None }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&all).as_array().unwrap().len(), 3);
+
+        let limited = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: Some(2) }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&limited).as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_tool_restore_nonexistent_archived_errors() {
+        let (_tmp, mcp) = setup();
+
+        let result = mcp
+            .restore_task(Parameters(RestoreTaskParams {
+                id: "nonexistent".into(),
             }))
             .await
             .unwrap();
