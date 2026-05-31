@@ -46,14 +46,19 @@ impl BeaMcp {
                 let tasks = store::load_all(&self.base).await?;
                 let status = params.status.as_deref().map(parse_status).transpose()?;
                 let priority = params.priority.as_deref().map(parse_priority).transpose()?;
-                let filtered = service::list_tasks(
+                // active_only=true → include_all=false (hide done/cancelled)
+                let include_all = !params.active_only.unwrap_or(false);
+                let mut filtered = service::list_tasks(
                     &tasks,
                     status,
                     priority,
                     params.tag.as_deref(),
-                    true, // MCP always shows all statuses unless filtered
+                    include_all,
                     params.epic.as_deref(),
                 );
+                if let Some(limit) = params.limit {
+                    filtered.truncate(limit as usize);
+                }
                 let eff = service::effective_priorities(&tasks);
                 let summaries: Vec<_> =
                     filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
@@ -226,7 +231,11 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
-                let results = service::search_tasks(&tasks, &params.query, true);
+                let include_all = !params.active_only.unwrap_or(false);
+                let mut results = service::search_tasks(&tasks, &params.query, include_all);
+                if let Some(limit) = params.limit {
+                    results.truncate(limit as usize);
+                }
                 let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
                 ok_json(serde_json::json!(summaries))
             }
@@ -411,6 +420,8 @@ mod tests {
                 priority: None,
                 tag: None,
                 epic: None,
+                limit: None,
+                active_only: None,
             }))
             .await
             .unwrap();
@@ -606,6 +617,8 @@ mod tests {
         let results = mcp
             .search_tasks(Parameters(SearchParams {
                 query: "OAuth".into(),
+                limit: None,
+                active_only: None,
             }))
             .await
             .unwrap();
@@ -686,6 +699,8 @@ mod tests {
                 priority: None,
                 tag: None,
                 epic: None,
+                limit: None,
+                active_only: None,
             }))
             .await
             .unwrap();
@@ -702,6 +717,8 @@ mod tests {
                 priority: Some("P9".into()),
                 tag: None,
                 epic: None,
+                limit: None,
+                active_only: None,
             }))
             .await
             .unwrap();
@@ -800,6 +817,163 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert!(extract_text(&result).contains("invalid status"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_limit_and_active_only() {
+        let (_tmp, mcp) = setup();
+
+        // Create 3 tasks; complete one
+        for title in &["Alpha", "Beta", "Gamma"] {
+            mcp.create_task(Parameters(CreateTaskParams {
+                title: (*title).into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        }
+
+        // Complete "Alpha"
+        let all = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        let arr = extract_json(&all);
+        let alpha_id = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["title"] == "Alpha")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        mcp.complete_task(Parameters(TaskIdParams {
+            id: alpha_id.clone(),
+        }))
+        .await
+        .unwrap();
+
+        // active_only=true should exclude the done task
+        let active = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: Some(true),
+            }))
+            .await
+            .unwrap();
+        let active_arr = extract_json(&active);
+        let active_arr = active_arr.as_array().unwrap();
+        assert_eq!(active_arr.len(), 2, "done task excluded with active_only");
+        assert!(
+            active_arr.iter().all(|x| x["id"] != alpha_id),
+            "completed task should not appear"
+        );
+
+        // active_only=false (default) shows all 3
+        let all2 = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: None,
+                active_only: Some(false),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&all2).as_array().unwrap().len(), 3);
+
+        // limit=1 returns only one
+        let limited = mcp
+            .list_all_tasks(Parameters(ListTasksFilterParams {
+                status: None,
+                priority: None,
+                tag: None,
+                epic: None,
+                limit: Some(1),
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&limited).as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_limit_and_active_only() {
+        let (_tmp, mcp) = setup();
+
+        // Create 3 tasks all matching query "task"
+        for title in &["task one", "task two", "task three"] {
+            mcp.create_task(Parameters(CreateTaskParams {
+                title: (*title).into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        }
+
+        // Get id of "task one" and complete it
+        let all = mcp
+            .search_tasks(Parameters(SearchParams {
+                query: "task one".into(),
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        let one_id = extract_json(&all).as_array().unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        mcp.complete_task(Parameters(TaskIdParams { id: one_id.clone() }))
+            .await
+            .unwrap();
+
+        // active_only=true excludes done
+        let active = mcp
+            .search_tasks(Parameters(SearchParams {
+                query: "task".into(),
+                limit: None,
+                active_only: Some(true),
+            }))
+            .await
+            .unwrap();
+        let active_arr = extract_json(&active);
+        let active_arr = active_arr.as_array().unwrap();
+        assert_eq!(active_arr.len(), 2, "done task excluded with active_only");
+
+        // limit=1 caps results
+        let limited = mcp
+            .search_tasks(Parameters(SearchParams {
+                query: "task".into(),
+                limit: Some(1),
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&limited).as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

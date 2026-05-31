@@ -21,6 +21,10 @@ pub struct ListTasksFilterParams {
     pub tag: Option<String>,
     /// Filter by parent epic ID
     pub epic: Option<String>,
+    /// Max number of results
+    pub limit: Option<u64>,
+    /// Exclude done and cancelled tasks (default: false — show all)
+    pub active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -80,6 +84,10 @@ pub struct DepParams {
 pub struct SearchParams {
     /// Search query
     pub query: String,
+    /// Max number of results
+    pub limit: Option<u64>,
+    /// Exclude done and cancelled tasks (default: false — show all)
+    pub active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
