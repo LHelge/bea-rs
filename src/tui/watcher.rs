@@ -17,10 +17,8 @@
 //!
 //! # Integration
 //!
-//! `watch_bears_dir` is the wiring point for the upcoming live-reload feature.
-//! The TUI event loop integration is a separate follow-up task; until then the
-//! function is intentionally unused from production code paths.
-#![allow(dead_code)]
+//! `watch_bears_dir` is called from the TUI event loop ([`super::run`]) to
+//! enable live reload when `.bears/` changes on disk.
 
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
