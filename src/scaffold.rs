@@ -86,9 +86,6 @@ pub struct ScaffoldFile {
 
 /// Describes a complete coding-harness integration.
 pub struct Harness {
-    /// Human-readable name (for diagnostics / future display use).
-    #[allow(dead_code)]
-    pub name: &'static str,
     /// Plain files to write (idempotent overwrite).
     pub files: &'static [ScaffoldFile],
     /// How to register the MCP server.
@@ -147,7 +144,6 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "claude",
         &Harness {
-            name: "Claude",
             files: CLAUDE_FILES,
             mcp: McpStrategy::MergeJson {
                 target: ".mcp.json",
@@ -159,7 +155,6 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "copilot",
         &Harness {
-            name: "Copilot",
             files: COPILOT_FILES,
             mcp: McpStrategy::MergeJson {
                 target: ".github/mcp.json",
@@ -171,7 +166,6 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "codex",
         &Harness {
-            name: "Codex",
             files: CODEX_FILES,
             mcp: McpStrategy::None,
         },
