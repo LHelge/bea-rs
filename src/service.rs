@@ -111,6 +111,7 @@ pub fn update_task(
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
 
+    let status_changed = status.as_ref().is_some_and(|s| *s != t.status);
     if let Some(s) = status {
         t.status = s;
     }
@@ -132,6 +133,12 @@ pub fn update_task(
     t.updated = Utc::now();
 
     store::save(base, &t)?;
+
+    // Apply status-change side effects (e.g. epic auto-close) when status changed.
+    if status_changed {
+        on_status_changed(base, tasks, &t)?;
+    }
+
     Ok(t)
 }
 
@@ -148,6 +155,16 @@ pub fn set_status(
     t.updated = Utc::now();
     store::save(base, &t)?;
 
+    on_status_changed(base, tasks, &t)?;
+
+    Ok(t)
+}
+
+/// Apply side effects after a task's status has been changed and saved.
+///
+/// Currently: auto-close parent epic when all children are done.
+/// `tasks` is the pre-change snapshot; `t` is the task with its NEW status.
+fn on_status_changed(base: &Path, tasks: &HashMap<String, Task>, t: &Task) -> Result<()> {
     // Auto-close parent epic when all children are done
     if t.status == Status::Done
         && let Some(ref parent_id) = t.parent
@@ -165,7 +182,7 @@ pub fn set_status(
         }
     }
 
-    Ok(t)
+    Ok(())
 }
 
 /// Add a dependency with cycle detection. Both IDs support prefix matching.
@@ -442,6 +459,87 @@ mod tests {
 
         // Complete second child — epic auto-closes
         set_status(tmp.path(), &tasks, &child2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_epic_auto_close_via_update_task() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "My Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete first child via update_task — epic stays open
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        update_task(
+            tmp.path(),
+            &tasks,
+            &child1.id,
+            Some(Status::Done),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Open);
+
+        // Complete second child via update_task — epic auto-closes
+        update_task(
+            tmp.path(),
+            &tasks,
+            &child2.id,
+            Some(Status::Done),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(tasks[&epic.id].status, Status::Done);
     }
