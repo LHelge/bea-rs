@@ -478,4 +478,154 @@ mod tests {
             "closed channel must yield None so run_loop can disable the watcher branch"
         );
     }
+
+    // ── Load-then-reload application path ────────────────────────────────
+    //
+    // These tests exercise the full disk→app reload pipeline without a real
+    // watcher: write task files to a temp dir, call `load_all`, feed the result
+    // into `App::reload`, and assert the in-memory state is correct.
+
+    /// Helper: write a minimal valid task file into a `.bears/` directory.
+    fn write_task_file(bears_dir: &std::path::Path, id: &str, title: &str, status: &str) {
+        let content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: P2\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n"
+        );
+        let filename = format!("{id}-{}.md", title.to_lowercase().replace(' ', "-"));
+        std::fs::write(bears_dir.join(filename), content).expect("write task file");
+    }
+
+    /// `load_all` followed by `App::reload` correctly populates `all_tasks`,
+    /// `task_map`, `graph`, and the visible `tasks` list from disk.
+    ///
+    /// No file-watcher or real timing involved — this is a pure functional test
+    /// of the disk-read → reload application path.
+    #[tokio::test]
+    async fn reload_applies_disk_state_to_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::store::init(tmp.path()).unwrap();
+        let bears_dir = tmp.path().join(".bears");
+
+        // Write two open tasks and one done task.
+        write_task_file(&bears_dir, "t01", "Alpha Task", "open");
+        write_task_file(&bears_dir, "t02", "Beta Task", "open");
+        write_task_file(&bears_dir, "t03", "Gamma Task", "done");
+
+        // Load from disk and build initial app.
+        let task_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let mut task_list: Vec<Task> = task_map.values().cloned().collect();
+        task_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        let mut app = App::new(task_list, task_map, tmp.path().to_path_buf());
+
+        // Default filter (Open) should show the two open tasks, not the done one.
+        assert_eq!(
+            app.all_tasks.len(),
+            3,
+            "all_tasks should hold every task from disk"
+        );
+        assert!(app.task_map.contains_key("t01"));
+        assert!(app.task_map.contains_key("t02"));
+        assert!(app.task_map.contains_key("t03"));
+        let open_visible: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            open_visible.contains(&"t01") && open_visible.contains(&"t02"),
+            "open tasks must be visible"
+        );
+        assert!(
+            !open_visible.contains(&"t03"),
+            "done task must be hidden by default Open filter"
+        );
+
+        // Now simulate an external edit: add a new task and delete t02.
+        write_task_file(&bears_dir, "t04", "Delta Task", "open");
+        std::fs::remove_file(bears_dir.join("t02-beta-task.md")).unwrap();
+
+        // Re-load from disk and call App::reload (the path the watcher triggers).
+        let new_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let mut new_list: Vec<Task> = new_map.values().cloned().collect();
+        new_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        app.reload(new_list, new_map);
+
+        // all_tasks / task_map must reflect the new disk state.
+        assert_eq!(app.all_tasks.len(), 3, "t02 deleted, t04 added → 3 tasks");
+        assert!(
+            app.task_map.contains_key("t01"),
+            "t01 must still be present"
+        );
+        assert!(
+            !app.task_map.contains_key("t02"),
+            "t02 must be gone after deletion"
+        );
+        assert!(
+            app.task_map.contains_key("t04"),
+            "t04 must appear after add"
+        );
+
+        // Visible list should contain t01 and t04 (open), not t02 or t03.
+        let visible_ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert!(visible_ids.contains(&"t01"), "t01 should be visible");
+        assert!(visible_ids.contains(&"t04"), "t04 should be visible");
+        assert!(
+            !visible_ids.contains(&"t02"),
+            "deleted t02 must not be visible"
+        );
+        assert!(
+            !visible_ids.contains(&"t03"),
+            "done t03 still hidden by Open filter"
+        );
+
+        // Graph must be rebuilt: there are no dependency edges, so every open
+        // task should be recognised as ready by the graph helper.
+        assert!(
+            crate::graph::is_task_ready(&app.task_map, app.task_map.get("t01").unwrap()),
+            "t01 has no deps, so it must be ready"
+        );
+        assert!(
+            crate::graph::is_task_ready(&app.task_map, app.task_map.get("t04").unwrap()),
+            "t04 has no deps, so it must be ready"
+        );
+    }
+
+    /// When a task gains a dependency on an incomplete task after reload,
+    /// the rebuilt graph must reflect that it is no longer ready.
+    #[tokio::test]
+    async fn reload_rebuilds_graph_correctly() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::store::init(tmp.path()).unwrap();
+        let bears_dir = tmp.path().join(".bears");
+
+        // Two open tasks, no dependencies initially.
+        write_task_file(&bears_dir, "u01", "Upstream Task", "open");
+        write_task_file(&bears_dir, "u02", "Downstream Task", "open");
+
+        let task_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let task_list: Vec<Task> = task_map.values().cloned().collect();
+        let mut app = App::new(task_list, task_map, tmp.path().to_path_buf());
+
+        // Both tasks are initially ready (no deps).
+        assert!(crate::graph::is_task_ready(
+            &app.task_map,
+            app.task_map.get("u02").unwrap()
+        ));
+
+        // Rewrite u02 with a dependency on u01 (which is still open).
+        let blocked_content = "---\nid: u02\ntitle: Downstream Task\nstatus: open\npriority: P2\n\
+             depends_on: [u01]\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:01Z\n---\n";
+        std::fs::write(bears_dir.join("u02-downstream-task.md"), blocked_content).unwrap();
+
+        // Reload from disk.
+        let new_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let new_list: Vec<Task> = new_map.values().cloned().collect();
+        app.reload(new_list, new_map);
+
+        // After reload, u02 depends on open u01 → not ready.
+        assert!(
+            !crate::graph::is_task_ready(&app.task_map, app.task_map.get("u02").unwrap()),
+            "u02 must not be ready after reload adds dep on open u01"
+        );
+        // u01 still has no deps → still ready.
+        assert!(
+            crate::graph::is_task_ready(&app.task_map, app.task_map.get("u01").unwrap()),
+            "u01 must still be ready"
+        );
+    }
 }
