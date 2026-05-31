@@ -1046,11 +1046,11 @@ fn test_archive_sweep_no_id_archives_all_done() {
 
     let id1 = create_task(&tmp, "Done task 1");
     let id2 = create_task(&tmp, "Done task 2");
-    let id3 = create_task(&tmp, "Open task");
+    let _id3 = create_task(&tmp, "Open task");
 
     complete_task(&tmp, &id1);
     complete_task(&tmp, &id2);
-    // id3 stays open
+    // _id3 stays open
 
     // archive sweep — no id
     bea(&tmp)
@@ -1152,4 +1152,109 @@ fn test_list_archived_json() {
     assert!(v.is_array());
     assert!(!v.as_array().unwrap().is_empty());
     assert_eq!(v.as_array().unwrap()[0]["id"].as_str().unwrap(), id);
+}
+
+// ─── Log command tests (acr) ──────────────────────────────────────────────────
+
+#[test]
+fn test_log_shows_archived_tasks_most_recent_first() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id1 = create_task(&tmp, "Log task 1");
+    let id2 = create_task(&tmp, "Log task 2");
+
+    complete_task(&tmp, &id1);
+    complete_task(&tmp, &id2);
+
+    // Archive both via sweep
+    bea(&tmp).args(["archive"]).assert().success();
+
+    // Human output: both tasks should appear
+    bea(&tmp)
+        .arg("log")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Log task 1"))
+        .stdout(predicate::str::contains("Log task 2"));
+}
+
+#[test]
+fn test_log_empty_when_no_archive() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    bea(&tmp)
+        .arg("log")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No archived tasks"));
+}
+
+#[test]
+fn test_log_json() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Log JSON task");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    let out = bea(&tmp).args(["--json", "log"]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.is_array(), "log --json should return an array");
+    assert!(!v.as_array().unwrap().is_empty());
+    assert_eq!(v.as_array().unwrap()[0]["id"].as_str().unwrap(), id);
+}
+
+#[test]
+fn test_log_limit() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id1 = create_task(&tmp, "Limit task 1");
+    let id2 = create_task(&tmp, "Limit task 2");
+    let id3 = create_task(&tmp, "Limit task 3");
+
+    complete_task(&tmp, &id1);
+    complete_task(&tmp, &id2);
+    complete_task(&tmp, &id3);
+
+    bea(&tmp).args(["archive"]).assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "log", "--limit", "2"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        2,
+        "log --limit 2 should return exactly 2 tasks"
+    );
+}
+
+#[test]
+fn test_prune_still_works() {
+    // Regression: prune must remain functional even though archive is preferred.
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Will be pruned");
+    bea(&tmp).args(["cancel", &id]).assert().success();
+
+    bea(&tmp)
+        .arg("prune")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned").or(predicate::str::contains("prune")));
+
+    // Task should be gone from active list
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Will be pruned").not());
 }
