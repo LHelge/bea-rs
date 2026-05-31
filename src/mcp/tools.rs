@@ -296,6 +296,25 @@ impl BeaMcp {
         )
     }
 
+    #[tool(
+        description = "Return the children of an epic in topological execution order (plan view)"
+    )]
+    async fn plan_epic(
+        &self,
+        Parameters(params): Parameters<PlanEpicParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let plan = service::plan_epic(&tasks, &params.id)?;
+                let eff = service::effective_priorities(&tasks);
+                let summaries: Vec<_> = plan.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
+    }
+
     #[tool(description = "List all epics with progress summary")]
     async fn list_epics(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
@@ -781,6 +800,97 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert!(extract_text(&result).contains("invalid status"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_plan_epic() {
+        let (_tmp, mcp) = setup();
+
+        // Create an epic
+        let epic = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "My Epic".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: Some("epic".into()),
+            }))
+            .await
+            .unwrap();
+        let epic_id = extract_json(&epic)["id"].as_str().unwrap().to_string();
+
+        // Create a linear chain: c1 <- c2 <- c3
+        let c1 = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Step 1".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: Some(epic_id.clone()),
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_c1 = extract_json(&c1)["id"].as_str().unwrap().to_string();
+
+        let c2 = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Step 2".into(),
+                priority: None,
+                tags: None,
+                depends_on: Some(vec![id_c1.clone()]),
+                parent: Some(epic_id.clone()),
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_c2 = extract_json(&c2)["id"].as_str().unwrap().to_string();
+
+        // Create an independent sibling
+        mcp.create_task(Parameters(CreateTaskParams {
+            title: "Independent Step".into(),
+            priority: None,
+            tags: None,
+            depends_on: None,
+            parent: Some(epic_id.clone()),
+            body: None,
+            task_type: None,
+        }))
+        .await
+        .unwrap();
+
+        let result = mcp
+            .plan_epic(Parameters(PlanEpicParams {
+                id: epic_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let json = extract_json(&result);
+        let arr = json.as_array().unwrap();
+        // All 3 children returned
+        assert_eq!(arr.len(), 3);
+        // c1 must appear before c2 (dependency order)
+        let pos_c1 = arr
+            .iter()
+            .position(|x| x["id"] == id_c1)
+            .expect("c1 in plan");
+        let pos_c2 = arr
+            .iter()
+            .position(|x| x["id"] == id_c2)
+            .expect("c2 in plan");
+        assert!(pos_c1 < pos_c2, "c1 must precede c2 in execution order");
+
+        // Calling plan_epic on a non-epic task returns an error
+        let non_epic_result = mcp
+            .plan_epic(Parameters(PlanEpicParams { id: id_c1 }))
+            .await
+            .unwrap();
+        assert_eq!(non_epic_result.is_error, Some(true));
     }
 
     #[tokio::test]
