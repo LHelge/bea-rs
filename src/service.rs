@@ -38,13 +38,13 @@ pub fn create_task(
         return Err(Error::UnknownDependency { ids: unknown });
     }
 
-    // Treat empty-string parent as "no parent"
-    let parent = parent.and_then(|p| if p.is_empty() { None } else { Some(p) });
-
-    // Validate parent exists if provided
-    if let Some(ref pid) = parent {
-        store::resolve_prefix(tasks, pid)?;
-    }
+    // Treat empty-string parent as "no parent", and resolve a prefix to the
+    // full id so the stored parent matches the canonical task id (otherwise
+    // epic_progress / reparenting lookups by full id would miss it).
+    let parent = match parent.and_then(|p| if p.is_empty() { None } else { Some(p) }) {
+        Some(pid) => Some(store::resolve_prefix(tasks, &pid)?),
+        None => None,
+    };
 
     let mut t = Task::new(id, title, priority);
     t.task_type = task_type;
@@ -149,9 +149,9 @@ pub fn update_task(
         match new_parent {
             None => t.parent = None,
             Some(ref pid) => {
-                // Validate parent exists
-                store::resolve_prefix(tasks, pid)?;
-                t.parent = Some(pid.clone());
+                // Validate parent exists and store its canonical full id (not the
+                // typed prefix) so epic_progress lookups by full id match.
+                t.parent = Some(store::resolve_prefix(tasks, pid)?);
             }
         }
     }
@@ -1209,6 +1209,65 @@ mod tests {
         ]);
         let result = plan_epic(&tasks, "p1");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parent_prefix_stored_as_canonical_id() {
+        // A parent passed as a prefix must be stored as the resolved full id, so
+        // epic_progress (which matches children on the full id) counts them.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let mut epic = Task::new("epicid".into(), "Epic".into(), Priority::P1);
+        epic.task_type = TaskType::Epic;
+        store::save(tmp.path(), &epic).unwrap();
+        let child = Task::new("chld".into(), "Existing child".into(), Priority::P2);
+        store::save(tmp.path(), &child).unwrap();
+
+        // update_task reparenting with a prefix ("epi" → "epicid").
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let updated = update_task(
+            tmp.path(),
+            &tasks,
+            "chld",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("epi".into())),
+        )
+        .unwrap();
+        assert_eq!(
+            updated.parent.as_deref(),
+            Some("epicid"),
+            "update_task should store the resolved full parent id, not the prefix"
+        );
+
+        // create_task with a prefix parent ("epi" → "epicid").
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let created = create_task(
+            tmp.path(),
+            &tasks,
+            "New child".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some("epi".into()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(
+            created.parent.as_deref(),
+            Some("epicid"),
+            "create_task should store the resolved full parent id, not the prefix"
+        );
+
+        // Both children are now visible to the epic via its full id.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(epic_progress(&tasks, "epicid").total, 2);
     }
 
     // ─── Archive service tests ────────────────────────────────────────────────
