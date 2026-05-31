@@ -68,7 +68,9 @@ impl BeaMcp {
         )
     }
 
-    #[tool(description = "Get full details of a single task")]
+    #[tool(description = "Get full details of a single task. If the id isn't an \
+                       active task, falls back to the archive; an archived \
+                       result is marked with \"archived\": true.")]
     async fn get_task(
         &self,
         Parameters(params): Parameters<TaskIdParams>,
@@ -76,10 +78,28 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
-                let t = service::get_task(&tasks, &params.id)?;
-                let eff = service::effective_priorities(&tasks);
-                let ep = eff.get(&t.id);
-                ok_json(serde_json::to_value(t.detail(ep))?)
+                match service::get_task(&tasks, &params.id) {
+                    Ok(t) => {
+                        let eff = service::effective_priorities(&tasks);
+                        let ep = eff.get(&t.id);
+                        ok_json(serde_json::to_value(t.detail(ep))?)
+                    }
+                    // Not in the active store — fall back to the archive (read-only).
+                    Err(Error::TaskNotFound(id)) => {
+                        match service::get_archived_task(&self.base, &params.id).await {
+                            Ok(t) => {
+                                let mut v = serde_json::to_value(t.detail(None))?;
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert("archived".into(), serde_json::Value::Bool(true));
+                                }
+                                ok_json(v)
+                            }
+                            // Neither active nor archived: report the original miss.
+                            Err(_) => Err(Error::TaskNotFound(id)),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             }
             .await,
         )
@@ -524,6 +544,52 @@ mod tests {
         let json = extract_json(&detail);
         assert_eq!(json["title"], "Detail task");
         assert_eq!(json["body"], "Some body");
+    }
+
+    #[tokio::test]
+    async fn test_tool_get_task_falls_back_to_archive() {
+        let (_tmp, mcp) = setup();
+        // Create, complete, and archive a task.
+        let created = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Archived detail".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: Some("archived body".into()),
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&created)["id"].as_str().unwrap().to_string();
+        mcp.complete_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        // get_task on the archived id resolves via the archive fallback and is
+        // flagged as archived.
+        let detail = mcp
+            .get_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        let json = extract_json(&detail);
+        assert_eq!(json["title"], "Archived detail");
+        assert_eq!(json["archived"], true);
+
+        // A genuinely unknown id (neither active nor archived) reports an
+        // in-band tool error.
+        let missing = mcp
+            .get_task(Parameters(TaskIdParams { id: "nope".into() }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(extract_text(&missing).contains("not found"));
     }
 
     #[tokio::test]
