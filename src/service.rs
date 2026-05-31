@@ -162,35 +162,74 @@ pub fn set_status(
 
 /// Apply side effects after a task's status has been changed and saved.
 ///
-/// Currently: auto-close parent epic when all children are resolved (Done or Cancelled).
+/// Triggers epic auto-close check and cascades up through nested epics.
 /// `tasks` is the pre-change snapshot; `t` is the task with its NEW status.
 fn on_status_changed(base: &Path, tasks: &HashMap<String, Task>, t: &Task) -> Result<()> {
+    // `overrides` tracks tasks that have been auto-closed during this call so
+    // that recursive ancestor checks see the up-to-date statuses even though
+    // `tasks` is an immutable pre-change snapshot.
+    let mut overrides: HashMap<String, Status> = HashMap::new();
+    overrides.insert(t.id.clone(), t.status.clone());
+    maybe_close_parent_epic(base, tasks, t, &mut overrides)
+}
+
+/// Resolve the effective status of a task, preferring the `overrides` map.
+fn effective_status<'a>(task: &'a Task, overrides: &'a HashMap<String, Status>) -> &'a Status {
+    overrides.get(&task.id).unwrap_or(&task.status)
+}
+
+/// Check whether `t`'s parent epic should auto-close, and if so close it and
+/// recurse up through ancestor epics. `overrides` accumulates newly-written
+/// statuses so that each level sees the current state without re-reading disk.
+fn maybe_close_parent_epic(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    t: &Task,
+    overrides: &mut HashMap<String, Status>,
+) -> Result<()> {
     // Trigger auto-close check when the child transitions to Done or Cancelled.
-    let is_resolved = t.status == Status::Done || t.status == Status::Cancelled;
-    if is_resolved
-        && let Some(ref parent_id) = t.parent
-        && let Some(parent) = tasks.get(parent_id)
-        && parent.task_type.is_epic()
-        && parent.status != Status::Done
-    {
-        // An epic is fully resolved when every child is Done or Cancelled
-        // (cancelled = resolved and non-blocking). We treat `t` with its NEW
-        // status to avoid snapshot staleness, and we require at least one child.
-        let children: Vec<_> = tasks
-            .values()
-            .filter(|c| c.parent.as_deref() == Some(parent_id))
-            .collect();
-        let has_children = !children.is_empty();
-        let all_resolved = children.iter().all(|c| {
-            let effective_status = if c.id == t.id { &t.status } else { &c.status };
-            *effective_status == Status::Done || *effective_status == Status::Cancelled
-        });
-        if has_children && all_resolved {
-            let mut parent = parent.clone();
-            parent.status = Status::Done;
-            parent.updated = Utc::now();
-            store::save(base, &parent)?;
-        }
+    let t_status = effective_status(t, overrides);
+    let is_resolved = *t_status == Status::Done || *t_status == Status::Cancelled;
+    if !is_resolved {
+        return Ok(());
+    }
+
+    let Some(ref parent_id) = t.parent else {
+        return Ok(());
+    };
+    let Some(parent) = tasks.get(parent_id) else {
+        return Ok(());
+    };
+    if !parent.task_type.is_epic() {
+        return Ok(());
+    }
+    // Skip if already (auto-)closed in this call chain.
+    if *effective_status(parent, overrides) == Status::Done {
+        return Ok(());
+    }
+
+    // An epic is fully resolved when every child is Done or Cancelled
+    // (cancelled = resolved and non-blocking). We consult `overrides` for
+    // up-to-date statuses written during this recursive call.
+    let children: Vec<_> = tasks
+        .values()
+        .filter(|c| c.parent.as_deref() == Some(parent_id))
+        .collect();
+    let has_children = !children.is_empty();
+    let all_resolved = children.iter().all(|c| {
+        let s = effective_status(c, overrides);
+        *s == Status::Done || *s == Status::Cancelled
+    });
+
+    if has_children && all_resolved {
+        let mut closed_parent = parent.clone();
+        closed_parent.status = Status::Done;
+        closed_parent.updated = Utc::now();
+        store::save(base, &closed_parent)?;
+        overrides.insert(parent_id.clone(), Status::Done);
+
+        // Cascade: re-run the check for the newly-closed epic's own parent.
+        maybe_close_parent_epic(base, tasks, parent, overrides)?;
     }
 
     Ok(())
@@ -766,6 +805,104 @@ mod tests {
             tasks[&epic.id].status,
             Status::Open,
             "epic must not close when re-completing an already-done child while another is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_epic_cascade_auto_close_nested() {
+        // Verify that closing the last leaf cascades up through ≥2 epic levels.
+        //
+        // Structure:
+        //   outer_epic
+        //     └─ inner_epic
+        //          ├─ leaf1 (will be Done first)
+        //          └─ leaf2 (completing this triggers the cascade)
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let outer = create_task(
+            tmp.path(),
+            &tasks,
+            "Outer Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let inner = create_task(
+            tmp.path(),
+            &tasks,
+            "Inner Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            Some(outer.id.clone()),
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let leaf1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Leaf 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(inner.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let leaf2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Leaf 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(inner.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete leaf1 — nothing should close yet
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &leaf1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&inner.id].status,
+            Status::Open,
+            "inner should stay open"
+        );
+        assert_eq!(
+            tasks[&outer.id].status,
+            Status::Open,
+            "outer should stay open"
+        );
+
+        // Complete leaf2 — inner_epic should auto-close, then outer_epic should cascade-close
+        set_status(tmp.path(), &tasks, &leaf2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&inner.id].status,
+            Status::Done,
+            "inner epic should auto-close when all its children are done"
+        );
+        assert_eq!(
+            tasks[&outer.id].status,
+            Status::Done,
+            "outer epic should cascade-close when inner epic closes"
         );
     }
 
