@@ -209,7 +209,7 @@ pub enum Command {
         id: String,
     },
 
-    /// Delete completed/cancelled tasks
+    /// Delete completed/cancelled tasks [deprecated: prefer `bea archive`]
     Prune {
         /// Also delete done tasks
         #[arg(long)]
