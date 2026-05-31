@@ -162,34 +162,30 @@ pub fn set_status(
 
 /// Apply side effects after a task's status has been changed and saved.
 ///
-/// Currently: auto-close parent epic when all children are done.
+/// Currently: auto-close parent epic when all children are resolved (Done or Cancelled).
 /// `tasks` is the pre-change snapshot; `t` is the task with its NEW status.
 fn on_status_changed(base: &Path, tasks: &HashMap<String, Task>, t: &Task) -> Result<()> {
-    // Auto-close parent epic when all children are done
-    if t.status == Status::Done
+    // Trigger auto-close check when the child transitions to Done or Cancelled.
+    let is_resolved = t.status == Status::Done || t.status == Status::Cancelled;
+    if is_resolved
         && let Some(ref parent_id) = t.parent
         && let Some(parent) = tasks.get(parent_id)
         && parent.task_type.is_epic()
         && parent.status != Status::Done
     {
-        // Check whether all children are done, treating `t` as done regardless
-        // of its prior state in `tasks` (avoids the +1 overshoot when re-completing
-        // an already-done child).
-        let all_done = tasks
+        // An epic is fully resolved when every child is Done or Cancelled
+        // (cancelled = resolved and non-blocking). We treat `t` with its NEW
+        // status to avoid snapshot staleness, and we require at least one child.
+        let children: Vec<_> = tasks
             .values()
             .filter(|c| c.parent.as_deref() == Some(parent_id))
-            .all(|c| {
-                if c.id == t.id {
-                    true // current task is now Done
-                } else {
-                    c.status == Status::Done
-                }
-            });
-        // Only auto-close when there is at least one child.
-        let has_children = tasks
-            .values()
-            .any(|c| c.parent.as_deref() == Some(parent_id.as_str()));
-        if all_done && has_children {
+            .collect();
+        let has_children = !children.is_empty();
+        let all_resolved = children.iter().all(|c| {
+            let effective_status = if c.id == t.id { &t.status } else { &c.status };
+            *effective_status == Status::Done || *effective_status == Status::Cancelled
+        });
+        if has_children && all_resolved {
             let mut parent = parent.clone();
             parent.status = Status::Done;
             parent.updated = Utc::now();
@@ -319,11 +315,22 @@ pub struct EpicSummary {
 }
 
 /// Compute progress for an epic by counting children (tasks with parent == epic_id).
+///
+/// Semantics: cancelled children are treated as resolved and non-blocking.
+/// - `total` = non-cancelled children (active workload)
+/// - `done`  = Done children
+///
+/// A fully-resolved epic (all children Done or Cancelled) satisfies `done == total`
+/// because cancelled children contribute to neither count.
 pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgress {
     let mut done = 0;
     let mut total = 0;
     for t in tasks.values() {
         if t.parent.as_deref() == Some(epic_id) {
+            if t.status == Status::Cancelled {
+                // Cancelled = resolved but not counted in the active workload.
+                continue;
+            }
             total += 1;
             if t.status == Status::Done {
                 done += 1;
@@ -417,6 +424,140 @@ mod tests {
         let p = epic_progress(&tasks, "e1");
         assert_eq!(p.done, 2);
         assert_eq!(p.total, 2);
+    }
+
+    #[test]
+    fn test_epic_progress_cancelled_excluded_from_total() {
+        // Cancelled children are non-blocking: excluded from total, not counted in done.
+        // A fully-resolved epic (done + cancelled) shows done == total.
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            make_child("c1", "e1", Status::Done),
+            make_child("c2", "e1", Status::Cancelled),
+        ]);
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!(p.done, 1);
+        assert_eq!(p.total, 1); // cancelled child excluded
+    }
+
+    #[test]
+    fn test_epic_progress_mixed_with_cancelled() {
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            make_child("c1", "e1", Status::Done),
+            make_child("c2", "e1", Status::Open),
+            make_child("c3", "e1", Status::Cancelled),
+        ]);
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!(p.done, 1);
+        assert_eq!(p.total, 2); // cancelled child excluded
+    }
+
+    #[tokio::test]
+    async fn test_epic_auto_close_with_done_and_cancelled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "My Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Done + Cancelled = all resolved → epic should auto-close
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Open);
+
+        // Cancel the last child — should trigger auto-close
+        set_status(tmp.path(), &tasks, &child2.id, Status::Cancelled).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&epic.id].status,
+            Status::Done,
+            "epic should auto-close when children are [done, cancelled]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_epic_auto_close_cancel_last_open_child() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "My Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Cancelling the only/last open child must trigger auto-close
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Cancelled).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&epic.id].status,
+            Status::Done,
+            "epic should auto-close when cancelling the last open child"
+        );
     }
 
     #[tokio::test]
