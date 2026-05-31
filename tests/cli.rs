@@ -952,3 +952,204 @@ fn test_edit_id_change_rejected_no_orphan() {
         "original file should be named {id}-*.md, got {name}"
     );
 }
+
+// ─── Archive / Restore / List --archived tests (awg) ─────────────────────────
+
+/// Helper: complete a task by id.
+fn complete_task(dir: &TempDir, id: &str) {
+    bea(dir).args(["done", id]).assert().success();
+}
+
+#[test]
+fn test_archive_done_task_removes_from_list() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Archivable task");
+    complete_task(&tmp, &id);
+
+    // archive the task
+    bea(&tmp)
+        .args(["archive", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archived"));
+
+    // task should no longer appear in list
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archivable task").not());
+}
+
+#[test]
+fn test_archive_done_task_appears_in_list_archived() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Will be archived");
+    complete_task(&tmp, &id);
+
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // list --archived should contain the task
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Will be archived"));
+}
+
+#[test]
+fn test_restore_task_returns_to_active() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Restore me");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // confirm gone from active
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Restore me").not());
+
+    // restore
+    bea(&tmp)
+        .args(["restore", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Restored"));
+
+    // now back in active list (with --all to include done tasks)
+    bea(&tmp)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Restore me"));
+
+    // and gone from archive
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Restore me").not());
+}
+
+#[test]
+fn test_archive_sweep_no_id_archives_all_done() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id1 = create_task(&tmp, "Done task 1");
+    let id2 = create_task(&tmp, "Done task 2");
+    let id3 = create_task(&tmp, "Open task");
+
+    complete_task(&tmp, &id1);
+    complete_task(&tmp, &id2);
+    // id3 stays open
+
+    // archive sweep — no id
+    bea(&tmp)
+        .args(["archive"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archived"));
+
+    // open task should still be in list
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Open task"));
+
+    // both done tasks should be in archive
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Done task 1"))
+        .stdout(predicate::str::contains("Done task 2"))
+        .stdout(predicate::str::contains("Open task").not());
+}
+
+#[test]
+fn test_archive_blocked_by_active_dependent_errors() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_dep = create_task(&tmp, "Dependency");
+    let id_user = create_task(&tmp, "Active dependent");
+
+    // Make id_user depend on id_dep
+    bea(&tmp)
+        .args(["dep", "add", &id_user, &id_dep])
+        .assert()
+        .success();
+
+    // Complete the dependency but the active dependent keeps it unarchivable
+    complete_task(&tmp, &id_dep);
+
+    bea(&tmp)
+        .args(["archive", &id_dep])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not archivable").or(predicate::str::contains("active")));
+}
+
+#[test]
+fn test_show_archived_task_via_show_command() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Peek at me");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // show should succeed and mention the task is archived
+    bea(&tmp)
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("archived"));
+}
+
+#[test]
+fn test_mutating_archived_task_gives_helpful_error() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Immutable");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // start should fail with a helpful message about restore
+    bea(&tmp)
+        .args(["start", &id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("archived").or(predicate::str::contains("restore")));
+}
+
+#[test]
+fn test_list_archived_json() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "JSON archive check");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "list", "--archived"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.is_array());
+    assert!(!v.as_array().unwrap().is_empty());
+    assert_eq!(v.as_array().unwrap()[0]["id"].as_str().unwrap(), id);
+}
