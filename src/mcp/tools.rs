@@ -1773,4 +1773,352 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
     }
+
+    // ─── xja: end-to-end archive visibility and integrity (MCP layer) ─────────
+
+    /// Archived task is hidden from search_tasks.
+    #[tokio::test]
+    async fn test_tool_archived_hidden_from_search() {
+        let (_tmp, mcp) = setup();
+
+        let t = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Searchable archived task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&t)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        // search_tasks (default: includes done) must not return archived task
+        let results = mcp
+            .search_tasks(Parameters(SearchParams {
+                query: "Searchable archived task".into(),
+                limit: None,
+                active_only: None,
+            }))
+            .await
+            .unwrap();
+        let arr = extract_json(&results);
+        assert!(
+            arr.as_array().unwrap().iter().all(|x| x["id"] != id),
+            "archived task must not appear in search_tasks"
+        );
+    }
+
+    /// Archived task is hidden from get_graph (even with include_done=true).
+    #[tokio::test]
+    async fn test_tool_archived_hidden_from_graph() {
+        let (_tmp, mcp) = setup();
+
+        // Create A → B dep chain; both done and archived via sweep
+        let t_a = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Graph base".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_a = extract_json(&t_a)["id"].as_str().unwrap().to_string();
+
+        let t_b = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Graph dependent".into(),
+                priority: None,
+                tags: None,
+                depends_on: Some(vec![id_a.clone()]),
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id_b = extract_json(&t_b)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams { id: id_a.clone() }))
+            .await
+            .unwrap();
+        mcp.complete_task(Parameters(TaskIdParams { id: id_b.clone() }))
+            .await
+            .unwrap();
+        // Sweep archive
+        mcp.archive_task(Parameters(ArchiveTaskParams { id: None }))
+            .await
+            .unwrap();
+
+        // get_graph with include_done=true must not return archived nodes
+        let graph = mcp
+            .get_graph(Parameters(GetGraphParams {
+                include_done: Some(true),
+                epic: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let obj = extract_json(&graph);
+        let obj = obj.as_object().unwrap();
+        assert!(
+            !obj.contains_key(id_a.as_str()),
+            "archived node A must not appear in graph"
+        );
+        assert!(
+            !obj.contains_key(id_b.as_str()),
+            "archived node B must not appear in graph"
+        );
+    }
+
+    /// Archived epic is hidden from list_epics.
+    #[tokio::test]
+    async fn test_tool_archived_epic_hidden_from_list_epics() {
+        let (_tmp, mcp) = setup();
+
+        let epic = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Hidden epic".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: Some("epic".into()),
+            }))
+            .await
+            .unwrap();
+        let epic_id = extract_json(&epic)["id"].as_str().unwrap().to_string();
+
+        let child = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Only child".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: Some(epic_id.clone()),
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let child_id = extract_json(&child)["id"].as_str().unwrap().to_string();
+
+        // Complete child (epic auto-closes) then archive the epic
+        mcp.complete_task(Parameters(TaskIdParams {
+            id: child_id.clone(),
+        }))
+        .await
+        .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(epic_id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        let epics = mcp.list_epics().await.unwrap();
+        let arr = extract_json(&epics);
+        assert!(
+            arr.as_array().unwrap().iter().all(|x| x["id"] != epic_id),
+            "archived epic must not appear in list_epics"
+        );
+    }
+
+    /// dep add onto an archived task ID is rejected (treated as unknown).
+    #[tokio::test]
+    async fn test_tool_dep_add_onto_archived_id_is_rejected() {
+        let (_tmp, mcp) = setup();
+
+        let archived = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "To archive".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let archived_id = extract_json(&archived)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams {
+            id: archived_id.clone(),
+        }))
+        .await
+        .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(archived_id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        let active = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Active task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let active_id = extract_json(&active)["id"].as_str().unwrap().to_string();
+
+        let result = mcp
+            .add_dependency(Parameters(DepParams {
+                id: active_id,
+                depends_on: archived_id,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "dep add onto archived id must return an error"
+        );
+    }
+
+    /// prune_tasks hard-deletes from active store only — the archive is untouched.
+    #[tokio::test]
+    async fn test_tool_prune_never_touches_archive() {
+        let (_tmp, mcp) = setup();
+
+        let t_arch = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Archived task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let arch_id = extract_json(&t_arch)["id"].as_str().unwrap().to_string();
+        mcp.complete_task(Parameters(TaskIdParams {
+            id: arch_id.clone(),
+        }))
+        .await
+        .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(arch_id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        // Create a cancelled task in the active store for prune to consume
+        let t_cancel = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Cancelled active".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let cancel_id = extract_json(&t_cancel)["id"].as_str().unwrap().to_string();
+        mcp.cancel_task(Parameters(TaskIdParams {
+            id: cancel_id.clone(),
+        }))
+        .await
+        .unwrap();
+
+        let pruned = mcp
+            .prune_tasks(Parameters(PruneParams {
+                include_done: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert!(!pruned.is_error.unwrap_or(false));
+
+        // Archived task must still be in list_archived
+        let archived = mcp
+            .list_archived(Parameters(ListArchivedParams { limit: None }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&archived)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["id"] == arch_id),
+            "archived task must not be removed by prune"
+        );
+    }
+
+    /// New task IDs are never reused from archived IDs.
+    #[tokio::test]
+    async fn test_tool_new_task_ids_do_not_reuse_archived() {
+        let (_tmp, mcp) = setup();
+
+        let t = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "ID Guard".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let archived_id = extract_json(&t)["id"].as_str().unwrap().to_string();
+
+        mcp.complete_task(Parameters(TaskIdParams {
+            id: archived_id.clone(),
+        }))
+        .await
+        .unwrap();
+        mcp.archive_task(Parameters(ArchiveTaskParams {
+            id: Some(archived_id.clone()),
+        }))
+        .await
+        .unwrap();
+
+        let mut new_ids = Vec::new();
+        for i in 0..10 {
+            let nt = mcp
+                .create_task(Parameters(CreateTaskParams {
+                    title: format!("New {i}"),
+                    priority: None,
+                    tags: None,
+                    depends_on: None,
+                    parent: None,
+                    body: None,
+                    task_type: None,
+                }))
+                .await
+                .unwrap();
+            new_ids.push(extract_json(&nt)["id"].as_str().unwrap().to_string());
+        }
+
+        assert!(
+            !new_ids.contains(&archived_id),
+            "archived ID {archived_id} must not be reused; new IDs: {new_ids:?}"
+        );
+    }
 }

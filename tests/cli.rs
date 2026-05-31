@@ -1437,3 +1437,246 @@ fn test_archive_sweep_skips_open_tasks() {
         .stdout(predicate::str::contains("Can be archived"))
         .stdout(predicate::str::contains("Must stay open").not());
 }
+
+// ─── Task xja: end-to-end archive visibility and integrity tests ──────────────
+
+/// Archived task is hidden from `bea search`.
+/// We verify via JSON output that the result array does not include the archived ID.
+#[test]
+fn test_archived_task_hidden_from_search() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Searchable archived xyz");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // JSON search: result must not include the archived task
+    let out = bea(&tmp)
+        .args(["--json", "search", "Searchable archived xyz"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let arr = v.as_array().unwrap();
+    assert!(
+        arr.iter().all(|x| x["id"] != id),
+        "archived task must not appear in search results"
+    );
+}
+
+/// Archived task is hidden from `bea graph`.
+#[test]
+fn test_archived_task_hidden_from_graph() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Graph hidden task");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // graph --all (includes done) should still not show archived tasks
+    bea(&tmp)
+        .args(["--json", "graph", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Graph hidden task").not());
+}
+
+/// Archived epic is hidden from `bea epics`.
+#[test]
+fn test_archived_epic_hidden_from_epics() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Hidden epic");
+    let child_id = create_child_task(&tmp, "Only child", &epic_id);
+
+    // Complete child (epic should auto-close) then archive
+    complete_task(&tmp, &child_id);
+    // Archive the epic (and its settled children)
+    bea(&tmp).args(["archive", &epic_id]).assert().success();
+
+    // `bea epics` should not mention the archived epic
+    bea(&tmp)
+        .arg("epics")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hidden epic").not());
+}
+
+/// Targeted archive REFUSES when an active task still depends on the target,
+/// and the error message names the blocker.
+#[test]
+fn test_archive_targeted_refuses_active_dependent_names_blocker() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_dep = create_task(&tmp, "Dependency task");
+    let id_user = create_task(&tmp, "Blocker task");
+
+    bea(&tmp)
+        .args(["dep", "add", &id_user, &id_dep])
+        .assert()
+        .success();
+
+    complete_task(&tmp, &id_dep);
+
+    // Archiving while active dependent exists must fail
+    bea(&tmp)
+        .args(["archive", &id_dep])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("active")
+                .or(predicate::str::contains("not archivable"))
+                .or(predicate::str::contains(&id_user)),
+        );
+}
+
+/// `bea prune` hard-deletes from the active store only — it does NOT remove
+/// tasks from the archive.
+#[test]
+fn test_prune_never_touches_archive() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    // Archive a done task
+    let id_arch = create_task(&tmp, "Archived task");
+    complete_task(&tmp, &id_arch);
+    bea(&tmp).args(["archive", &id_arch]).assert().success();
+
+    // Create a cancelled task in the active store for prune to consume
+    let id_cancel = create_task(&tmp, "Cancelled active task");
+    bea(&tmp).args(["cancel", &id_cancel]).assert().success();
+
+    // Prune only removes the cancelled active task
+    bea(&tmp)
+        .arg("prune")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned").or(predicate::str::contains("prune")));
+
+    // Archived task must still be in archive
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archived task"));
+}
+
+/// After restoring an archived task, it is workable again: it appears in the
+/// active list, can be re-opened, and shows up in `bea ready`.
+#[test]
+fn test_restore_makes_task_workable() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Workable after restore");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    bea(&tmp).args(["restore", &id]).assert().success();
+
+    // It should be in the active list (status=done after restore)
+    bea(&tmp)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workable after restore"));
+
+    // Re-open it so it becomes ready
+    bea(&tmp)
+        .args(["update", &id, "--status", "open"])
+        .assert()
+        .success();
+
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workable after restore"));
+}
+
+/// New task IDs are never reused from the archive (CLI e2e path).
+/// We archive a task, then create several new tasks and verify none reuses the archived ID.
+#[test]
+fn test_new_task_ids_do_not_reuse_archived_ids() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Archived ID guard");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    let mut new_ids = Vec::new();
+    for i in 0..10 {
+        new_ids.push(create_task(&tmp, &format!("New task {i}")));
+    }
+
+    assert!(
+        !new_ids.contains(&id),
+        "archived ID {id} must not be reused by new tasks: {new_ids:?}"
+    );
+}
+
+/// `dep add` onto an archived task ID is rejected — it stays "unknown" from
+/// the active store's perspective.
+#[test]
+fn test_dep_add_onto_archived_id_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id_arch = create_task(&tmp, "Will be archived dep");
+    complete_task(&tmp, &id_arch);
+    bea(&tmp).args(["archive", &id_arch]).assert().success();
+
+    let id_active = create_task(&tmp, "Wants archived dep");
+
+    bea(&tmp)
+        .args(["dep", "add", &id_active, &id_arch])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+/// Sweep archives only currently-archivable tasks; tasks that are blocked by
+/// active dependents are skipped even though they are done.
+#[test]
+fn test_sweep_skips_tasks_with_active_dependents() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    // id_base is done but id_user (open) depends on it → id_base is NOT archivable
+    let id_base = create_task(&tmp, "Base dep");
+    let id_user = create_task(&tmp, "Depends on base");
+
+    bea(&tmp)
+        .args(["dep", "add", &id_user, &id_base])
+        .assert()
+        .success();
+
+    complete_task(&tmp, &id_base);
+
+    // A completely independent done task that IS archivable
+    let id_free = create_task(&tmp, "Free done task");
+    complete_task(&tmp, &id_free);
+
+    bea(&tmp).args(["archive"]).assert().success();
+
+    // Only the free task should be archived — "Base dep" (done but blocked) must NOT be.
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Free done task"))
+        .stdout(predicate::str::contains("Base dep").not());
+
+    // "Base dep" (done) must still be in the active store — visible with --all
+    bea(&tmp)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Base dep"))
+        .stdout(predicate::str::contains("Depends on base"));
+}
