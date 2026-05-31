@@ -38,6 +38,14 @@ pub fn create_task(
         return Err(Error::UnknownDependency { ids: unknown });
     }
 
+    // Treat empty-string parent as "no parent"
+    let parent = parent.and_then(|p| if p.is_empty() { None } else { Some(p) });
+
+    // Validate parent exists if provided
+    if let Some(ref pid) = parent {
+        store::resolve_prefix(tasks, pid)?;
+    }
+
     let mut t = Task::new(id, title, priority);
     t.task_type = task_type;
     t.tags = tags;
@@ -96,6 +104,11 @@ pub fn get_task(tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Tas
 }
 
 /// Update task fields. Only `Some` fields are changed.
+///
+/// The `parent` parameter uses a double-Option to distinguish three states:
+/// - `None`           → leave parent unchanged
+/// - `Some(None)`     → clear parent (detach from any epic)
+/// - `Some(Some(id))` → set parent to the given epic ID (must exist)
 #[allow(clippy::too_many_arguments)]
 pub fn update_task(
     base: &Path,
@@ -107,6 +120,7 @@ pub fn update_task(
     assignee: Option<String>,
     body: Option<String>,
     title: Option<String>,
+    parent: Option<Option<String>>,
 ) -> Result<Task> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
@@ -129,6 +143,17 @@ pub fn update_task(
     }
     if let Some(title) = title {
         t.title = title;
+    }
+    // Reparenting: None = leave unchanged, Some(None) = clear, Some(Some(id)) = set
+    if let Some(new_parent) = parent {
+        match new_parent {
+            None => t.parent = None,
+            Some(ref pid) => {
+                // Validate parent exists
+                store::resolve_prefix(tasks, pid)?;
+                t.parent = Some(pid.clone());
+            }
+        }
     }
     t.updated = Utc::now();
 
@@ -717,6 +742,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
@@ -728,6 +754,7 @@ mod tests {
             &tasks,
             &child2.id,
             Some(Status::Done),
+            None,
             None,
             None,
             None,

@@ -63,8 +63,9 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             assignee,
             body,
             title,
+            parent,
         } => cmd::cmd_update(
-            base, &tasks, &id, status, priority, tag, assignee, body, title, cli.json,
+            base, &tasks, &id, status, priority, tag, assignee, body, title, parent, cli.json,
         ),
         Command::Status { id, status } => cmd::cmd_status(base, &tasks, &id, status, cli.json),
         Command::Start { id } => cmd::cmd_status(base, &tasks, &id, Status::InProgress, cli.json),

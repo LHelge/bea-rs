@@ -144,6 +144,10 @@ pub enum Command {
         /// New title
         #[arg(long)]
         title: Option<String>,
+
+        /// Set parent epic ID (use empty string "" to clear)
+        #[arg(long)]
+        parent: Option<String>,
     },
 
     /// Set task status

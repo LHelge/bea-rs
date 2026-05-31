@@ -323,10 +323,23 @@ pub fn cmd_update(
     assignee: Option<String>,
     body: Option<String>,
     title: Option<String>,
+    parent: Option<String>,
     json: bool,
 ) -> Result<()> {
+    // Map CLI parent arg: None = unchanged, "" = clear, "id" = set
+    let parent_update: Option<Option<String>> =
+        parent.map(|p| if p.is_empty() { None } else { Some(p) });
     let t = service::update_task(
-        base, tasks, id, status, priority, tags, assignee, body, title,
+        base,
+        tasks,
+        id,
+        status,
+        priority,
+        tags,
+        assignee,
+        body,
+        title,
+        parent_update,
     )?;
 
     if json {
