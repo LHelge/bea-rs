@@ -92,7 +92,8 @@ pub struct SearchParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PruneParams {
-    /// Also delete done tasks (default: only cancelled)
+    /// Also permanently delete done tasks (default: only cancelled).
+    /// Prefer archive_task (no id) over prune_tasks to preserve history.
     pub include_done: Option<bool>,
 }
 
