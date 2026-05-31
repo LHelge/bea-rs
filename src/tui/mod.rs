@@ -71,16 +71,14 @@ pub async fn run(base: &Path) -> Result<()> {
     result
 }
 
-/// Reload tasks from disk and update app state, preserving selection.
+/// Reload tasks from disk and update app state.
+///
+/// `App::reload` preserves the selected task by id (falling back to the
+/// nearest neighbour when deleted), the current list-mode and search query,
+/// and clamps the detail-pane scroll to the new content height.
 pub(crate) fn reload(app: &mut App) -> Result<()> {
     let (task_list, task_map) = load_tasks_sync(&app.base)?;
-    let selected_id = app.selected_task().map(|t| t.id.clone());
     app.reload(task_list, task_map);
-    if let Some(id) = selected_id
-        && let Some(idx) = app.tasks.iter().position(|t| t.id == id)
-    {
-        app.list_state.select(Some(idx));
-    }
     Ok(())
 }
 
@@ -302,54 +300,41 @@ mod tests {
         assert!(app.error_message.is_none());
     }
 
-    /// Verify that apply_reload_to_app correctly updates App state and
-    /// preserves the cursor position by task id after a reload.
+    // ── Reload selection/scroll/mode/search preservation ────────────────
+
+    fn make_open_tasks(ids_titles: &[(&str, &str)]) -> (Vec<Task>, HashMap<String, Task>) {
+        let tasks: Vec<Task> = ids_titles
+            .iter()
+            .map(|(id, title)| {
+                let mut t = Task::new(id.to_string(), title.to_string(), Priority::P1);
+                t.status = Status::Open;
+                t
+            })
+            .collect();
+        let map = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
+        (tasks, map)
+    }
+
+    /// `App::reload` follows the selected task by id when it moves in the list.
     #[test]
     fn reload_preserves_selection_by_id() {
-        // Build initial state: three tasks, select task "bbb" (index 1).
-        let make_task = |id: &str, title: &str| {
-            let mut t = Task::new(id.to_string(), title.to_string(), Priority::P1);
-            t.status = Status::Open;
-            t
-        };
-
-        let tasks = vec![
-            make_task("aaa", "Task A"),
-            make_task("bbb", "Task B"),
-            make_task("ccc", "Task C"),
-        ];
-        let map: HashMap<String, Task> = tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
+        let (tasks, map) =
+            make_open_tasks(&[("aaa", "Task A"), ("bbb", "Task B"), ("ccc", "Task C")]);
         let mut app = App::new(tasks, map, PathBuf::from("."));
 
-        // Select "bbb" (index 1 in Open filter)
+        // Select "bbb" at index 1.
         app.list_state.select(Some(1));
         assert_eq!(app.selected_task().map(|t| t.id.as_str()), Some("bbb"));
 
-        // Simulate a reload that adds a new task "aaa2" between "aaa" and "bbb".
-        // In sorted order the new list is: [aaa, aaa2, bbb, ccc].
-        let mut new_task = make_task("aaa2", "Task A2");
-        new_task.priority = Priority::P1;
-        let new_tasks = vec![
-            make_task("aaa", "Task A"),
-            new_task.clone(),
-            make_task("bbb", "Task B"),
-            make_task("ccc", "Task C"),
-        ];
-        let new_map: HashMap<String, Task> = new_tasks
-            .iter()
-            .map(|t| (t.id.clone(), t.clone()))
-            .collect();
-
-        // Apply the reload and re-select by id.
-        let selected_id = app.selected_task().map(|t| t.id.clone());
+        // Reload: insert "aaa2" between "aaa" and "bbb" so "bbb" shifts to index 2.
+        let (new_tasks, new_map) = make_open_tasks(&[
+            ("aaa", "Task A"),
+            ("aaa2", "Task A2"),
+            ("bbb", "Task B"),
+            ("ccc", "Task C"),
+        ]);
         app.reload(new_tasks, new_map);
-        if let Some(id) = selected_id
-            && let Some(idx) = app.tasks.iter().position(|t| t.id == id)
-        {
-            app.list_state.select(Some(idx));
-        }
 
-        // "bbb" should now be at index 2 (after the inserted aaa2).
         assert_eq!(
             app.selected_task().map(|t| t.id.as_str()),
             Some("bbb"),
@@ -359,6 +344,122 @@ mod tests {
             app.selected_index(),
             Some(2),
             "index should be 2 after aaa2 was inserted before bbb"
+        );
+    }
+
+    /// When the selected task is deleted, `App::reload` falls back to the
+    /// nearest neighbour (old index clamped to the new list length).
+    #[test]
+    fn reload_falls_back_to_neighbour_when_task_deleted() {
+        let (tasks, map) = make_open_tasks(&[
+            ("aaa", "Task A"),
+            ("bbb", "Task B"),
+            ("ccc", "Task C"),
+            ("ddd", "Task D"),
+        ]);
+        let mut app = App::new(tasks, map, PathBuf::from("."));
+
+        // Select "ccc" at index 2.
+        app.list_state.select(Some(2));
+        assert_eq!(app.selected_task().map(|t| t.id.as_str()), Some("ccc"));
+
+        // Reload: remove "ccc". New list is [aaa, bbb, ddd] (indices 0,1,2).
+        // Old index was 2 → clamp to new len-1 = 2 → selects "ddd".
+        let (new_tasks, new_map) =
+            make_open_tasks(&[("aaa", "Task A"), ("bbb", "Task B"), ("ddd", "Task D")]);
+        app.reload(new_tasks, new_map);
+
+        assert_eq!(
+            app.selected_task().map(|t| t.id.as_str()),
+            Some("ddd"),
+            "should fall back to the task now at the old index (clamped)"
+        );
+        assert_eq!(app.selected_index(), Some(2));
+    }
+
+    /// When the list becomes shorter than the old index, the index is clamped.
+    #[test]
+    fn reload_clamps_index_when_list_shrinks() {
+        let (tasks, map) =
+            make_open_tasks(&[("aaa", "Task A"), ("bbb", "Task B"), ("ccc", "Task C")]);
+        let mut app = App::new(tasks, map, PathBuf::from("."));
+
+        // Select index 2 ("ccc").
+        app.list_state.select(Some(2));
+
+        // Reload: only one task remains.
+        let (new_tasks, new_map) = make_open_tasks(&[("aaa", "Task A")]);
+        app.reload(new_tasks, new_map);
+
+        // Old index 2 clamped to len-1 = 0.
+        assert_eq!(app.selected_index(), Some(0));
+        assert_eq!(app.selected_task().map(|t| t.id.as_str()), Some("aaa"));
+    }
+
+    /// `App::reload` preserves the current list mode and search query.
+    #[test]
+    fn reload_preserves_mode_and_search_query() {
+        use crate::tui::app::{Filter, ListMode};
+
+        let (tasks, map) = make_open_tasks(&[("aaa", "Task A alpha"), ("bbb", "Task B beta")]);
+        let mut app = App::new(tasks, map, PathBuf::from("."));
+
+        // Switch to All mode with a search filter.
+        app.filter = Filter {
+            list_mode: ListMode::All,
+            query: "alpha".to_string(),
+        };
+        app.apply_filter();
+
+        // After filter: only "aaa" should be visible.
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].id, "aaa");
+
+        // Reload with the same tasks.
+        let (new_tasks, new_map) =
+            make_open_tasks(&[("aaa", "Task A alpha"), ("bbb", "Task B beta")]);
+        app.reload(new_tasks, new_map);
+
+        // Mode and query must be preserved.
+        assert_eq!(
+            app.filter.list_mode,
+            ListMode::All,
+            "list mode must survive reload"
+        );
+        assert_eq!(
+            app.filter.query, "alpha",
+            "search query must survive reload"
+        );
+        // Filter is still active.
+        assert_eq!(
+            app.tasks.len(),
+            1,
+            "filter must still be applied after reload"
+        );
+        assert_eq!(app.tasks[0].id, "aaa");
+    }
+
+    /// After reload, `detail_scroll` is clamped so it never exceeds the new
+    /// content height. (Before the first render the content height is still
+    /// the value from the previous frame; we clamp to it conservatively.)
+    #[test]
+    fn reload_clamps_detail_scroll() {
+        let (tasks, map) = make_open_tasks(&[("aaa", "Task A")]);
+        let mut app = App::new(tasks, map, PathBuf::from("."));
+
+        // Artificially set a high scroll and a small content-height as if the
+        // task detail shrank between frames.
+        app.detail_scroll = 50;
+        app.detail_content_height = 10;
+        app.detail_visible_height = 10; // content fits → max scroll = 0
+
+        let (new_tasks, new_map) = make_open_tasks(&[("aaa", "Task A")]);
+        app.reload(new_tasks, new_map);
+
+        // detail_max_scroll() = content_height.saturating_sub(visible_height) = 0
+        assert_eq!(
+            app.detail_scroll, 0,
+            "scroll must be clamped to new content height after reload"
         );
     }
 

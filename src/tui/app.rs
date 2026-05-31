@@ -193,16 +193,45 @@ impl App {
     }
 
     /// Reload task data (called after disk changes).
+    ///
+    /// Preserves:
+    /// - The selected task **by id** (follows if it moved in the list).
+    /// - Falls back to the nearest neighbour (old index clamped) when the task
+    ///   has been deleted, or to the first task when the list is now empty.
+    /// - The current `filter.list_mode` and `filter.query` (re-applies them).
+    /// - The detail-pane scroll offset, clamped to the new content height so it
+    ///   never points past the end after the content shrinks.
     pub fn reload(&mut self, tasks: Vec<Task>, task_map: HashMap<String, Task>) {
+        let old_id = self.selected_task().map(|t| t.id.clone());
+        let old_idx = self.list_state.selected();
+
         self.graph = Graph::build(&task_map);
         self.all_tasks = tasks;
         self.task_map = task_map;
-        self.apply_filter();
+        self.apply_filter_with_fallback(old_id.as_deref(), old_idx);
+
+        // Clamp detail scroll to the new content height. The exact content height
+        // is only known after rendering, but we can clamp conservatively here so
+        // the scroll is never obviously wrong. It will also be re-clamped in
+        // render() once the new metrics are known.
+        self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll());
     }
 
     /// Recompute the filtered task list from all_tasks + current filter.
     pub(super) fn apply_filter(&mut self) {
         let selected_id = self.selected_task().map(|t| t.id.clone());
+        let old_idx = self.list_state.selected();
+        self.apply_filter_with_fallback(selected_id.as_deref(), old_idx);
+    }
+
+    /// Internal: recompute filtered list, then restore selection.
+    ///
+    /// Priority:
+    /// 1. Find `old_id` in the new list → use its new position.
+    /// 2. Clamp `old_idx` to the new list length (nearest neighbour).
+    /// 3. Select the first task if the list is non-empty.
+    /// 4. Select nothing if the list is empty.
+    fn apply_filter_with_fallback(&mut self, old_id: Option<&str>, old_idx: Option<usize>) {
         let query_lower = self.filter.query.to_lowercase();
         self.tasks = self
             .all_tasks
@@ -215,9 +244,22 @@ impl App {
             })
             .cloned()
             .collect();
-        let new_idx = selected_id
-            .and_then(|id| self.tasks.iter().position(|t| t.id == id))
-            .or(if self.tasks.is_empty() { None } else { Some(0) });
+
+        let new_idx = if self.tasks.is_empty() {
+            None
+        } else if let Some(id) = old_id
+            && let Some(pos) = self.tasks.iter().position(|t| t.id == id)
+        {
+            // Task still exists: follow it by id.
+            Some(pos)
+        } else if let Some(old) = old_idx {
+            // Task disappeared: fall back to nearest neighbour (clamped).
+            Some(old.min(self.tasks.len() - 1))
+        } else {
+            // No prior selection: pick the first item.
+            Some(0)
+        };
+
         self.list_state.select(new_idx);
     }
 
