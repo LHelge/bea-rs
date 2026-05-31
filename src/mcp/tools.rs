@@ -143,7 +143,7 @@ impl BeaMcp {
                     params.tags,
                     params.assignee,
                     params.body,
-                    None, // MCP doesn't support title update currently
+                    params.title,
                 )?;
                 ok_json(serde_json::to_value(t.summary(None))?)
             }
@@ -705,6 +705,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_update_title() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Original Title".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        // Rename the task via update_task
+        let updated = mcp
+            .update_task(Parameters(UpdateTaskParams {
+                id: id.clone(),
+                title: Some("Renamed Title".into()),
+                status: None,
+                priority: None,
+                tags: None,
+                assignee: None,
+                body: None,
+            }))
+            .await
+            .unwrap();
+        let json = extract_json(&updated);
+        assert_eq!(json["title"], "Renamed Title");
+        assert_eq!(json["id"], id);
+
+        // Confirm the change persists when fetched
+        let detail = mcp.get_task(Parameters(TaskIdParams { id })).await.unwrap();
+        assert_eq!(extract_json(&detail)["title"], "Renamed Title");
+    }
+
+    #[tokio::test]
     async fn test_tool_update_invalid_status() {
         let (_tmp, mcp) = setup();
         let t = mcp
@@ -724,6 +763,7 @@ mod tests {
         let result = mcp
             .update_task(Parameters(UpdateTaskParams {
                 id,
+                title: None,
                 status: Some("invalid".into()),
                 priority: None,
                 tags: None,
