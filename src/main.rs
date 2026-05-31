@@ -4,6 +4,7 @@ mod editor;
 mod error;
 mod graph;
 mod mcp;
+mod scaffold;
 mod service;
 mod store;
 mod task;
