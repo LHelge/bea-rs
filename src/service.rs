@@ -553,6 +553,33 @@ pub async fn get_archived_task(base: &Path, id_or_prefix: &str) -> Result<Task> 
     Ok(archived[&id].clone())
 }
 
+/// Archive all tasks with status Done or Cancelled (thin alias for `archive_all`).
+///
+/// Equivalent to `archive_all` — both archive every task that is settled and
+/// has no active dependents. Provided as an explicit named entry point that
+/// matches the spec for the 9ra task.
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub fn archive_done(base: &Path, tasks: &HashMap<String, Task>) -> Result<Vec<String>> {
+    archive_all(base, tasks)
+}
+
+/// List archived tasks sorted by `updated` descending (most recently updated first).
+///
+/// If `limit` is `Some(n)`, at most `n` tasks are returned.
+// Will be consumed by archive CLI/MCP commands (separate task).
+#[allow(dead_code)]
+pub async fn list_archive(base: &Path, limit: Option<usize>) -> Result<Vec<Task>> {
+    let archived = store::load_archived(base).await?;
+    let mut tasks: Vec<Task> = archived.into_values().collect();
+    // Sort by updated descending (most recent first), then id for stability
+    tasks.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.id.cmp(&b.id)));
+    if let Some(n) = limit {
+        tasks.truncate(n);
+    }
+    Ok(tasks)
+}
+
 /// Compute effective priorities for all tasks in a single O(V+E) pass.
 pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
     Graph::build(tasks).effective_priorities_all(tasks)
@@ -1762,5 +1789,180 @@ mod tests {
         )
         .unwrap();
         assert_ne!(t2.id, t.id, "new task must not reuse archived ID");
+    }
+
+    // ─── archive_done / list_archive tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_archive_done_is_alias_for_archive_all() {
+        // archive_done should behave identically to archive_all
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Done task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let _t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Open task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let archived_ids = archive_done(tmp.path(), &tasks).unwrap();
+        assert_eq!(archived_ids.len(), 1);
+        assert!(archived_ids.contains(&t1.id));
+    }
+
+    #[tokio::test]
+    async fn test_list_archive_sorted_by_updated_desc() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        // Create and archive three tasks; each is created slightly after the previous
+        // so they have distinct updated timestamps.
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "First".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Second".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t3 = create_task(
+            tmp.path(),
+            &tasks,
+            "Third".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Mark all done and archive — update times set by set_status calls
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t3.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_all(tmp.path(), &tasks).unwrap();
+
+        // list_archive returns all 3, most recently updated first
+        let listed = list_archive(tmp.path(), None).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        // All should be present (exact order may vary if timestamps are equal
+        // since IDs are random, but at minimum all three must appear)
+        let listed_ids: Vec<&str> = listed.iter().map(|t| t.id.as_str()).collect();
+        assert!(listed_ids.contains(&t1.id.as_str()));
+        assert!(listed_ids.contains(&t2.id.as_str()));
+        assert!(listed_ids.contains(&t3.id.as_str()));
+        // Verify sorted descending
+        for w in listed.windows(2) {
+            assert!(
+                w[0].updated >= w[1].updated,
+                "list_archive must be sorted updated desc"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_archive_with_limit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let t1 = create_task(
+            tmp.path(),
+            &tasks,
+            "T1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t2 = create_task(
+            tmp.path(),
+            &tasks,
+            "T2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &t2.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        archive_all(tmp.path(), &tasks).unwrap();
+
+        let listed = list_archive(tmp.path(), Some(1)).await.unwrap();
+        assert_eq!(listed.len(), 1, "limit=1 should return exactly 1 task");
+    }
+
+    #[tokio::test]
+    async fn test_list_archive_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let listed = list_archive(tmp.path(), None).await.unwrap();
+        assert!(listed.is_empty());
     }
 }
