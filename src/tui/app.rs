@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -202,6 +203,22 @@ impl App {
         self.selected_index().and_then(|i| self.tasks.get(i))
     }
 
+    /// Task lookup for the detail pane: the active task map, augmented with
+    /// archived tasks so an archived task's dependencies and subtasks (which
+    /// also live in the archive) still resolve. Borrows the active map directly
+    /// when there is no archive to merge in.
+    fn detail_task_map(&self) -> Cow<'_, HashMap<String, Task>> {
+        if self.archived_tasks.is_empty() {
+            Cow::Borrowed(&self.task_map)
+        } else {
+            let mut map = self.task_map.clone();
+            for t in &self.archived_tasks {
+                map.entry(t.id.clone()).or_insert_with(|| t.clone());
+            }
+            Cow::Owned(map)
+        }
+    }
+
     /// Reload task data (called after disk changes).
     ///
     /// Preserves:
@@ -342,14 +359,17 @@ impl App {
             &mut self.list_state,
         );
 
-        // Detail view
+        // Detail view. An archived task's dependencies and subtasks live in the
+        // archive, not the active store, so resolve the detail pane against
+        // active ∪ archived.
         let mut metrics = DetailMetrics {
             content_height: 0,
             visible_height: 0,
         };
+        let detail_map = self.detail_task_map();
         TaskDetailWidget::new(
             self.selected_task(),
-            &self.task_map,
+            &detail_map,
             self.detail_scroll,
             self.pane_border_style(FocusPane::Detail),
             &mut metrics,
@@ -474,6 +494,25 @@ mod tests {
             app.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             vec!["zzz"],
             "Archive should show the archived set, not the active store"
+        );
+    }
+
+    #[test]
+    fn detail_task_map_includes_archived() {
+        // Active store empty; an archived epic with an archived child — exactly
+        // the all-archived case where the subtask tree was rendering empty.
+        let mut app = App::new(vec![], HashMap::new(), std::path::PathBuf::from("."));
+        let mut epic = Task::new("ep".into(), "Epic".into(), Priority::P1);
+        epic.task_type = TaskType::Epic;
+        let mut child = Task::new("ch".into(), "Child".into(), Priority::P2);
+        child.parent = Some("ep".into());
+        child.status = Status::Done;
+        app.archived_tasks = vec![epic, child];
+
+        let map = app.detail_task_map();
+        assert!(
+            map.contains_key("ep") && map.contains_key("ch"),
+            "detail map must include archived tasks so an archived epic resolves its children"
         );
     }
 
