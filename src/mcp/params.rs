@@ -52,6 +52,8 @@ pub struct CreateTaskParams {
 pub struct UpdateTaskParams {
     /// Task ID
     pub id: String,
+    /// New title
+    pub title: Option<String>,
     /// New status (open, in_progress, done, blocked, cancelled)
     pub status: Option<String>,
     /// New priority (P0, P1, P2, P3)
