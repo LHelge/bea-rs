@@ -2,6 +2,29 @@ use crate::task::{self, Priority, Status, Task};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Return `true` if `task` is individually ready to work on.
+///
+/// A task is ready when:
+/// - its status is [`Status::Open`],
+/// - its type is a task (not an epic), and
+/// - every entry in `depends_on` resolves to a [`Status::Done`] task; a
+///   missing dependency is treated as **not done** and therefore blocks
+///   readiness.
+///
+/// This is the single canonical readiness predicate used by both
+/// [`Graph::ready`] and the TUI's Ready filter.
+pub fn is_task_ready(tasks: &HashMap<String, Task>, task: &Task) -> bool {
+    task.status == Status::Open
+        && task.task_type.is_task()
+        && task
+            .depends_on
+            .iter()
+            .all(|dep_id| match tasks.get(dep_id) {
+                Some(dep) => dep.status == Status::Done,
+                None => false, // missing dep blocks readiness
+            })
+}
+
 /// Dependency graph built from task `depends_on` fields.
 pub struct Graph {
     /// task_id -> set of task IDs it depends on
@@ -50,15 +73,7 @@ impl Graph {
 
         let mut result: Vec<&Task> = tasks
             .values()
-            .filter(|t| t.status == Status::Open)
-            .filter(|t| t.task_type.is_task()) // epics are not directly workable
-            .filter(|t| {
-                // All dependencies must be done
-                t.depends_on.iter().all(|dep_id| match tasks.get(dep_id) {
-                    Some(dep) => dep.status == Status::Done,
-                    None => false, // missing dep blocks readiness
-                })
-            })
+            .filter(|t| is_task_ready(tasks, t))
             .filter(|t| task::matches_tag(t, tag))
             .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
             .collect();
@@ -554,6 +569,97 @@ mod tests {
         // No filter — all three
         let ready = graph.ready(&tasks, None, None, None);
         assert_eq!(ready.len(), 3);
+    }
+
+    // --- is_task_ready predicate tests -------------------------------------------
+
+    #[test]
+    fn test_is_task_ready_no_deps() {
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
+        assert!(is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_dep_done() {
+        let tasks = make_tasks(vec![
+            make_task("dep", Status::Done, Priority::P1, vec![]),
+            make_task("a", Status::Open, Priority::P1, vec!["dep"]),
+        ]);
+        assert!(is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_dep_not_done() {
+        let tasks = make_tasks(vec![
+            make_task("dep", Status::Open, Priority::P1, vec![]),
+            make_task("a", Status::Open, Priority::P1, vec!["dep"]),
+        ]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_missing_dep_blocks() {
+        // A dep that does not exist in the task map blocks readiness.
+        let tasks = make_tasks(vec![make_task(
+            "a",
+            Status::Open,
+            Priority::P1,
+            vec!["nonexistent"],
+        )]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_excludes_epics() {
+        let mut epic = make_task("e", Status::Open, Priority::P0, vec![]);
+        epic.task_type = TaskType::Epic;
+        let tasks = make_tasks(vec![epic]);
+        assert!(!is_task_ready(&tasks, tasks.get("e").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_excludes_non_open() {
+        let tasks = make_tasks(vec![make_task(
+            "a",
+            Status::InProgress,
+            Priority::P1,
+            vec![],
+        )]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    /// Verify that `Graph::ready` and `is_task_ready` agree on every task:
+    /// every task in the ready list satisfies the predicate and vice-versa.
+    #[test]
+    fn test_ready_and_is_task_ready_agree() {
+        let tasks = make_tasks(vec![
+            // t1: open, no deps → ready
+            make_task("t1", Status::Open, Priority::P1, vec![]),
+            // t2: open, dep on t1 (open, not done) → NOT ready
+            make_task("t2", Status::Open, Priority::P1, vec!["t1"]),
+            // t3: open, dep on t4 (done) → ready
+            make_task("t3", Status::Open, Priority::P1, vec!["t4"]),
+            // t4: done → not in ready list (not Open)
+            make_task("t4", Status::Done, Priority::P1, vec![]),
+            // t5: open, dep on "ghost" (missing) → NOT ready
+            make_task("t5", Status::Open, Priority::P1, vec!["ghost"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let ready_ids: std::collections::HashSet<&str> = graph
+            .ready(&tasks, None, None, None)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+
+        for task in tasks.values() {
+            let predicate = is_task_ready(&tasks, task);
+            let in_ready = ready_ids.contains(task.id.as_str());
+            assert_eq!(
+                predicate, in_ready,
+                "is_task_ready and graph.ready disagree on task '{}'",
+                task.id
+            );
+        }
     }
 
     #[test]
