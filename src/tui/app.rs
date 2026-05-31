@@ -52,7 +52,9 @@ pub enum ListMode {
     Ready,
     /// Show only epics.
     Epics,
-    /// Show only done/cancelled tasks.
+    /// Show done/cancelled tasks still in the active store (not yet archived).
+    Completed,
+    /// Show tasks that have been archived to `.bears/archive/`.
     Archive,
     /// Show everything.
     All,
@@ -64,7 +66,8 @@ impl ListMode {
         match self {
             Self::Open => Self::Ready,
             Self::Ready => Self::Epics,
-            Self::Epics => Self::Archive,
+            Self::Epics => Self::Completed,
+            Self::Completed => Self::Archive,
             Self::Archive => Self::All,
             Self::All => Self::Open,
         }
@@ -75,6 +78,7 @@ impl ListMode {
             Self::Open => "Open",
             Self::Ready => "Ready",
             Self::Epics => "Epics",
+            Self::Completed => "Completed",
             Self::Archive => "Archive",
             Self::All => "All",
         }
@@ -97,11 +101,14 @@ impl Filter {
                     return false;
                 }
             }
-            ListMode::Archive => {
+            ListMode::Completed => {
                 if !matches!(task.status, Status::Done | Status::Cancelled) {
                     return false;
                 }
             }
+            // Archive draws from the on-disk archive set (which is already all
+            // settled tasks); only the search query applies here.
+            ListMode::Archive => {}
             ListMode::Ready => {
                 // Quick pre-filter before the full readiness check (graph::is_task_ready)
                 // that is applied in apply_filter.
@@ -134,6 +141,8 @@ impl Filter {
 /// Core TUI application state.
 pub struct App {
     pub all_tasks: Vec<Task>,
+    /// Tasks loaded from `.bears/archive/` (shown only in `ListMode::Archive`).
+    pub archived_tasks: Vec<Task>,
     pub tasks: Vec<Task>,
     pub task_map: HashMap<String, Task>,
     pub graph: Graph,
@@ -167,6 +176,7 @@ impl App {
         let last_selected_id = filtered.first().map(|t| t.id.clone());
         Self {
             all_tasks: tasks,
+            archived_tasks: Vec::new(),
             tasks: filtered,
             task_map,
             graph,
@@ -217,6 +227,20 @@ impl App {
         self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll());
     }
 
+    /// Reload both the active task set and the archived task set together.
+    /// Used by the live watcher so archive/restore is reflected immediately.
+    pub(super) fn reload_with_archived(
+        &mut self,
+        tasks: Vec<Task>,
+        task_map: HashMap<String, Task>,
+        archived: Vec<Task>,
+    ) {
+        // Set archived first so a reload while viewing the Archive uses the
+        // fresh set when the filter re-applies.
+        self.archived_tasks = archived;
+        self.reload(tasks, task_map);
+    }
+
     /// Recompute the filtered task list from all_tasks + current filter.
     pub(super) fn apply_filter(&mut self) {
         let selected_id = self.selected_task().map(|t| t.id.clone());
@@ -233,8 +257,14 @@ impl App {
     /// 4. Select nothing if the list is empty.
     fn apply_filter_with_fallback(&mut self, old_id: Option<&str>, old_idx: Option<usize>) {
         let query_lower = self.filter.query.to_lowercase();
-        self.tasks = self
-            .all_tasks
+        // Archive mode lists tasks from the on-disk archive (`.bears/archive/`);
+        // every other mode filters the active task set.
+        let source = if self.filter.list_mode == ListMode::Archive {
+            &self.archived_tasks
+        } else {
+            &self.all_tasks
+        };
+        self.tasks = source
             .iter()
             .filter(|t| self.filter.matches(t, &query_lower))
             .filter(|t| {
@@ -403,7 +433,7 @@ pub(super) mod test_helpers {
 mod tests {
     use super::test_helpers::*;
     use super::*;
-    use crate::task::Status;
+    use crate::task::{Priority, Status};
 
     #[test]
     fn test_empty_app() {
@@ -418,6 +448,34 @@ mod tests {
         assert_eq!(app.filter.list_mode, ListMode::Open);
         let has_done = app.tasks.iter().any(|t| t.status == Status::Done);
         assert!(!has_done);
+    }
+
+    #[test]
+    fn test_completed_and_archive_modes_use_different_sources() {
+        // Active store has aaa(Open), bbb(InProgress), ccc(Done).
+        let mut app = make_app();
+        // The archived set lives in .bears/archive/ — not in `all_tasks`.
+        let mut archived = Task::new("zzz".into(), "Archived task".into(), Priority::P2);
+        archived.status = Status::Done;
+        app.archived_tasks = vec![archived];
+
+        // Completed = done/cancelled tasks still in the ACTIVE store.
+        app.filter.list_mode = ListMode::Completed;
+        app.apply_filter();
+        assert_eq!(
+            app.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["ccc"],
+            "Completed should show active done/cancelled tasks"
+        );
+
+        // Archive = the on-disk archived set, independent of the active store.
+        app.filter.list_mode = ListMode::Archive;
+        app.apply_filter();
+        assert_eq!(
+            app.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["zzz"],
+            "Archive should show the archived set, not the active store"
+        );
     }
 
     /// The TUI Ready filter must agree with `graph::is_task_ready` on every task.

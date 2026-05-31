@@ -53,11 +53,22 @@ fn load_tasks_sync(base: &Path) -> Result<(Vec<Task>, HashMap<String, Task>)> {
     Ok((task_list, task_map))
 }
 
+/// Load archived tasks from `.bears/archive/` (sync bridge), most-recent first.
+fn load_archived_sync(base: &Path) -> Result<Vec<Task>> {
+    let archived = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(store::load_archived(base))
+    })?;
+    let mut list: Vec<Task> = archived.into_values().collect();
+    list.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.id.cmp(&b.id)));
+    Ok(list)
+}
+
 /// Run the TUI application.
 pub async fn run(base: &Path) -> Result<()> {
     let (task_list, task_map) = load_tasks_sync(base)?;
 
     let mut app = App::new(task_list, task_map, base.to_path_buf());
+    app.archived_tasks = load_archived_sync(base)?;
     let mut terminal = ratatui::init();
 
     // Start the file watcher. Degrade gracefully if it can't start.
@@ -78,7 +89,8 @@ pub async fn run(base: &Path) -> Result<()> {
 /// and clamps the detail-pane scroll to the new content height.
 pub(crate) fn reload(app: &mut App) -> Result<()> {
     let (task_list, task_map) = load_tasks_sync(&app.base)?;
-    app.reload(task_list, task_map);
+    let archived = load_archived_sync(&app.base)?;
+    app.reload_with_archived(task_list, task_map, archived);
     Ok(())
 }
 
