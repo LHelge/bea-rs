@@ -7,6 +7,14 @@ license = "MIT"
 repository = "https://github.com/LHelge/bea-rs"
 keywords = ["task", "cli", "mcp", "agent"]
 categories = ["command-line-utilities"]
+include = [
+    "src/**",
+    "templates/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+]
 
 [[bin]]
 name = "bea"

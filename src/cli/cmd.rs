@@ -8,18 +8,43 @@ use owo_colors::Style;
 
 use crate::error::{Error, Result};
 use crate::graph::{DepNode, DepNodeJson};
+use crate::scaffold;
 use crate::service;
 use crate::store;
 use crate::task::{self, Priority, Status, Task, TaskType};
 
 use super::{color_id, color_priority, color_status, color_tags, format_priority, output};
 
-pub fn cmd_init(base: &Path, json: bool) -> Result<()> {
+pub fn cmd_init(base: &Path, claude: bool, copilot: bool, codex: bool, json: bool) -> Result<()> {
     let dir = store::init(base)?;
+
+    // Collect requested harness labels
+    let mut labels: Vec<&str> = Vec::new();
+    if claude {
+        labels.push("claude");
+    }
+    if copilot {
+        labels.push("copilot");
+    }
+    if codex {
+        labels.push("codex");
+    }
+
+    let scaffolded = scaffold::scaffold(base, &labels)?;
+
     if json {
-        output(&serde_json::json!({ "path": dir.display().to_string() }))?;
+        let paths: Vec<String> = std::iter::once(dir.display().to_string())
+            .chain(scaffolded.iter().map(|p| p.display().to_string()))
+            .collect();
+        output(&serde_json::json!({
+            "path": dir.display().to_string(),
+            "scaffolded": paths[1..],
+        }))?;
     } else {
         println!("Initialized bears in {}", dir.display());
+        for p in &scaffolded {
+            println!("  wrote {}", p.display());
+        }
     }
     Ok(())
 }

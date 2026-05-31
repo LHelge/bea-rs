@@ -17,7 +17,11 @@ use crate::task::{Priority, Status};
 pub async fn run(cli: Args, base: &Path) -> Result<()> {
     // Handle commands that don't need task data
     match &cli.command {
-        Command::Init => return cmd::cmd_init(base, cli.json),
+        Command::Init {
+            claude,
+            copilot,
+            codex,
+        } => return cmd::cmd_init(base, *claude, *copilot, *codex, cli.json),
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut Args::command(), "bea", &mut std::io::stdout());
             return Ok(());
@@ -81,7 +85,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Search { query, all } => cmd::cmd_search(&tasks, &query, all, cli.json),
         Command::Edit { id } => cmd::cmd_edit(base, &tasks, &id, cli.json),
         // Already handled above
-        Command::Init | Command::Completions { .. } | Command::Mcp | Command::Tui => {
+        Command::Init { .. } | Command::Completions { .. } | Command::Mcp | Command::Tui => {
             unreachable!()
         }
     }

@@ -21,7 +21,19 @@ pub struct Args {
 #[derive(Subcommand, PartialEq)]
 pub enum Command {
     /// Initialize a new .bears/ directory
-    Init,
+    Init {
+        /// Scaffold Claude Code integration files (CLAUDE.md, .mcp.json)
+        #[arg(long)]
+        claude: bool,
+
+        /// Scaffold GitHub Copilot integration files (.github/copilot-instructions.md, .github/mcp.json)
+        #[arg(long)]
+        copilot: bool,
+
+        /// Scaffold OpenAI Codex integration files (AGENTS.md)
+        #[arg(long)]
+        codex: bool,
+    },
 
     /// Create a new task
     Create {

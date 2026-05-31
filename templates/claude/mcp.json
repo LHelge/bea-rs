@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bears": {
+      "command": "bea",
+      "args": ["mcp"]
+    }
+  }
+}
