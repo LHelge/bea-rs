@@ -172,9 +172,24 @@ fn on_status_changed(base: &Path, tasks: &HashMap<String, Task>, t: &Task) -> Re
         && parent.task_type.is_epic()
         && parent.status != Status::Done
     {
-        let progress = epic_progress(tasks, parent_id);
-        // +1 because `tasks` still has the old status for this task
-        if progress.done + 1 >= progress.total {
+        // Check whether all children are done, treating `t` as done regardless
+        // of its prior state in `tasks` (avoids the +1 overshoot when re-completing
+        // an already-done child).
+        let all_done = tasks
+            .values()
+            .filter(|c| c.parent.as_deref() == Some(parent_id))
+            .all(|c| {
+                if c.id == t.id {
+                    true // current task is now Done
+                } else {
+                    c.status == Status::Done
+                }
+            });
+        // Only auto-close when there is at least one child.
+        let has_children = tasks
+            .values()
+            .any(|c| c.parent.as_deref() == Some(parent_id.as_str()));
+        if all_done && has_children {
             let mut parent = parent.clone();
             parent.status = Status::Done;
             parent.updated = Utc::now();
@@ -542,6 +557,75 @@ mod tests {
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_epic_no_over_close_on_re_complete() {
+        // Regression: re-completing an already-done child must NOT auto-close the epic
+        // when another child is still open.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let tasks = HashMap::new();
+        let epic = create_task(
+            tmp.path(),
+            &tasks,
+            "My Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let _child2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete child1 for the first time
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&epic.id].status,
+            Status::Open,
+            "epic should stay open"
+        );
+
+        // Re-complete child1 (already done) — child2 is still open, epic must NOT close
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks[&epic.id].status,
+            Status::Open,
+            "epic must not close when re-completing an already-done child while another is open"
+        );
     }
 
     #[test]
