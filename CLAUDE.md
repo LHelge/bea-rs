@@ -136,6 +136,44 @@ Epics group child tasks via the `parent` field (set at create time, or changed l
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
 
+### Archive
+
+Archived tasks live in `.bears/archive/` — a subdirectory created by `bea init`. `store::load_all` scans only the top-level `.bears/` directory and therefore **never** returns archived tasks; the archive is invisible to all normal operations.
+
+**Archivability invariant.** A task is archivable if and only if:
+1. Its status is `done` or `cancelled` (terminal), **and**
+2. No active (not done/cancelled) task in the active store depends on it.
+
+Violating either condition causes `archive_task` to return `Error::NotArchivable` naming the blockers.
+
+**Cascade direction.**
+- *Archiving an epic* automatically also archives its settled (done/cancelled) children.
+- *Restoring a task* automatically also restores any archived `depends_on` tasks (transitively) and the archived parent epic, so the restored task has no missing dependencies.
+
+**CLI commands.**
+
+| Command | Description |
+|---------|-------------|
+| `bea archive <id>` | Archive a single task (and its settled epic children). Fails if active dependents exist. |
+| `bea archive` | Sweep: archive every currently-archivable task (fixed-point iteration). |
+| `bea restore <id>` | Restore a task (and its cascade of archived deps/parent) back to active. |
+| `bea list --archived` | List all archived tasks. |
+| `bea log [--limit N]` | Show archived tasks sorted by `updated` descending (most-recent first). |
+
+**MCP tools.**
+
+| Tool | Key params | Notes |
+|------|-----------|-------|
+| `archive_task` | `id?` | Omit `id` to sweep all archivable tasks |
+| `restore_task` | `id` | Restores cascade of deps and parent epic |
+| `list_archived` | `limit?` | Returns summaries sorted most-recent-first |
+
+Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, `list_ready`, `search_tasks`, `get_graph`, `list_epics`). They are visible only via `list_archived`.
+
+**`prune` is hard-delete; archive is the soft option.** `prune_tasks` / `bea prune` permanently deletes active cancelled (and optionally done) tasks. It never touches the archive. Use archive/restore when history should be recoverable.
+
+**ID collision prevention.** `create_task` excludes both active and archived IDs from the candidate pool so new IDs never collide with archived ones.
+
 ### MCP tools
 
 | Tool | Key params |
@@ -156,6 +194,9 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 | `search_tasks` | `query`, `limit?`, `active_only?` |
 | `plan_epic` | `id` |
 | `get_graph` | `include_done?`, `epic?`, `limit?` |
+| `archive_task` | `id?` |
+| `restore_task` | `id` |
+| `list_archived` | `limit?` |
 
 On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it leaves the parent unchanged. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks.
 
@@ -189,11 +230,11 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed)
-- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting
-- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
+- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
-- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding
+- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
 - MCP tools also verified end-to-end via live MCP sessions
