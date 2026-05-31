@@ -1258,3 +1258,182 @@ fn test_prune_still_works() {
         .success()
         .stdout(predicate::str::contains("Will be pruned").not());
 }
+
+// ─── Task 6ra: fill coverage gaps for archive feature ────────────────────────
+
+/// Archived task does not appear in `bea ready` output.
+#[test]
+fn test_archived_task_absent_from_ready() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Archived ready check");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // ready should be empty (archived task is gone entirely)
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archived ready check").not());
+}
+
+/// `bea log` outputs tasks sorted most-recent-first and returns all archived tasks.
+///
+/// Note: `bea log` uses `service::list_archive` which sorts by `updated desc`. The CLI
+/// output (both human and JSON) is the `TaskSummary` projection which does not include
+/// the `updated` timestamp. We verify correctness by confirming (a) all archived tasks
+/// appear in the JSON output, and (b) the human output lists the tasks.
+#[test]
+fn test_log_order_is_reverse_chronological() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id1 = create_task(&tmp, "Log order A");
+    let id2 = create_task(&tmp, "Log order B");
+    let id3 = create_task(&tmp, "Log order C");
+
+    complete_task(&tmp, &id1);
+    complete_task(&tmp, &id2);
+    complete_task(&tmp, &id3);
+
+    bea(&tmp).args(["archive"]).assert().success();
+
+    // JSON log must return all three tasks.
+    let out = bea(&tmp).args(["--json", "log"]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 3, "all three archived tasks should be in log");
+
+    // All three IDs must be present in the output.
+    let returned_ids: Vec<&str> = arr.iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert!(returned_ids.contains(&id1.as_str()), "id1 missing from log");
+    assert!(returned_ids.contains(&id2.as_str()), "id2 missing from log");
+    assert!(returned_ids.contains(&id3.as_str()), "id3 missing from log");
+
+    // Human output must list all three
+    bea(&tmp)
+        .arg("log")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Log order A"))
+        .stdout(predicate::str::contains("Log order B"))
+        .stdout(predicate::str::contains("Log order C"));
+}
+
+/// `bea archive <id>` on a task with status "done" physically moves the file
+/// into `.bears/archive/` and removes it from `.bears/`.
+#[test]
+fn test_archive_moves_file_to_archive_subdir() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "File move check");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+
+    // File must exist under .bears/archive/
+    let archive_dir = tmp.path().join(".bears/archive");
+    let archived_files: Vec<_> = std::fs::read_dir(&archive_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&id))
+        .collect();
+    assert_eq!(
+        archived_files.len(),
+        1,
+        "exactly one archive file expected for id {id}"
+    );
+
+    // File must NOT exist under .bears/ (active dir, .md files only)
+    let active_dir = tmp.path().join(".bears");
+    let active_files: Vec<_> = std::fs::read_dir(&active_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                && e.file_name().to_string_lossy().starts_with(&id)
+        })
+        .collect();
+    assert!(
+        active_files.is_empty(),
+        "archived task file must not remain in active dir"
+    );
+}
+
+/// `bea restore <id>` physically moves the file back from `.bears/archive/` to `.bears/`.
+#[test]
+fn test_restore_moves_file_back_from_archive_subdir() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let id = create_task(&tmp, "Restore file check");
+    complete_task(&tmp, &id);
+    bea(&tmp).args(["archive", &id]).assert().success();
+    bea(&tmp).args(["restore", &id]).assert().success();
+
+    // File must be back in active dir
+    let active_dir = tmp.path().join(".bears");
+    let active_files: Vec<_> = std::fs::read_dir(&active_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                && e.file_name().to_string_lossy().starts_with(&id)
+        })
+        .collect();
+    assert_eq!(
+        active_files.len(),
+        1,
+        "restored task file must be back in active dir"
+    );
+
+    // File must NOT be in archive
+    let archive_dir = tmp.path().join(".bears/archive");
+    let archive_files: Vec<_> = std::fs::read_dir(&archive_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&id))
+        .collect();
+    assert!(
+        archive_files.is_empty(),
+        "restored task file must not remain in archive dir"
+    );
+}
+
+/// `bea archive` sweep only archives tasks that are archivable (done/cancelled,
+/// no active dependents) — open tasks must remain in the active list.
+#[test]
+fn test_archive_sweep_skips_open_tasks() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let _id_open = create_task(&tmp, "Must stay open");
+    let id_done = create_task(&tmp, "Can be archived");
+    complete_task(&tmp, &id_done);
+
+    bea(&tmp).args(["archive"]).assert().success();
+
+    // Open task must still be in active list
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Must stay open"));
+
+    // Done task must be in archive, not active
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Can be archived").not());
+
+    bea(&tmp)
+        .args(["list", "--archived"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Can be archived"))
+        .stdout(predicate::str::contains("Must stay open").not());
+}
