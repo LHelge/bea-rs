@@ -198,7 +198,7 @@ Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, 
 | `restore_task` | `id` |
 | `list_archived` | `limit?` |
 
-On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it leaves the parent unchanged. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks.
+On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it leaves the parent unchanged. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks. `get_task` resolves active tasks first and **falls back to the archive** when the id isn't active, marking the returned detail with `"archived": true` (read-only — restore before mutating).
 
 ## Dependencies
 
