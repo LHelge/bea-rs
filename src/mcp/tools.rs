@@ -134,6 +134,10 @@ impl BeaMcp {
                 let tasks = store::load_all(&self.base).await?;
                 let status = params.status.as_deref().map(parse_status).transpose()?;
                 let priority = params.priority.as_deref().map(parse_priority).transpose()?;
+                // Map MCP parent: None = unchanged, "" = clear, "id" = set
+                let parent_update: Option<Option<String>> = params
+                    .parent
+                    .map(|p| if p.is_empty() { None } else { Some(p) });
                 let t = service::update_task(
                     &self.base,
                     &tasks,
@@ -144,6 +148,7 @@ impl BeaMcp {
                     params.assignee,
                     params.body,
                     params.title,
+                    parent_update,
                 )?;
                 ok_json(serde_json::to_value(t.summary(None))?)
             }
@@ -731,6 +736,7 @@ mod tests {
                 tags: None,
                 assignee: None,
                 body: None,
+                parent: None,
             }))
             .await
             .unwrap();
@@ -769,10 +775,134 @@ mod tests {
                 tags: None,
                 assignee: None,
                 body: None,
+                parent: None,
             }))
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert!(extract_text(&result).contains("invalid status"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_reparent_set_and_clear() {
+        let (_tmp, mcp) = setup();
+
+        // Create an epic
+        let epic = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "My Epic".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: Some("epic".into()),
+            }))
+            .await
+            .unwrap();
+        let epic_id = extract_json(&epic)["id"].as_str().unwrap().to_string();
+
+        // Create a task without a parent
+        let task = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Child Task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let task_id = extract_json(&task)["id"].as_str().unwrap().to_string();
+
+        // Set parent to the epic
+        let updated = mcp
+            .update_task(Parameters(UpdateTaskParams {
+                id: task_id.clone(),
+                title: None,
+                status: None,
+                priority: None,
+                tags: None,
+                assignee: None,
+                body: None,
+                parent: Some(epic_id.clone()),
+            }))
+            .await
+            .unwrap();
+        let json = extract_json(&updated);
+        assert_eq!(json["id"], task_id);
+
+        // Confirm the parent is set via get_task
+        let detail = mcp
+            .get_task(Parameters(TaskIdParams {
+                id: task_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&detail)["parent"], epic_id);
+
+        // Clear parent with empty string
+        let cleared = mcp
+            .update_task(Parameters(UpdateTaskParams {
+                id: task_id.clone(),
+                title: None,
+                status: None,
+                priority: None,
+                tags: None,
+                assignee: None,
+                body: None,
+                parent: Some("".into()),
+            }))
+            .await
+            .unwrap();
+        assert!(!cleared.is_error.unwrap_or(false));
+
+        // Confirm parent is cleared
+        let detail2 = mcp
+            .get_task(Parameters(TaskIdParams {
+                id: task_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&detail2)["parent"].is_null(),
+            "parent should be null after clearing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_reparent_invalid_parent() {
+        let (_tmp, mcp) = setup();
+        let task = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Task".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let task_id = extract_json(&task)["id"].as_str().unwrap().to_string();
+
+        // Attempt to set a non-existent parent
+        let result = mcp
+            .update_task(Parameters(UpdateTaskParams {
+                id: task_id,
+                title: None,
+                status: None,
+                priority: None,
+                tags: None,
+                assignee: None,
+                body: None,
+                parent: Some("nonexistent".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
     }
 }

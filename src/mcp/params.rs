@@ -64,6 +64,8 @@ pub struct UpdateTaskParams {
     pub assignee: Option<String>,
     /// New body (markdown)
     pub body: Option<String>,
+    /// Set parent epic ID (use empty string "" to clear parent)
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
