@@ -1,10 +1,10 @@
 ---
 id: vap
 title: Preserve selection and scroll on reload
-status: open
+status: done
 priority: P2
 created: 2026-03-17T21:39:17.099003133Z
-updated: 2026-03-17T21:39:17.099003133Z
+updated: 2026-05-31T07:39:24.042199291Z
 tags:
 - tui
 depends_on:

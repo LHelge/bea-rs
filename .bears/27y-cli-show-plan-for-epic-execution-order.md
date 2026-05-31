@@ -2,10 +2,10 @@
 id: 27y
 title: CLI `show --plan` for epic execution order
 type: epic
-status: open
+status: done
 priority: P1
 created: 2026-03-18T22:55:20.493867579Z
-updated: 2026-03-18T22:55:20.493867579Z
+updated: 2026-05-31T08:02:25.620155270Z
 tags:
 - cli
 - graph

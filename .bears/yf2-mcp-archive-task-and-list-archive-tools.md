@@ -1,10 +1,10 @@
 ---
 id: yf2
 title: 'MCP: archive_task and list_archive tools'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:46.173234502Z
-updated: 2026-03-16T21:56:07.733671043Z
+updated: 2026-05-31T07:39:24.509080035Z
 tags:
 - feature
 - archive

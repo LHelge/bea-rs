@@ -2,10 +2,10 @@
 id: ssj
 title: File watcher for live TUI updates
 type: epic
-status: open
+status: done
 priority: P1
 created: 2026-03-17T21:38:57.998957451Z
-updated: 2026-03-17T21:38:57.998957451Z
+updated: 2026-05-31T07:52:20.477211356Z
 tags:
 - tui
 ---

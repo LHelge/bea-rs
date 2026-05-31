@@ -1,10 +1,10 @@
 ---
 id: acr
 title: 'CLI: bea archive and bea log commands'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:46.171040468Z
-updated: 2026-03-16T21:56:07.730995114Z
+updated: 2026-05-31T07:42:25.588538797Z
 tags:
 - feature
 - archive

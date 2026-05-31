@@ -1,10 +1,10 @@
 ---
 id: 5h8
 title: Add notify crate and set up directory watcher
-status: open
+status: done
 priority: P1
 created: 2026-03-17T21:39:04.407057148Z
-updated: 2026-03-17T21:39:04.407057148Z
+updated: 2026-05-30T23:07:29.810326783Z
 tags:
 - tui
 parent: ssj

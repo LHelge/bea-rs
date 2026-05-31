@@ -1,10 +1,10 @@
 ---
 id: b8a
 title: 'Store: archive directory and file move'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:46.161258953Z
-updated: 2026-03-16T21:55:46.161258953Z
+updated: 2026-05-30T22:58:22.194116001Z
 tags:
 - feature
 - archive
