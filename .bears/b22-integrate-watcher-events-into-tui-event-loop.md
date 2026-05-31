@@ -1,10 +1,10 @@
 ---
 id: b22
 title: Integrate watcher events into TUI event loop
-status: open
+status: done
 priority: P1
 created: 2026-03-17T21:39:10.665872097Z
-updated: 2026-03-17T21:39:10.665872097Z
+updated: 2026-05-31T07:31:54.839753267Z
 tags:
 - tui
 depends_on:

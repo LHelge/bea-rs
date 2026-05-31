@@ -1,10 +1,10 @@
 ---
 id: 6ra
 title: Tests for archive feature
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:46.176963309Z
-updated: 2026-03-16T21:56:07.737427712Z
+updated: 2026-05-31T08:01:00.263772339Z
 tags:
 - feature
 - archive

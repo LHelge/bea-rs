@@ -1,10 +1,10 @@
 ---
 id: 9ra
 title: 'Service: archive and list_archive operations'
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:46.168667013Z
-updated: 2026-03-16T21:56:07.723558831Z
+updated: 2026-05-31T07:25:41.605937002Z
 tags:
 - feature
 - archive

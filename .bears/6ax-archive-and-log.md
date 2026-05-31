@@ -2,10 +2,10 @@
 id: 6ax
 title: Archive and log
 type: epic
-status: open
+status: done
 priority: P2
 created: 2026-03-16T21:55:29.820396424Z
-updated: 2026-03-16T21:55:29.820396424Z
+updated: 2026-05-31T08:01:00.264112255Z
 tags:
 - feature
 - archive
