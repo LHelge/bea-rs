@@ -259,7 +259,10 @@ impl BeaMcp {
     }
 
     #[tool(
-        description = "Delete cancelled tasks. Set include_done=true to also delete done tasks."
+        description = "DEPRECATED: Permanently hard-deletes cancelled (and optionally done) tasks. \
+        Prefer archive_task (no id → sweep) which moves settled tasks to the archive instead of \
+        destroying them, keeping history recoverable via restore_task. \
+        prune_tasks remains available for cases where permanent deletion is intentional."
     )]
     async fn prune_tasks(
         &self,
