@@ -80,6 +80,22 @@ templates/         # Embedded harness templates (via include_str!) for init scaf
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
 - Effective-priority and ready computation are single-pass O(V+E); dep-tree rendering expands each node once (DAG, not exponential). `get_graph` returns a *bounded* adjacency list (excludes done/cancelled and isolated nodes) to keep agent payloads small.
 
+### `bea init` harness flags
+
+`bea init` accepts one or more optional harness flags that scaffold coding-agent integration files into the project root. Flags may be combined.
+
+| Flag | Files scaffolded | MCP registration |
+|------|-----------------|-----------------|
+| `--claude` | `CLAUDE.md`, `.claude/skills/bears-planning/SKILL.md`, `.claude/skills/bears-planning/references/cli-fallback.md`, `.claude/agents/planner.md` | `.mcp.json` (merged, preserves existing servers) |
+| `--copilot` | `.github/copilot-instructions.md`, `.github/skills/bears-planning/SKILL.md`, `.github/skills/bears-planning/references/cli-fallback.md`, `.github/agents/planner.agent.md` | `.github/mcp.json` (merged) |
+| `--codex` | `AGENTS.md` | none (Codex discovers servers another way) |
+
+Key invariants:
+- Scaffolding is **idempotent**: running `bea init --claude` on an already-initialized dir re-writes the same files with the same content.
+- MCP merge **preserves unrelated servers**: only the `bears` key is inserted/replaced; all other entries in the server map are left intact.
+- Generated `.mcp.json` / `.github/mcp.json` always uses `{ "command": "bea", "args": ["mcp"] }` — never `cargo run`.
+- Template files live in `templates/` under the crate root and are embedded via `include_str!` in `scaffold.rs`. They must be present in the source tree for `cargo package` to include them.
+
 ### Storage format
 
 Tasks are stored as `.bears/{id}-{slug}.md` with YAML frontmatter:
