@@ -349,7 +349,6 @@ impl App {
         };
         TaskDetailWidget::new(
             self.selected_task(),
-            &self.graph,
             &self.task_map,
             self.detail_scroll,
             self.pane_border_style(FocusPane::Detail),

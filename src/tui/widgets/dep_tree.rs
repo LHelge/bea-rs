@@ -1,43 +1,63 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::graph::{DepNode, Graph};
 use crate::task::{Task, TaskType};
 
 use super::super::style::{self, Theme};
 
-/// Maximum depth (number of tree levels) rendered for dependencies and subtasks.
-///
-/// Nodes below this depth are replaced by a compact `↳ N more…` summary line
-/// so that the task body remains reachable without excessive scrolling even on
-/// heavily-coupled graphs.
-const MAX_DEPTH: usize = 3;
+/// Render a single task as a line, prefixed by `prefix` + `connector`.
+fn task_line(prefix: &str, connector: &str, task: &Task, theme: &Theme) -> Line<'static> {
+    let st_color = theme.status_color(&task.status);
+    Line::from(vec![
+        Span::styled(
+            format!("{prefix}{connector}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            style::status_indicator(&task.status),
+            Style::default().fg(st_color),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("[{}] ", task.id),
+            Style::default().fg(theme.id_color),
+        ),
+        Span::raw(task.title.clone()),
+    ])
+}
 
+/// A line for a dependency id that can't be resolved in the active task map
+/// (e.g. it has been archived or deleted).
+fn unavailable_line(prefix: &str, id: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{prefix}[{id}] (unavailable)"),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+/// Lists a task's **direct** dependencies, one line each.
+///
+/// Dependencies are intentionally NOT expanded recursively: each task appears
+/// at most once and the body stays reachable regardless of graph depth. To
+/// explore a dependency's own dependencies, open that task.
 pub(in crate::tui) struct DepTreeWidget<'a> {
     task: &'a Task,
-    graph: &'a Graph,
     task_map: &'a HashMap<String, Task>,
     theme: &'a Theme,
 }
 
 impl<'a> DepTreeWidget<'a> {
-    pub fn new(
-        task: &'a Task,
-        graph: &'a Graph,
-        task_map: &'a HashMap<String, Task>,
-        theme: &'a Theme,
-    ) -> Self {
+    pub fn new(task: &'a Task, task_map: &'a HashMap<String, Task>, theme: &'a Theme) -> Self {
         Self {
             task,
-            graph,
             task_map,
             theme,
         }
     }
 
-    pub fn lines(&self) -> Vec<Line<'a>> {
+    pub fn lines(&self) -> Vec<Line<'static>> {
         if self.task.depends_on.is_empty() {
             return Vec::new();
         }
@@ -49,9 +69,10 @@ impl<'a> DepTreeWidget<'a> {
             self.theme.section_heading_style(),
         )));
 
-        if let Some(tree) = self.graph.dep_tree(self.task_map, &self.task.id) {
-            for child in &tree.children {
-                render_dep_node(child, "", true, 0, self.theme, &mut lines);
+        for dep_id in &self.task.depends_on {
+            match self.task_map.get(dep_id) {
+                Some(dep) => lines.push(task_line("  ", "", dep, self.theme)),
+                None => lines.push(unavailable_line("  ", dep_id)),
             }
         }
 
@@ -59,255 +80,129 @@ impl<'a> DepTreeWidget<'a> {
     }
 }
 
-/// Render one [`DepNode`] and its children into `lines`.
-///
-/// `depth` is 0 for direct dependencies of the viewed task.  When `depth`
-/// reaches [`MAX_DEPTH`] the node is still rendered (as a one-liner) but its
-/// children are replaced by a compact "↳ N more…" truncation marker instead
-/// of being expanded further, keeping the total line count proportional to
-/// the depth cap rather than the graph size.
-fn render_dep_node<'a>(
-    node: &DepNode<'a>,
-    prefix: &str,
-    last: bool,
-    depth: usize,
-    theme: &Theme,
-    lines: &mut Vec<Line<'a>>,
-) {
-    let connector = if last { "└─ " } else { "├─ " };
-
-    let st_color = theme.status_color(&node.task.status);
-
-    let mut spans = vec![
-        Span::styled(
-            format!("{prefix}{connector}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            style::status_indicator(&node.task.status),
-            Style::default().fg(st_color),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("[{}] ", node.task.id),
-            Style::default().fg(theme.id_color),
-        ),
-        Span::raw(node.task.title.clone()),
-    ];
-
-    if node.cycle {
-        spans.push(Span::styled(" (cycle)", Style::default().fg(Color::Red)));
-    } else if node.seen {
-        spans.push(Span::styled(
-            " (see above)",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    lines.push(Line::from(spans));
-
-    // Stop recursing when the depth cap is reached or the node is a leaf (cycle/seen/no children).
-    if node.cycle || node.seen || node.children.is_empty() {
-        return;
-    }
-
-    let child_prefix = format!("{prefix}{}  ", if last { " " } else { "│" });
-
-    if depth >= MAX_DEPTH {
-        // Depth cap reached: show a compact truncation marker instead of expanding further.
-        let hidden = node.children.len();
-        let marker_line = Line::from(vec![Span::styled(
-            format!("{child_prefix}↳ {hidden} more…"),
-            Style::default().fg(Color::DarkGray),
-        )]);
-        lines.push(marker_line);
-        return;
-    }
-
-    let child_count = node.children.len();
-    for (i, child) in node.children.iter().enumerate() {
-        render_dep_node(
-            child,
-            &child_prefix,
-            i == child_count - 1,
-            depth + 1,
-            theme,
-            lines,
-        );
-    }
-}
-
-/// Shows the dependency graph of all subtasks belonging to an epic.
+/// Shows an epic's subtasks as a parent → child tree, recursing into nested
+/// epics. Because each task has at most one parent, every task appears once.
 pub(in crate::tui) struct SubtaskGraphWidget<'a> {
     task: &'a Task,
-    graph: &'a Graph,
     task_map: &'a HashMap<String, Task>,
     theme: &'a Theme,
 }
 
 impl<'a> SubtaskGraphWidget<'a> {
-    pub fn new(
-        task: &'a Task,
-        graph: &'a Graph,
-        task_map: &'a HashMap<String, Task>,
-        theme: &'a Theme,
-    ) -> Self {
+    pub fn new(task: &'a Task, task_map: &'a HashMap<String, Task>, theme: &'a Theme) -> Self {
         Self {
             task,
-            graph,
             task_map,
             theme,
         }
     }
 
-    pub fn lines(&self) -> Vec<Line<'a>> {
+    pub fn lines(&self) -> Vec<Line<'static>> {
         if self.task.task_type != TaskType::Epic {
             return Vec::new();
         }
 
-        // Collect child tasks (those with parent == this epic's id)
-        let mut children: Vec<&Task> = self
-            .task_map
-            .values()
-            .filter(|t| t.parent.as_deref() == Some(&self.task.id))
-            .collect();
+        let mut body = Vec::new();
+        // `seen` guards against pathological parent cycles (parent edges aren't
+        // cycle-checked) so rendering always terminates.
+        let mut seen: HashSet<&str> = HashSet::new();
+        seen.insert(self.task.id.as_str());
+        render_children(
+            &self.task.id,
+            self.task_map,
+            "",
+            self.theme,
+            &mut seen,
+            &mut body,
+        );
 
-        if children.is_empty() {
+        if body.is_empty() {
             return Vec::new();
         }
 
-        children.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
-
-        let mut lines = Vec::new();
+        let mut lines = Vec::with_capacity(body.len() + 2);
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Subtasks",
             self.theme.section_heading_style(),
         )));
-
-        let count = children.len();
-        for (i, child) in children.iter().enumerate() {
-            let last = i == count - 1;
-            if let Some(tree) = self.graph.dep_tree(self.task_map, &child.id) {
-                render_dep_node(&tree, "", last, 0, self.theme, &mut lines);
-            }
-        }
-
+        lines.extend(body);
         lines
+    }
+}
+
+/// Recursively render the children of `parent_id` (sorted by priority then
+/// creation date), expanding nested epics.
+fn render_children<'a>(
+    parent_id: &str,
+    task_map: &'a HashMap<String, Task>,
+    prefix: &str,
+    theme: &Theme,
+    seen: &mut HashSet<&'a str>,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let mut children: Vec<&Task> = task_map
+        .values()
+        .filter(|t| t.parent.as_deref() == Some(parent_id))
+        .collect();
+    children.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+    let count = children.len();
+    for (i, child) in children.iter().copied().enumerate() {
+        if !seen.insert(child.id.as_str()) {
+            continue; // already rendered (corrupt parent cycle) — skip
+        }
+        let last = i == count - 1;
+        let connector = if last { "└─ " } else { "├─ " };
+        lines.push(task_line(prefix, connector, child, theme));
+
+        if child.task_type == TaskType::Epic {
+            let child_prefix = format!("{prefix}{}  ", if last { " " } else { "│" });
+            render_children(&child.id, task_map, &child_prefix, theme, seen, lines);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Task};
+    use crate::task::{Priority, Status};
+
+    fn task(id: &str, title: &str) -> Task {
+        Task::new(id.into(), title.into(), Priority::P1)
+    }
+
+    fn text_of(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
 
     #[test]
     fn no_deps_returns_empty() {
-        let task = Task::new("a".into(), "No deps".into(), Priority::P1);
-        let map: HashMap<String, Task> = [("a".into(), task.clone())].into();
-        let graph = Graph::build(&map);
-        let theme = Theme::default();
-        let widget = DepTreeWidget::new(&task, &graph, &map, &theme);
-        assert!(widget.lines().is_empty());
-    }
-
-    #[test]
-    fn with_deps_shows_header_and_tree() {
-        let mut parent = Task::new("a".into(), "Parent".into(), Priority::P1);
-        let child = Task::new("b".into(), "Child".into(), Priority::P1);
-        parent.depends_on = vec!["b".into()];
-
-        let map: HashMap<String, Task> = [("a".into(), parent.clone()), ("b".into(), child)].into();
-        let graph = Graph::build(&map);
-        let theme = Theme::default();
-        let widget = DepTreeWidget::new(&parent, &graph, &map, &theme);
-        let lines = widget.lines();
-
-        assert!(lines.len() >= 3); // blank + header + at least one dep node
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(text.contains("Dependencies"));
-        assert!(text.contains("Child"));
-    }
-
-    /// A deep diamond graph must render in a bounded number of lines (linear,
-    /// not exponential) thanks to the `seen` deduplication in `dep_tree` and
-    /// the `MAX_DEPTH` cap in `render_dep_node`.
-    ///
-    /// Graph:
-    ///   root → l1a, l1b
-    ///   l1a  → l2a, l2b
-    ///   l1b  → l2a, l2b   (shared — second visit is `seen`)
-    ///   l2a  → leaf
-    ///   l2b  → leaf        (shared — second visit is `seen`)
-    ///   leaf → (none)
-    ///
-    /// Without caps this would be exponential; with caps the line count is
-    /// bounded by MAX_DEPTH levels × branching factor + header overhead.
-    #[test]
-    fn dep_tree_line_count_bounded_for_deep_diamond() {
-        let mut root = Task::new("root".into(), "Root".into(), Priority::P1);
-        let mut l1a = Task::new("l1a".into(), "L1A".into(), Priority::P1);
-        let mut l1b = Task::new("l1b".into(), "L1B".into(), Priority::P1);
-        let mut l2a = Task::new("l2a".into(), "L2A".into(), Priority::P1);
-        let mut l2b = Task::new("l2b".into(), "L2B".into(), Priority::P1);
-        let leaf = Task::new("leaf".into(), "Leaf".into(), Priority::P1);
-
-        root.depends_on = vec!["l1a".into(), "l1b".into()];
-        l1a.depends_on = vec!["l2a".into(), "l2b".into()];
-        l1b.depends_on = vec!["l2a".into(), "l2b".into()];
-        l2a.depends_on = vec!["leaf".into()];
-        l2b.depends_on = vec!["leaf".into()];
-
-        let map: HashMap<String, Task> = [
-            ("root".into(), root.clone()),
-            ("l1a".into(), l1a),
-            ("l1b".into(), l1b),
-            ("l2a".into(), l2a),
-            ("l2b".into(), l2b),
-            ("leaf".into(), leaf),
-        ]
-        .into();
-        let graph = Graph::build(&map);
-        let theme = Theme::default();
-        let widget = DepTreeWidget::new(&root, &graph, &map, &theme);
-        let lines = widget.lines();
-
-        // The line count must be bounded. MAX_DEPTH=3 means we expand at most
-        // 3 levels (depth 0, 1, 2) before truncating; with a branching factor
-        // of 2 that is at most 2+4+8 = 14 node lines + 2 header lines = 16.
-        // We use a generous upper bound of 30 to allow for marker lines.
-        let line_count = lines.len();
+        let t = task("a", "No deps");
+        let map: HashMap<String, Task> = [("a".into(), t.clone())].into();
         assert!(
-            line_count <= 30,
-            "dep tree rendered {line_count} lines for a 6-node diamond — expected ≤ 30"
+            DepTreeWidget::new(&t, &map, &Theme::default())
+                .lines()
+                .is_empty()
         );
-
-        // Must still contain the header.
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(text.contains("Dependencies"), "header must be present");
     }
 
-    /// Seen nodes must render as one line (no children expanded below them).
     #[test]
-    fn seen_node_renders_as_single_line_with_marker() {
-        // Diamond: root → a, b; a → shared; b → shared
-        let mut root = Task::new("root".into(), "Root".into(), Priority::P1);
-        let mut a = Task::new("a".into(), "A".into(), Priority::P1);
-        let mut b = Task::new("b".into(), "B".into(), Priority::P1);
-        let shared = Task::new("shared".into(), "Shared".into(), Priority::P1);
-
+    fn shows_only_direct_dependencies() {
+        // root → a, b ; a → shared ; b → shared.
+        // The Dependencies section must show ONLY the direct deps (a, b), never
+        // the transitive `shared` — and therefore never the same task twice.
+        let mut root = task("root", "Root");
         root.depends_on = vec!["a".into(), "b".into()];
+        let mut a = task("a", "Alpha");
         a.depends_on = vec!["shared".into()];
+        let mut b = task("b", "Bravo");
         b.depends_on = vec!["shared".into()];
+        let shared = task("shared", "Shared");
 
         let map: HashMap<String, Task> = [
             ("root".into(), root.clone()),
@@ -316,27 +211,70 @@ mod tests {
             ("shared".into(), shared),
         ]
         .into();
-        let graph = Graph::build(&map);
-        let theme = Theme::default();
-        let widget = DepTreeWidget::new(&root, &graph, &map, &theme);
-        let lines = widget.lines();
 
-        // Count occurrences of "shared" in the rendered output.
-        // It must appear exactly twice: once as a full node, once as "(see above)".
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.as_ref())
-            .collect();
+        let text = text_of(&DepTreeWidget::new(&root, &map, &Theme::default()).lines());
 
-        let shared_count = text.matches("Shared").count();
-        assert_eq!(
-            shared_count, 2,
-            "shared node should appear exactly twice: once fully, once as (see above)"
-        );
+        assert!(text.contains("Dependencies"));
+        assert!(text.contains("[a]") && text.contains("[b]"));
         assert!(
-            text.contains("see above"),
-            "second occurrence of shared node must be marked as (see above)"
+            !text.contains("[shared]"),
+            "transitive dep must not be shown: {text}"
         );
+    }
+
+    #[test]
+    fn unavailable_dependency_is_marked() {
+        let mut t = task("a", "Has missing dep");
+        t.depends_on = vec!["gone".into()];
+        let map: HashMap<String, Task> = [("a".into(), t.clone())].into();
+        let text = text_of(&DepTreeWidget::new(&t, &map, &Theme::default()).lines());
+        assert!(text.contains("[gone]") && text.contains("unavailable"));
+    }
+
+    #[test]
+    fn subtasks_render_only_for_epics() {
+        let t = task("a", "Plain task");
+        let map: HashMap<String, Task> = [("a".into(), t.clone())].into();
+        assert!(
+            SubtaskGraphWidget::new(&t, &map, &Theme::default())
+                .lines()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn subtask_tree_expands_nested_epics_each_once() {
+        // epic e → c1, e2(epic) ; e2 → g
+        let mut e = task("e", "Epic");
+        e.task_type = TaskType::Epic;
+        let mut c1 = task("c1", "Child one");
+        c1.parent = Some("e".into());
+        let mut e2 = task("e2", "Inner epic");
+        e2.task_type = TaskType::Epic;
+        e2.parent = Some("e".into());
+        let mut g = task("g", "Grandchild");
+        g.status = Status::Done;
+        g.parent = Some("e2".into());
+
+        let map: HashMap<String, Task> = [
+            ("e".into(), e.clone()),
+            ("c1".into(), c1),
+            ("e2".into(), e2),
+            ("g".into(), g),
+        ]
+        .into();
+
+        let lines = SubtaskGraphWidget::new(&e, &map, &Theme::default()).lines();
+        let text = text_of(&lines);
+
+        assert!(text.contains("Subtasks"));
+        // Every descendant appears exactly once.
+        for id in ["[c1]", "[e2]", "[g]"] {
+            assert_eq!(
+                text.matches(id).count(),
+                1,
+                "{id} should appear once: {text}"
+            );
+        }
     }
 }
