@@ -204,6 +204,85 @@ pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Display an archived task (no active task context — effective priority not available).
+/// `plan` is ignored for archived tasks (archive is read-only; children may not be present).
+pub fn cmd_show_archived(task: &Task, _plan: bool, json: bool) -> Result<()> {
+    if json {
+        let detail = task.detail(None);
+        // Annotate JSON output so callers know this came from the archive
+        let mut json_val = serde_json::to_value(&detail)?;
+        if let Some(obj) = json_val.as_object_mut() {
+            obj.insert("archived".to_string(), serde_json::Value::Bool(true));
+        }
+        output(&json_val)?;
+    } else {
+        println!(
+            "[{}] {} {}",
+            color_id(&task.id),
+            task.title.if_supports_color(Stdout, |t| t.bold()),
+            "(archived)".if_supports_color(Stdout, |t| t.dimmed()),
+        );
+        println!(
+            "{} {}",
+            "Status:  ".if_supports_color(Stdout, |t| t.bold()),
+            color_status(&task.status)
+        );
+        println!(
+            "{} {}",
+            "Priority:".if_supports_color(Stdout, |t| t.bold()),
+            color_priority(&task.priority)
+        );
+        println!(
+            "{} {}",
+            "Tags:    ".if_supports_color(Stdout, |t| t.bold()),
+            if task.tags.is_empty() {
+                "—".to_string()
+            } else {
+                color_tags(&task.tags)
+            }
+        );
+        if !task.depends_on.is_empty() {
+            println!(
+                "{} {}",
+                "Deps:    ".if_supports_color(Stdout, |t| t.bold()),
+                task.depends_on
+                    .iter()
+                    .map(|d| color_id(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if let Some(ref parent) = task.parent {
+            println!(
+                "{} {}",
+                "Parent:  ".if_supports_color(Stdout, |t| t.bold()),
+                color_id(parent)
+            );
+        }
+        if !task.assignee.is_empty() {
+            println!(
+                "{} {}",
+                "Assignee:".if_supports_color(Stdout, |t| t.bold()),
+                task.assignee
+            );
+        }
+        println!(
+            "{} {}",
+            "Created: ".if_supports_color(Stdout, |t| t.bold()),
+            task.created
+        );
+        println!(
+            "{} {}",
+            "Updated: ".if_supports_color(Stdout, |t| t.bold()),
+            task.updated
+        );
+        if !task.body.is_empty() {
+            println!("\n{}", task.body);
+        }
+    }
+    Ok(())
+}
+
 pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool) -> Result<()> {
     if plan {
         return cmd_show_plan(tasks, id, json);
@@ -614,6 +693,92 @@ pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: b
                     color_tags(&t.tags)
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// `bea archive [id]` — archive a single task (cascade) or sweep all archivable tasks.
+pub async fn cmd_archive(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let archived_ids: Vec<String> = match id {
+        Some(id_or_prefix) => service::archive_task(base, tasks, id_or_prefix)?,
+        None => service::archive_all(base, tasks)?,
+    };
+
+    if json {
+        output(&serde_json::json!({ "archived": archived_ids }))?;
+    } else if archived_ids.is_empty() {
+        println!("Nothing to archive.");
+    } else {
+        for id in &archived_ids {
+            println!("Archived {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `bea restore <id>` — restore a task (and its cascade) from the archive.
+pub async fn cmd_restore(base: &Path, id: &str, json: bool) -> Result<()> {
+    let restored_ids = service::restore_task(base, id).await?;
+
+    if json {
+        output(&serde_json::json!({ "restored": restored_ids }))?;
+    } else {
+        for id in &restored_ids {
+            println!("Restored {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `bea list --archived` — list tasks in the archive.
+pub async fn cmd_list_archived(base: &Path, json: bool) -> Result<()> {
+    let archived = service::list_archive(base, None).await?;
+
+    if json {
+        let summaries: Vec<_> = archived.iter().map(|t| t.summary(None)).collect();
+        output(&summaries)?;
+    } else if archived.is_empty() {
+        println!("No archived tasks.");
+    } else {
+        for t in &archived {
+            println!(
+                "[{}] {} {} — {} [{}]",
+                color_id(&t.id),
+                color_priority(&t.priority),
+                color_status(&t.status),
+                t.title,
+                color_tags(&t.tags)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `bea log [--limit N]` — display archived tasks as a chronological log (most-recent-first).
+pub async fn cmd_log(base: &Path, limit: Option<usize>, json: bool) -> Result<()> {
+    let archived = service::list_archive(base, limit).await?;
+
+    if json {
+        let summaries: Vec<_> = archived.iter().map(|t| t.summary(None)).collect();
+        output(&summaries)?;
+    } else if archived.is_empty() {
+        println!("No archived tasks.");
+    } else {
+        for t in &archived {
+            println!(
+                "[{}] {} {} — {} [{}]",
+                color_id(&t.id),
+                color_priority(&t.priority),
+                color_status(&t.status),
+                t.title,
+                color_tags(&t.tags)
+            );
         }
     }
     Ok(())

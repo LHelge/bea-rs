@@ -86,6 +86,10 @@ pub enum Command {
         /// Include done and cancelled tasks
         #[arg(long, short = 'a')]
         all: bool,
+
+        /// Show archived tasks instead of active tasks
+        #[arg(long, conflicts_with_all = ["status", "priority", "tag", "epic", "all"])]
+        archived: bool,
     },
 
     /// Show tasks that are ready to work on
@@ -210,6 +214,25 @@ pub enum Command {
         /// Also delete done tasks
         #[arg(long)]
         done: bool,
+    },
+
+    /// Archive a task (or sweep all archivable tasks if no ID given)
+    Archive {
+        /// Task ID or prefix to archive (omit to sweep all done/cancelled tasks)
+        id: Option<String>,
+    },
+
+    /// Restore a task from the archive
+    Restore {
+        /// Task ID or prefix to restore
+        id: String,
+    },
+
+    /// Show archived tasks as a chronological log (most-recent-first)
+    Log {
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Open a task in $EDITOR for editing
