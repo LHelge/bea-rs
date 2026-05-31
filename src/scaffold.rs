@@ -37,6 +37,16 @@ const COPILOT_MD: &str = include_str!("../templates/copilot/copilot-instructions
 /// Embedded template for the Copilot MCP server entry seed.
 const COPILOT_MCP_SEED: &str = include_str!("../templates/copilot/mcp.json");
 
+/// Embedded template for the Copilot bears-planning skill.
+const COPILOT_SKILL_MD: &str = include_str!("../templates/copilot/skills/bears-planning/SKILL.md");
+
+/// Embedded CLI fallback reference for the Copilot bears-planning skill.
+const COPILOT_SKILL_CLI_FALLBACK: &str =
+    include_str!("../templates/copilot/skills/bears-planning/references/cli-fallback.md");
+
+/// Embedded template for the Copilot planner agent.
+const COPILOT_AGENT_PLANNER: &str = include_str!("../templates/copilot/agents/planner.agent.md");
+
 /// Embedded template content for the Codex `AGENTS.md` instruction file.
 const CODEX_MD: &str = include_str!("../templates/codex/AGENTS.md");
 
@@ -106,10 +116,24 @@ static CLAUDE_FILES: &[ScaffoldFile] = &[
     },
 ];
 
-static COPILOT_FILES: &[ScaffoldFile] = &[ScaffoldFile {
-    target: ".github/copilot-instructions.md",
-    content: COPILOT_MD,
-}];
+static COPILOT_FILES: &[ScaffoldFile] = &[
+    ScaffoldFile {
+        target: ".github/copilot-instructions.md",
+        content: COPILOT_MD,
+    },
+    ScaffoldFile {
+        target: ".github/skills/bears-planning/SKILL.md",
+        content: COPILOT_SKILL_MD,
+    },
+    ScaffoldFile {
+        target: ".github/skills/bears-planning/references/cli-fallback.md",
+        content: COPILOT_SKILL_CLI_FALLBACK,
+    },
+    ScaffoldFile {
+        target: ".github/agents/planner.agent.md",
+        content: COPILOT_AGENT_PLANNER,
+    },
+];
 
 static CODEX_FILES: &[ScaffoldFile] = &[ScaffoldFile {
     target: "AGENTS.md",
@@ -418,6 +442,78 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
                 .unwrap();
         let bears = &mcp["mcpServers"]["bears"];
+        assert_eq!(bears["command"], "bea", "must use production binary form");
+        assert_eq!(bears["args"][0], "mcp", "must use 'mcp' subcommand");
+    }
+
+    /// `bea init --copilot` writes the skill, cli-fallback reference, agent,
+    /// and MCP registration files under `.github/`.
+    #[test]
+    fn test_scaffold_copilot_skill_and_agent() {
+        let tmp = TempDir::new().unwrap();
+        let written = scaffold(tmp.path(), &["copilot"]).unwrap();
+
+        // copilot-instructions.md
+        let instr_path = tmp.path().join(".github/copilot-instructions.md");
+        assert!(
+            instr_path.exists(),
+            "copilot-instructions.md must be created"
+        );
+
+        // Skill file
+        let skill_path = tmp.path().join(".github/skills/bears-planning/SKILL.md");
+        assert!(
+            written.iter().any(|p| p == &skill_path),
+            "SKILL.md must be in written list"
+        );
+        assert!(skill_path.exists(), "SKILL.md must be created");
+        let skill = fs::read_to_string(&skill_path).unwrap();
+        assert!(
+            skill.contains("bears-planning"),
+            "SKILL.md must contain skill name"
+        );
+        assert!(
+            skill.contains("bears/*"),
+            "SKILL.md must reference Copilot MCP tool prefix"
+        );
+
+        // CLI fallback reference
+        let cli_ref_path = tmp
+            .path()
+            .join(".github/skills/bears-planning/references/cli-fallback.md");
+        assert!(
+            written.iter().any(|p| p == &cli_ref_path),
+            "cli-fallback.md must be in written list"
+        );
+        assert!(cli_ref_path.exists(), "cli-fallback.md must be created");
+        let cli_ref = fs::read_to_string(&cli_ref_path).unwrap();
+        assert!(
+            cli_ref.contains("bea create"),
+            "cli-fallback.md must contain bea create"
+        );
+
+        // Agent file
+        let agent_path = tmp.path().join(".github/agents/planner.agent.md");
+        assert!(
+            written.iter().any(|p| p == &agent_path),
+            "planner.agent.md must be in written list"
+        );
+        assert!(agent_path.exists(), "planner.agent.md must be created");
+        let agent = fs::read_to_string(&agent_path).unwrap();
+        assert!(
+            agent.contains("bears/*"),
+            "agent must reference Copilot MCP tool prefix"
+        );
+
+        // .github/mcp.json — merged with production bears server entry
+        let mcp_path = tmp.path().join(".github/mcp.json");
+        assert!(
+            written.iter().any(|p| p == &mcp_path),
+            ".github/mcp.json must be in written list"
+        );
+        assert!(mcp_path.exists(), ".github/mcp.json must be created");
+        let mcp: Value = serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        let bears = &mcp["servers"]["bears"];
         assert_eq!(bears["command"], "bea", "must use production binary form");
         assert_eq!(bears["args"][0], "mcp", "must use 'mcp' subcommand");
     }
