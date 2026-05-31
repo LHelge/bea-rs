@@ -118,4 +118,99 @@ mod tests {
             "expected Some(()) from watcher channel"
         );
     }
+
+    /// Verify that modifying an existing file triggers a reload signal, and that
+    /// deleting a file also triggers a reload signal.
+    ///
+    /// Marked `#[ignore]` because it depends on real filesystem events and the
+    /// debounce window.  Run with `cargo test -- --ignored` to exercise it.
+    #[tokio::test]
+    #[ignore = "timing-sensitive filesystem watcher; run with `cargo test -- --ignored`"]
+    async fn watcher_emits_event_on_file_modify_and_delete() {
+        let tmp = tempdir().expect("tempdir");
+        let bears_dir = tmp.path().join(".bears");
+        std::fs::create_dir_all(&bears_dir).expect("create .bears dir");
+
+        // Pre-create the file *before* starting the watcher so the initial
+        // create doesn't contribute a signal during our test.
+        let task_file = bears_dir.join("abc-existing-task.md");
+        std::fs::write(&task_file, "# initial\n").expect("write initial file");
+
+        let (_debouncer, mut rx) = watch_bears_dir(&bears_dir).expect("start watcher");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // --- modify ---
+        std::fs::write(&task_file, "# modified\n").expect("modify file");
+
+        let sig = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(
+            sig.is_ok(),
+            "timeout waiting for watcher event after file modify"
+        );
+        assert_eq!(sig.unwrap(), Some(()));
+
+        // --- delete ---
+        std::fs::remove_file(&task_file).expect("delete file");
+
+        let sig = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(
+            sig.is_ok(),
+            "timeout waiting for watcher event after file delete"
+        );
+        assert_eq!(sig.unwrap(), Some(()));
+    }
+
+    /// Verify that a burst of rapid writes within the debounce window produces
+    /// only a small number of signals (ideally one), not one per write.
+    ///
+    /// We write several files within a short window, then wait for the debounce
+    /// to settle and count how many signals arrived.  The exact count depends on
+    /// OS scheduling and inotify coalescing, so we only assert it is strictly
+    /// less than the number of writes — not necessarily exactly one.
+    ///
+    /// Marked `#[ignore]` because it depends on real timing and debounce
+    /// behaviour.  Run with `cargo test -- --ignored` to exercise it.
+    #[tokio::test]
+    #[ignore = "timing-sensitive debounce test; run with `cargo test -- --ignored`"]
+    async fn watcher_debounce_coalesces_rapid_writes() {
+        const WRITE_COUNT: usize = 10;
+
+        let tmp = tempdir().expect("tempdir");
+        let bears_dir = tmp.path().join(".bears");
+        std::fs::create_dir_all(&bears_dir).expect("create .bears dir");
+
+        let (_debouncer, mut rx) = watch_bears_dir(&bears_dir).expect("start watcher");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Fire WRITE_COUNT writes in rapid succession — all within the debounce window.
+        for i in 0..WRITE_COUNT {
+            std::fs::write(
+                bears_dir.join(format!("task-{i:02}.md")),
+                format!("# task {i}\n"),
+            )
+            .expect("write task file");
+        }
+
+        // Drain all signals that arrive within (debounce + generous margin).
+        // DEBOUNCE_TIMEOUT is 300 ms; we wait 1 s to let it fully settle.
+        let drain_deadline = Duration::from_secs(1);
+        let mut signal_count: usize = 0;
+        let start = std::time::Instant::now();
+        while start.elapsed() < drain_deadline {
+            let remaining = drain_deadline.saturating_sub(start.elapsed());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(())) => signal_count += 1,
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        assert!(
+            signal_count > 0,
+            "expected at least one signal after rapid writes"
+        );
+        assert!(
+            signal_count < WRITE_COUNT,
+            "expected debouncing to coalesce signals: got {signal_count} for {WRITE_COUNT} writes"
+        );
+    }
 }
