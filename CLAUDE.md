@@ -169,4 +169,7 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `service.rs`: epic progress, auto-close
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/delete/deps/validation
 - Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output
+- E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
+  rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
+  list/schemas, tool calls, and protocol- vs tool-level error semantics
 - MCP tools also verified end-to-end via live MCP sessions
