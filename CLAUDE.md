@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`bea-rs` is a file-based task tracker CLI tool named `bears` (binary: `bea`). It manages a task/issue graph stored as markdown files with YAML frontmatter in a `.bears/` directory. It has two modes:
+`bea-rs` is a file-based task tracker CLI tool named `bears` (binary: `bea`). It manages a task/issue graph stored as markdown files with YAML frontmatter in a `.bears/` directory. It has three modes:
 
 1. **CLI mode** (`bea <command>`): Human-friendly interface for managing tasks
 2. **MCP server mode** (`bea mcp`): Exposes the same functionality as MCP tool calls over stdio for AI agents
+3. **TUI mode** (`bea tui`): Interactive ratatui terminal UI for browsing and editing tasks
 
 ## Commands
 
@@ -44,26 +45,33 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): 
 
 ```
 src/
-  main.rs          # Entry point: dispatch to CLI or MCP server
+  main.rs          # Entry point: dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs         # CLI module root and dispatch
     args.rs        # clap command and argument definitions
     cmd.rs         # Command handlers (list, show, create, etc.)
   mcp/
-    mod.rs         # MCP module root and server setup
+    mod.rs         # MCP module root, server setup, with_tasks helper
     params.rs      # Tool parameter structs (serde + JSON Schema)
     tools.rs       # MCP tool implementations and tests
+  tui/
+    mod.rs         # TUI event loop, disk reload, editor suspension
+    app.rs         # App state, filtering, render layout
+    input.rs       # Key handling per interaction mode
+    style.rs       # Theme and status indicators
+    widgets/       # ratatui widgets (task list, detail, dep tree, modals)
   service.rs       # Business logic: create, update, epic progress, auto-close
   store.rs         # Core: parse .bears/ dir, read/write task files
   task.rs          # Task struct, frontmatter serde, ID generation
   graph.rs         # Dependency graph: build, query ready, cycle detection
   config.rs        # .bears.yml configuration loading
+  editor.rs        # $EDITOR resolution and launching
   error.rs         # thiserror error types
 ```
 
 ### Core design principles
 
-- `store.rs`, `service.rs`, and `graph.rs` are the core library. CLI and MCP are thin frontends.
+- `store.rs`, `service.rs`, and `graph.rs` are the core library. CLI, MCP, and TUI are thin frontends.
 - Re-parse the entire `.bears/` directory from scratch on every invocation — no caching, no daemon.
 - `--json` flag on all CLI commands outputs JSON instead of human text.
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
@@ -90,7 +98,7 @@ assignee: ""
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde_yaml` for the YAML portion, keeping the rest as the body string.
+Parse frontmatter by splitting on `---` delimiters, using `serde_yml` for the YAML portion, keeping the rest as the body string.
 
 ### ID generation
 
@@ -132,14 +140,17 @@ Validate on `dep add` that the new edge doesn't create a cycle. Reject with a cl
 
 - `clap` (derive) — CLI parsing
 - `clap_complete` — shell completion generation
-- `serde`, `serde_yaml`, `serde_json` — serialization
+- `serde`, `serde_yml`, `serde_json` — serialization
 - `chrono` — timestamps
 - `rand` — ID generation
 - `thiserror` — error types
 - `tokio` — async runtime used for MCP server, parallel file loading in `store::load_all`
 - `rmcp` — MCP SDK (server, macros, transport-io features)
 - `schemars` — JSON Schema generation for MCP tool parameter types
-- `owo-colors` — terminal color output
+- `owo-colors` — terminal color output (CLI)
+- `ratatui`, `crossterm` — TUI rendering and terminal events
+- `tui-markdown` — markdown rendering in the TUI detail pane
+- `shell-words` — POSIX splitting of `$EDITOR` command strings
 
 Keep the dependency tree small. Compilation should be fast.
 

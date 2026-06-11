@@ -54,7 +54,7 @@ pub fn load(base: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     let content = fs::read_to_string(&path)?;
-    let config: Config = serde_yaml::from_str(&content)?;
+    let config: Config = serde_yml::from_str(&content)?;
     config.validate()?;
     Ok(config)
 }
@@ -67,7 +67,7 @@ pub fn create_default(base: &Path) -> Result<PathBuf> {
         return Ok(path);
     }
     let config = Config::default();
-    let content = serde_yaml::to_string(&config)?;
+    let content = serde_yml::to_string(&config)?;
     fs::write(&path, content)?;
     Ok(path)
 }

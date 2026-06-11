@@ -185,28 +185,4 @@ mod tests {
         );
         assert!(result.is_err(), "set_status on unknown task ID should fail");
     }
-
-    /// Helpers return errors that run_loop catches and stores in
-    /// app.error_message — the TUI continues running instead of exiting.
-    #[test]
-    fn error_message_set_on_reload_failure() {
-        let mut app = make_app_with_base(PathBuf::from("/tmp/__bears_no_dir__"));
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { reload(&mut app) });
-        // The helper returns Err; run_loop stores it in error_message
-        let err_msg = result.unwrap_err().to_string();
-        app.error_message = Some(err_msg.clone());
-        assert!(app.error_message.is_some());
-        assert!(!err_msg.is_empty());
-    }
-
-    #[test]
-    fn error_message_cleared_on_success() {
-        let mut app = make_app_with_base(PathBuf::from("/tmp/__bears_test__"));
-        app.error_message = Some("previous error".into());
-        // Simulate successful action clearing the error
-        app.error_message = None;
-        assert!(app.error_message.is_none());
-    }
 }

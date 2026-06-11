@@ -20,7 +20,7 @@ pub struct Args {
 
 #[derive(Subcommand, PartialEq)]
 pub enum Command {
-    /// Initialize a new .tasks/ directory
+    /// Initialize a new .bears/ directory
     Init,
 
     /// Create a new task

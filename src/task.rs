@@ -363,14 +363,19 @@ pub fn parse_task(content: &str) -> Result<Task> {
     let body_raw = remaining.join("\n");
     let body = body_raw.trim_start_matches('\n').to_string();
 
-    let mut task: Task = serde_yaml::from_str(&yaml_str)?;
+    let mut task: Task = serde_yml::from_str(&yaml_str)?;
     task.body = body;
     Ok(task)
 }
 
 /// Render a task back to markdown with YAML frontmatter.
 pub fn render_task(task: &Task) -> String {
-    let yaml = serde_yaml::to_string(task).expect("task serialization should not fail");
+    let mut yaml = serde_yml::to_string(task).expect("task serialization should not fail");
+    // Some YAML serializers omit the trailing newline; the closing
+    // delimiter must start on its own line.
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
     if task.body.is_empty() {
         format!("---\n{yaml}---\n")
     } else {

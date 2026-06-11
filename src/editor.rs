@@ -47,8 +47,12 @@ pub fn launch_editor(exe: &str, args: &[String], file_path: &Path) -> Result<Exi
 /// with a non-zero status. Propagates IO errors if the editor binary cannot
 /// be spawned.
 pub fn open_in_editor(file_path: &Path) -> Result<()> {
-    let editor = resolve_editor();
-    let (exe, args) = parse_editor_command(&editor);
+    open_with(&resolve_editor(), file_path)
+}
+
+/// Open a file with an explicit editor command string (testable without env).
+fn open_with(editor: &str, file_path: &Path) -> Result<()> {
+    let (exe, args) = parse_editor_command(editor);
     let status = launch_editor(&exe, &args, file_path)?;
     if !status.success() {
         return Err(Error::EditorFailed {
@@ -158,43 +162,24 @@ mod tests {
         assert!(!result.unwrap().success(), "exit code should be non-zero");
     }
 
-    // ── open_in_editor behavior via launch_editor + error wrapping ─────
+    // ── open_with: full launch + error wrapping ─────────────────────────
 
     #[test]
-    fn nonexistent_editor_propagates_io_error() {
+    fn open_with_successful_editor_returns_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("test.md");
         std::fs::write(&file, "test").unwrap();
 
-        // launch_editor with a nonexistent binary should return io::Error
-        let result = launch_editor("__nonexistent_editor_42__", &[], &file);
-        assert!(result.is_err());
+        assert!(open_with("true", &file).is_ok());
     }
 
     #[test]
-    fn nonzero_exit_detected_via_exit_status() {
+    fn open_with_failing_editor_returns_editor_failed() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("test.md");
         std::fs::write(&file, "test").unwrap();
 
-        // `false` exits with code 1 — open_in_editor wraps this as EditorFailed
-        let status = launch_editor("false", &[], &file).unwrap();
-        assert!(!status.success());
-
-        // Verify the wrapping logic in open_in_editor produces EditorFailed
-        let (exe, args) = parse_editor_command("false");
-        let status = launch_editor(&exe, &args, &file).unwrap();
-        assert!(!status.success());
-        // Simulate what open_in_editor does with a non-zero status
-        let err = crate::error::Error::EditorFailed {
-            reason: format!(
-                "{exe} exited with {}",
-                status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into())
-            ),
-        };
+        let err = open_with("false", &file).unwrap_err();
         assert!(
             err.to_string().contains("editor failed"),
             "expected EditorFailed, got: {err}"

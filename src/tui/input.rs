@@ -50,6 +50,11 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
+            // Esc steps back to the list before quitting the app
+            KeyCode::Esc if self.focus == FocusPane::Detail => {
+                self.focus = FocusPane::List;
+                Action::None
+            }
             KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
             KeyCode::Tab => {
                 self.focus = match self.focus {
@@ -335,6 +340,21 @@ mod tests {
     #[test]
     fn test_esc_quits_from_normal() {
         let mut app = make_app();
+        let action = app.handle_key(make_key(KeyCode::Esc));
+        assert!(matches!(action, Action::Quit));
+    }
+
+    #[test]
+    fn test_esc_returns_focus_from_detail() {
+        let mut app = make_app();
+        app.handle_key(make_key(KeyCode::Tab));
+        assert_eq!(app.focus, FocusPane::Detail);
+
+        // First Esc steps back to the list, second quits
+        let action = app.handle_key(make_key(KeyCode::Esc));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.focus, FocusPane::List);
+
         let action = app.handle_key(make_key(KeyCode::Esc));
         assert!(matches!(action, Action::Quit));
     }
