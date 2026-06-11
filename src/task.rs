@@ -114,7 +114,9 @@ impl_str_enum!(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
+    #[serde(deserialize_with = "lenient_string")]
     pub id: String,
+    #[serde(deserialize_with = "lenient_string")]
     pub title: String,
     #[serde(default, rename = "type", skip_serializing_if = "is_default_task_type")]
     pub task_type: TaskType,
@@ -132,6 +134,45 @@ pub struct Task {
     pub assignee: String,
     #[serde(skip)]
     pub body: String,
+}
+
+/// Accept any YAML scalar where a string is expected.
+///
+/// serde_yml's emitter quotes most ambiguous strings ("234", "true") but not
+/// "nan", which YAML then resolves as a float — and hand-edited files may
+/// contain unquoted numbers or booleans in string positions. Rather than
+/// rejecting the whole task file, coerce the scalar back to its string form.
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    struct V;
+    impl serde::de::Visitor<'_> for V {
+        type Value = String;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string or scalar")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<String, E> {
+            // Match the lowercase forms YAML emitters use for these scalars.
+            if v.is_nan() {
+                Ok("nan".to_string())
+            } else if v.is_infinite() {
+                Ok(if v > 0.0 { "inf" } else { "-inf" }.to_string())
+            } else {
+                Ok(v.to_string())
+            }
+        }
+    }
+    d.deserialize_any(V)
 }
 
 fn is_default_task_type(t: &TaskType) -> bool {
@@ -250,14 +291,24 @@ pub fn sort_by_priority_owned(tasks: &mut [Task]) {
 /// Excludes easily confused characters: 0/o, 1/l/i.
 const ID_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
-/// Generate a short alphanumeric ID, retrying on collision.
+/// An ID is YAML-safe when its unquoted occurrence still parses as a string.
+/// "nan" parses as a float, which serde_yml's emitter does not protect against
+/// with quotes — such an ID would corrupt the frontmatter on the first save.
+fn yaml_safe_id(id: &str) -> bool {
+    matches!(
+        serde_yml::from_str::<serde_yml::Value>(id),
+        Ok(serde_yml::Value::String(_))
+    )
+}
+
+/// Generate a short alphanumeric ID, retrying on collision or YAML-unsafe IDs.
 pub fn generate_id(existing: &HashSet<String>, length: usize) -> String {
     let mut rng = rand::rng();
     loop {
         let id: String = (0..length)
             .map(|_| ID_CHARSET[rng.random_range(0..ID_CHARSET.len())] as char)
             .collect();
-        if !existing.contains(&id) {
+        if !existing.contains(&id) && yaml_safe_id(&id) {
             return id;
         }
     }
@@ -414,6 +465,51 @@ mod tests {
             let id = generate_id(&existing, 6);
             assert!(!id.chars().any(|c| ambiguous.contains(&c)));
         }
+    }
+
+    #[test]
+    fn test_yaml_safe_id_rejects_nan() {
+        assert!(!yaml_safe_id("nan"));
+        assert!(yaml_safe_id("abc"));
+        assert!(yaml_safe_id("a2b"));
+    }
+
+    #[test]
+    fn test_generate_id_never_yaml_ambiguous() {
+        // With length 3 the generator could produce "nan" — ensure it is skipped.
+        let existing = HashSet::new();
+        for _ in 0..200 {
+            let id = generate_id(&existing, 3);
+            assert!(yaml_safe_id(&id), "generated YAML-unsafe id {id}");
+        }
+    }
+
+    #[test]
+    fn test_parse_unquoted_nan_id_and_title() {
+        // serde_yml's emitter writes `nan` unquoted; the parser then sees a
+        // float. The lenient deserializer must coerce it back to a string.
+        let content = "---\nid: nan\ntitle: nan\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "nan");
+        assert_eq!(task.title, "nan");
+    }
+
+    #[test]
+    fn test_parse_unquoted_numeric_title() {
+        // Hand-edited files may leave numbers unquoted in string positions.
+        let content = "---\nid: ab2\ntitle: 42\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.title, "42");
+    }
+
+    #[test]
+    fn test_nan_task_roundtrips() {
+        let mut t = Task::new("nan".into(), "nan".into(), Priority::P2);
+        t.body = "body".into();
+        let rendered = render_task(&t);
+        let parsed = parse_task(&rendered).unwrap();
+        assert_eq!(parsed.id, "nan");
+        assert_eq!(parsed.title, "nan");
     }
 
     #[test]
