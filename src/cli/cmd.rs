@@ -275,12 +275,27 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool)
 fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     let plan = service::plan_epic(tasks, id)?;
 
+    if !plan.cyclic.is_empty() {
+        let ids: Vec<&str> = plan.cyclic.iter().map(|t| t.id.as_str()).collect();
+        eprintln!(
+            "warning: {} task(s) in a dependency cycle, appended unordered: {}",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+    let all: Vec<&Task> = plan
+        .tasks
+        .iter()
+        .chain(plan.cyclic.iter())
+        .copied()
+        .collect();
+
     if json {
         let eff = service::effective_priorities(tasks);
-        let details: Vec<_> = plan.iter().map(|t| t.detail(eff.get(&t.id))).collect();
+        let details: Vec<_> = all.iter().map(|t| t.detail(eff.get(&t.id))).collect();
         output(&details, true)?;
     } else {
-        for (i, t) in plan.iter().enumerate() {
+        for (i, t) in all.iter().enumerate() {
             print!("# {}. {}\n\n", i + 1, t.title);
             if !t.body.is_empty() {
                 print!("{}\n\n", t.body);
@@ -588,18 +603,35 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
 
     crate::editor::open_in_editor(&path)?;
 
-    // Re-read and validate
+    // Re-read and validate; an unparseable result is an error (non-zero exit)
     let content = std::fs::read_to_string(&path).map_err(Error::Io)?;
-    let edited = match task::parse_task(&content) {
+    let mut edited = match task::parse_task(&content) {
         Ok(t) => t,
-        Err(_) => {
-            eprintln!("Invalid frontmatter after edit. File left on disk — fix and retry.");
-            return Ok(());
+        Err(e) => {
+            let reason = match e {
+                Error::InvalidFrontmatter { reason, .. } => reason,
+                other => other.to_string(),
+            };
+            return Err(Error::InvalidFrontmatter {
+                path: path.clone(),
+                reason: format!("{reason} (file left on disk — fix and retry)"),
+            });
         }
     };
 
-    // Check if anything changed
-    if task::render_task(&original) == task::render_task(&edited) {
+    // The ID is the task's identity — changing it in the editor would orphan
+    // the old file and duplicate the task, so force it back.
+    let id_changed = edited.id != original.id;
+    if id_changed {
+        eprintln!(
+            "warning: task ID cannot be changed via edit; keeping {}",
+            original.id
+        );
+        edited.id = original.id.clone();
+    }
+
+    // Check if anything (besides a reverted ID) changed
+    if !id_changed && task::render_task(&original) == task::render_task(&edited) {
         if !json {
             println!("No changes.");
         }
@@ -607,7 +639,6 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     }
 
     // Save with updated timestamp (and handle slug rename if title changed)
-    let mut edited = edited;
     edited.updated = Utc::now();
     store::save(base, &edited)?;
 

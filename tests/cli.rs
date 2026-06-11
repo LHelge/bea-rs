@@ -335,12 +335,75 @@ fn test_edit_bad_frontmatter() {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    // Corrupting the frontmatter is an error: non-zero exit
+    bea(&tmp)
+        .env("EDITOR", script.to_str().unwrap())
+        .args(["edit", &id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid frontmatter"));
+}
+
+/// Changing the task ID in the editor is rejected — the original ID is kept.
+#[test]
+fn test_edit_cannot_change_id() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let out = bea(&tmp)
+        .args(["--json", "create", "Sticky id"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // Editor script that rewrites the id field
+    let script = tmp.path().join("id-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nsed 's/^id:.*/id: hacked/' \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     bea(&tmp)
         .env("EDITOR", script.to_str().unwrap())
         .args(["edit", &id])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Invalid frontmatter"));
+        .stderr(
+            predicate::str::contains("ID cannot be changed")
+                .or(predicate::str::contains("cannot be changed via edit")),
+        );
+
+    // Original ID still resolves; the injected one does not
+    bea(&tmp).args(["show", &id]).assert().success();
+    bea(&tmp).args(["show", "hacked"]).assert().failure();
+}
+
+/// Creating a task with a nonexistent or non-epic parent is rejected.
+#[test]
+fn test_create_validates_parent() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    bea(&tmp)
+        .args(["create", "Orphan", "--parent", "zzzz"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    let plain = create_task(&tmp, "Plain task");
+    bea(&tmp)
+        .args(["create", "Child of task", "--parent", &plain])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not an epic"));
 }
 
 #[test]

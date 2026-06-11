@@ -172,13 +172,15 @@ impl Graph {
     /// Topological sort over a subset of task IDs.
     /// Only dependency edges between tasks in the subset are considered.
     /// Tie-breaking: priority (P0 first), then creation date (oldest first).
+    /// Tasks caught in a dependency cycle cannot be ordered and are returned
+    /// separately in `cyclic` instead of being silently dropped.
     pub fn topo_sort_subset<'a>(
         &self,
         subset: &HashSet<String>,
         tasks: &'a HashMap<String, Task>,
-    ) -> Vec<&'a Task> {
+    ) -> SubsetTopo<'a> {
         if subset.is_empty() {
-            return Vec::new();
+            return SubsetTopo::default();
         }
 
         // Compute in-degrees considering only intra-subset edges
@@ -250,7 +252,19 @@ impl Graph {
             }
         }
 
-        result
+        // Anything left over never reached in-degree 0: a dependency cycle.
+        let sorted_ids: HashSet<&str> = result.iter().map(|t| t.id.as_str()).collect();
+        let mut cyclic: Vec<&'a Task> = subset
+            .iter()
+            .filter(|id| !sorted_ids.contains(id.as_str()))
+            .filter_map(|id| tasks.get(id))
+            .collect();
+        cyclic.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+
+        SubsetTopo {
+            sorted: result,
+            cyclic,
+        }
     }
 
     /// Get adjacency list for JSON output.
@@ -263,6 +277,15 @@ impl Graph {
             })
             .collect()
     }
+}
+
+/// Result of a subset topological sort.
+#[derive(Default)]
+pub struct SubsetTopo<'a> {
+    /// Tasks in execution order.
+    pub sorted: Vec<&'a Task>,
+    /// Tasks that could not be ordered because they are in a dependency cycle.
+    pub cyclic: Vec<&'a Task>,
 }
 
 pub struct DepNode<'a> {
@@ -670,7 +693,7 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
@@ -686,7 +709,7 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
         // d must come first, a must come last
         assert_eq!(ids[0], "d");
@@ -703,7 +726,7 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         let ids: Vec<&str> = sorted.iter().map(|t| t.id.as_str()).collect();
         // P0 first, then P1, then P2
         assert_eq!(ids, vec!["b", "c", "a"]);
@@ -714,7 +737,7 @@ mod tests {
         let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         assert_eq!(sorted.len(), 1);
         assert_eq!(sorted[0].id, "a");
     }
@@ -724,8 +747,28 @@ mod tests {
         let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = HashSet::new();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn test_topo_sort_reports_cyclic_tasks() {
+        // a <-> b cycle, c independent: c sorts, a and b are reported cyclic.
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec!["a"]),
+            make_task("c", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let subset: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let topo = graph.topo_sort_subset(&subset, &tasks);
+
+        let sorted_ids: Vec<&str> = topo.sorted.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(sorted_ids, vec!["c"]);
+
+        let mut cyclic_ids: Vec<&str> = topo.cyclic.iter().map(|t| t.id.as_str()).collect();
+        cyclic_ids.sort();
+        assert_eq!(cyclic_ids, vec!["a", "b"]);
     }
 
     #[test]
@@ -738,7 +781,7 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         let subset: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let sorted = graph.topo_sort_subset(&subset, &tasks);
+        let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         assert_eq!(sorted.len(), 2);
     }
 }

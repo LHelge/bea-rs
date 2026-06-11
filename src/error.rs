@@ -16,6 +16,9 @@ pub enum Error {
     #[error("task {0} is not an epic — --plan only works on epics")]
     NotAnEpic(String),
 
+    #[error("parent {0} is not an epic — only epics can have child tasks")]
+    ParentNotEpic(String),
+
     #[error("adding dependency would create a cycle: {from} -> {to}")]
     CycleDetected { from: String, to: String },
 

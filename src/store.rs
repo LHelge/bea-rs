@@ -40,7 +40,7 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
         }
     }
 
-    // Read and parse all files in parallel
+    // Read all files in parallel
     let mut join_set = JoinSet::new();
     for path in paths {
         join_set.spawn(async move {
@@ -49,10 +49,25 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
         });
     }
 
-    let mut tasks = HashMap::new();
+    let mut loaded = Vec::new();
     while let Some(result) = join_set.join_next().await {
         let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let content = content?;
+        loaded.push((path, content));
+    }
+
+    // Parse in path order so duplicate-ID resolution is deterministic
+    // (parallel read completion order is not).
+    loaded.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut tasks = HashMap::new();
+    for (path, content) in loaded {
+        let content = match content {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: skipping {}: {e}", path.display());
+                continue;
+            }
+        };
         match task::parse_task(&content) {
             Ok(t) => {
                 if tasks.contains_key(&t.id) {
@@ -105,19 +120,22 @@ pub fn load_one(base: &Path, id: &str) -> Result<Task> {
 }
 
 /// Save a task to disk. Deletes the old file if the slug has changed.
+/// Writes atomically (temp file + rename) so a crash cannot truncate a task.
 pub fn save(base: &Path, t: &Task) -> Result<()> {
     let dir = tasks_dir(base);
     let new_path = dir.join(task::filename(t));
+    let old_path = find_task_path(base, &t.id).ok();
 
-    // Delete old file if it exists with a different name
-    if let Ok(old_path) = find_task_path(base, &t.id)
+    let tmp_path = dir.join(format!(".{}.tmp", task::filename(t)));
+    fs::write(&tmp_path, task::render_task(t))?;
+    fs::rename(&tmp_path, &new_path)?;
+
+    // Remove the old file only after the new one is safely in place
+    if let Some(old_path) = old_path
         && old_path != new_path
     {
         fs::remove_file(&old_path)?;
     }
-
-    let content = task::render_task(t);
-    fs::write(&new_path, content)?;
     Ok(())
 }
 
@@ -281,6 +299,43 @@ mod tests {
             }
             other => panic!("expected InvalidFrontmatter, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_all_duplicate_id_first_path_wins() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let dir = tmp.path().join(BEARS_DIR);
+        let fm = |title: &str| {
+            format!(
+                "---\nid: dup\ntitle: {title}\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n"
+            )
+        };
+        fs::write(dir.join("aaa-first.md"), fm("First")).unwrap();
+        fs::write(dir.join("zzz-second.md"), fm("Second")).unwrap();
+
+        // Winner must be deterministic across runs: lexicographically first path.
+        for _ in 0..5 {
+            let tasks = load_all(tmp.path()).await.unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks["dup"].title, "First");
+        }
+    }
+
+    #[test]
+    fn test_save_leaves_no_temp_files() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let t = Task::new("at01".into(), "Atomic".into(), Priority::P2);
+        save(tmp.path(), &t).unwrap();
+
+        let leftovers: Vec<_> = fs::read_dir(tmp.path().join(BEARS_DIR))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]

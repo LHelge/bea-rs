@@ -117,11 +117,13 @@ impl Widget for InputPromptWidget<'_> {
 fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str, theme: &Theme) {
     Clear.render(area, buf);
 
+    // Truncate by characters, not bytes — byte slicing panics on multibyte input.
     let inner_width = area.width.saturating_sub(2) as usize;
-    let display_text = if input.len() > inner_width && inner_width > 1 {
+    let char_count = input.chars().count();
+    let display_text = if char_count > inner_width && inner_width > 1 {
         let tail_len = inner_width - 1;
-        let start = input.len() - tail_len;
-        format!("…{}", &input[start..])
+        let tail: String = input.chars().skip(char_count - tail_len).collect();
+        format!("…{tail}")
     } else {
         input.to_string()
     };
@@ -135,4 +137,29 @@ fn render_text_box(buf: &mut Buffer, area: Rect, title: &str, input: &str, theme
         )
         .style(Style::default().fg(theme.title_fg))
         .render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_box_truncates_multibyte_input_without_panic() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buf = Buffer::empty(area);
+        // Long input full of multibyte chars — byte slicing would panic here.
+        let input = "åäöüß漢字絵文字🦀🦀🦀åäöüß漢字";
+        render_text_box(&mut buf, area, " T ", input, &theme);
+    }
+
+    #[test]
+    fn text_box_short_input_unchanged() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+        render_text_box(&mut buf, area, " T ", "hello", &theme);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("hello"));
+    }
 }

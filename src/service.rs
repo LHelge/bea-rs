@@ -27,19 +27,36 @@ pub fn create_task(
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
     let id = task::generate_id(&existing_ids, config.id_length as usize);
 
-    let unknown: Vec<String> = depends_on
-        .iter()
-        .filter(|dep| !tasks.contains_key(dep.as_str()))
-        .cloned()
-        .collect();
+    // Resolve dependency IDs (prefixes allowed, like every other command)
+    let mut resolved_deps = Vec::with_capacity(depends_on.len());
+    let mut unknown = Vec::new();
+    for dep in depends_on {
+        match store::resolve_prefix(tasks, &dep) {
+            Ok(dep_id) => resolved_deps.push(dep_id),
+            Err(Error::TaskNotFound(_)) => unknown.push(dep),
+            Err(e) => return Err(e),
+        }
+    }
     if !unknown.is_empty() {
         return Err(Error::UnknownDependency { ids: unknown });
     }
 
+    // Resolve and validate the parent: must exist and be an epic
+    let parent = match parent.filter(|p| !p.is_empty()) {
+        None => None,
+        Some(p) => {
+            let parent_id = store::resolve_prefix(tasks, &p)?;
+            if !tasks[&parent_id].task_type.is_epic() {
+                return Err(Error::ParentNotEpic(parent_id));
+            }
+            Some(parent_id)
+        }
+    };
+
     let mut t = Task::new(id, title, priority);
     t.task_type = task_type;
     t.tags = tags;
-    t.depends_on = depends_on;
+    t.depends_on = resolved_deps;
     t.parent = parent;
     t.body = body;
 
@@ -360,9 +377,17 @@ pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgre
     EpicProgress { done, total }
 }
 
-/// Return children of a parent task in topological execution order.
-/// Works for any task with children, not restricted to epics.
-pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Result<Vec<&'a Task>> {
+/// Execution plan for an epic's children.
+pub struct EpicPlan<'a> {
+    /// Children in topological execution order.
+    pub tasks: Vec<&'a Task>,
+    /// Children that cannot be ordered because they are in a dependency cycle.
+    pub cyclic: Vec<&'a Task>,
+}
+
+/// Return children of an epic in topological execution order.
+/// Children caught in a dependency cycle are reported separately.
+pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Result<EpicPlan<'a>> {
     // Validate parent exists and is an epic
     let resolved = store::resolve_prefix(tasks, parent_id)?;
     let parent = tasks
@@ -379,12 +404,12 @@ pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Resul
         .map(|t| t.id.clone())
         .collect();
 
-    if child_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let graph = Graph::build(tasks);
-    Ok(graph.topo_sort_subset(&child_ids, tasks))
+    let topo = graph.topo_sort_subset(&child_ids, tasks);
+    Ok(EpicPlan {
+        tasks: topo.sorted,
+        cyclic: topo.cyclic,
+    })
 }
 
 #[cfg(test)]
@@ -506,6 +531,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_task_rejects_unknown_parent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let result = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Orphan".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some("zzzz".into()),
+            String::new(),
+            TaskType::Task,
+        );
+        assert!(matches!(result, Err(Error::TaskNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_create_task_rejects_non_epic_parent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let plain = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Plain task".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let result = create_task(
+            tmp.path(),
+            &tasks,
+            "Child".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(plain.id),
+            String::new(),
+            TaskType::Task,
+        );
+        assert!(matches!(result, Err(Error::ParentNotEpic(_))));
+    }
+
+    #[tokio::test]
+    async fn test_create_task_resolves_prefixes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let dep = Task::new("abcd".into(), "Dep".into(), Priority::P2);
+        store::save(tmp.path(), &dep).unwrap();
+        let mut epic = Task::new("wxyz".into(), "Epic".into(), Priority::P1);
+        epic.task_type = TaskType::Epic;
+        store::save(tmp.path(), &epic).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = create_task(
+            tmp.path(),
+            &tasks,
+            "Uses prefixes".into(),
+            Priority::P2,
+            vec![],
+            vec!["ab".into()],
+            Some("wx".into()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(t.depends_on, vec!["abcd"]);
+        assert_eq!(t.parent.as_deref(), Some("wxyz"));
+    }
+
+    #[tokio::test]
+    async fn test_create_task_empty_parent_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let t = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "No parent".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(String::new()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(t.parent, None);
+    }
+
+    #[tokio::test]
     async fn test_epic_not_closed_by_recompleting_done_child() {
         let tmp = tempfile::TempDir::new().unwrap();
         store::init(tmp.path()).unwrap();
@@ -616,6 +741,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         store::init(tmp.path()).unwrap();
 
+        // An epic so it can serve as both a dependency target and a parent.
         let a = create_task(
             tmp.path(),
             &HashMap::new(),
@@ -625,7 +751,7 @@ mod tests {
             vec![],
             None,
             String::new(),
-            TaskType::Task,
+            TaskType::Epic,
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
@@ -717,8 +843,9 @@ mod tests {
 
         let tasks = task_map(vec![make_epic("e1"), c1, c2, c3]);
         let plan = plan_epic(&tasks, "e1").unwrap();
-        let ids: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
+        let ids: Vec<&str> = plan.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["c1", "c2", "c3"]);
+        assert!(plan.cyclic.is_empty());
     }
 
     #[test]
@@ -729,14 +856,15 @@ mod tests {
             make_child("c2", "e1", Status::Open),
         ]);
         let plan = plan_epic(&tasks, "e1").unwrap();
-        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.tasks.len(), 2);
     }
 
     #[test]
     fn test_plan_epic_no_children() {
         let tasks = task_map(vec![make_epic("e1")]);
         let plan = plan_epic(&tasks, "e1").unwrap();
-        assert!(plan.is_empty());
+        assert!(plan.tasks.is_empty());
+        assert!(plan.cyclic.is_empty());
     }
 
     #[test]
