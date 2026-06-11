@@ -60,8 +60,12 @@ pub fn load(base: &Path) -> Result<Config> {
 }
 
 /// Write the default config to `.bears.yml`.
+/// Leaves an existing config file untouched so re-running `bea init` is safe.
 pub fn create_default(base: &Path) -> Result<PathBuf> {
     let path = config_path(base);
+    if path.exists() {
+        return Ok(path);
+    }
     let config = Config::default();
     let content = serde_yaml::to_string(&config)?;
     fs::write(&path, content)?;
@@ -92,6 +96,15 @@ mod tests {
         create_default(tmp.path()).unwrap();
         let config = load(tmp.path()).unwrap();
         assert_eq!(config.id_length, 3);
+    }
+
+    #[test]
+    fn test_create_default_preserves_existing_config() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(config_path(tmp.path()), "id-length: 6\n").unwrap();
+        create_default(tmp.path()).unwrap();
+        let config = load(tmp.path()).unwrap();
+        assert_eq!(config.id_length, 6, "re-init must not clobber config");
     }
 
     #[test]

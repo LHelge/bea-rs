@@ -608,9 +608,10 @@ fn test_graph_with_cycle_completes() {
     bea(&tmp).args(["--json", "graph"]).assert().success();
 }
 
-/// ff18: ready excludes tasks whose dependency was deleted (missing dep ID).
+/// Deleting a task scrubs it from dependents' depends_on, so the
+/// dependent becomes ready instead of being silently blocked forever.
 #[test]
-fn test_ready_missing_dep_blocks() {
+fn test_delete_unblocks_dependents() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp).arg("init").assert().success();
 
@@ -625,12 +626,66 @@ fn test_ready_missing_dep_blocks() {
     // Delete the dependency task
     bea(&tmp).args(["delete", &id_dep]).assert().success();
 
-    // The dependent task should NOT appear in ready
+    // The dangling reference is removed and the dependent is ready
+    let out = bea(&tmp)
+        .args(["--json", "show", &id_task])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v["depends_on"].as_array().unwrap().is_empty());
+
     bea(&tmp)
         .arg("ready")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Depends on deleted").not());
+        .stdout(predicate::str::contains("Depends on deleted"));
+}
+
+/// Re-running `bea init` must not reset an existing .bears.yml.
+#[test]
+fn test_init_idempotent_preserves_config() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    std::fs::write(tmp.path().join(".bears.yml"), "id-length: 6\n").unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let content = std::fs::read_to_string(tmp.path().join(".bears.yml")).unwrap();
+    assert!(content.contains("id-length: 6"), "config was clobbered");
+}
+
+/// Completing a child via `update --status done` auto-closes the epic,
+/// same as `bea done`.
+#[test]
+fn test_epic_auto_close_via_update_status() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Update epic");
+    let child = create_child_task(&tmp, "Only child", &epic_id);
+
+    bea(&tmp)
+        .args(["update", &child, "--status", "done"])
+        .assert()
+        .success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "done");
+}
+
+/// Re-completing an already-done child must not close an epic that
+/// still has open children.
+#[test]
+fn test_epic_not_closed_by_recompletion() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Recompletion epic");
+    let child1 = create_child_task(&tmp, "Done child", &epic_id);
+    let _child2 = create_child_task(&tmp, "Open child", &epic_id);
+
+    bea(&tmp).args(["done", &child1]).assert().success();
+    bea(&tmp).args(["done", &child1]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "open");
 }
 
 /// bc2f: init creates .bears/ directory (not .tasks/).

@@ -109,6 +109,7 @@ pub fn update_task(
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
 
+    let status_changed = status.is_some();
     if let Some(s) = status {
         t.status = s;
     }
@@ -130,6 +131,9 @@ pub fn update_task(
     t.updated = Utc::now();
 
     store::save(base, &t)?;
+    if status_changed {
+        maybe_close_parent_epic(base, tasks, &t)?;
+    }
     Ok(t)
 }
 
@@ -145,25 +149,45 @@ pub fn set_status(
     t.status = status;
     t.updated = Utc::now();
     store::save(base, &t)?;
+    maybe_close_parent_epic(base, tasks, &t)?;
+    Ok(t)
+}
 
-    // Auto-close parent epic when all children are done
-    if t.status == Status::Done
-        && let Some(ref parent_id) = t.parent
-        && let Some(parent) = tasks.get(parent_id)
-        && parent.task_type.is_epic()
-        && parent.status != Status::Done
-    {
-        let progress = epic_progress(tasks, parent_id);
-        // +1 because `tasks` still has the old status for this task
-        if progress.done + 1 >= progress.total {
-            let mut parent = parent.clone();
-            parent.status = Status::Done;
-            parent.updated = Utc::now();
-            store::save(base, &parent)?;
-        }
+/// Auto-close the parent epic when all of its children are done.
+///
+/// `tasks` is the pre-save snapshot, so `child` is counted as done explicitly
+/// regardless of the (possibly stale) status the snapshot holds for it.
+fn maybe_close_parent_epic(base: &Path, tasks: &HashMap<String, Task>, child: &Task) -> Result<()> {
+    if child.status != Status::Done {
+        return Ok(());
+    }
+    let Some(parent_id) = child.parent.as_deref() else {
+        return Ok(());
+    };
+    let Some(parent) = tasks.get(parent_id) else {
+        return Ok(());
+    };
+    if !parent.task_type.is_epic() || parent.status == Status::Done {
+        return Ok(());
     }
 
-    Ok(t)
+    let mut done = 0;
+    let mut total = 0;
+    for t in tasks.values() {
+        if t.parent.as_deref() == Some(parent_id) {
+            total += 1;
+            if t.id == child.id || t.status == Status::Done {
+                done += 1;
+            }
+        }
+    }
+    if total > 0 && done >= total {
+        let mut parent = parent.clone();
+        parent.status = Status::Done;
+        parent.updated = Utc::now();
+        store::save(base, &parent)?;
+    }
+    Ok(())
 }
 
 /// Add a dependency with cycle detection. Both IDs support prefix matching.
@@ -231,14 +255,17 @@ pub fn search_tasks(tasks: &HashMap<String, Task>, query: &str, include_all: boo
 }
 
 /// Delete a task by ID or prefix, returning the deleted task.
+/// References to the deleted task are removed from remaining tasks.
 pub fn delete_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let t = tasks[&id].clone();
     store::delete(base, &id)?;
+    scrub_references(base, tasks, &HashSet::from([id]))?;
     Ok(t)
 }
 
 /// Prune cancelled (and optionally done) tasks, returning deleted tasks.
+/// References to pruned tasks are removed from remaining tasks.
 pub fn prune_tasks(
     base: &Path,
     tasks: &HashMap<String, Task>,
@@ -253,7 +280,36 @@ pub fn prune_tasks(
     for t in &to_delete {
         store::delete(base, &t.id)?;
     }
+    let deleted_ids: HashSet<String> = to_delete.iter().map(|t| t.id.clone()).collect();
+    scrub_references(base, tasks, &deleted_ids)?;
     Ok(to_delete)
+}
+
+/// Remove dangling references to deleted tasks: drop deleted IDs from
+/// `depends_on` lists and clear `parent` fields pointing at deleted tasks.
+/// Without this, dependents would silently never become ready.
+fn scrub_references(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    deleted: &HashSet<String>,
+) -> Result<()> {
+    for t in tasks.values() {
+        if deleted.contains(&t.id) {
+            continue;
+        }
+        let dangling_dep = t.depends_on.iter().any(|d| deleted.contains(d));
+        let dangling_parent = t.parent.as_ref().is_some_and(|p| deleted.contains(p));
+        if dangling_dep || dangling_parent {
+            let mut t = t.clone();
+            t.depends_on.retain(|d| !deleted.contains(d));
+            if dangling_parent {
+                t.parent = None;
+            }
+            t.updated = Utc::now();
+            store::save(base, &t)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build the dependency graph from tasks.
@@ -447,6 +503,207 @@ mod tests {
         set_status(tmp.path(), &tasks, &child2.id, Status::Done).unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_epic_not_closed_by_recompleting_done_child() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let epic = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child1 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 1".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let _child2 = create_task(
+            tmp.path(),
+            &tasks,
+            "Child 2".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete child1, then complete it AGAIN — epic must stay open
+        // because child2 is still open.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &child1.id, Status::Done).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_epic_auto_close_via_update_task() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let epic = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Epic".into(),
+            Priority::P1,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let child = create_task(
+            tmp.path(),
+            &tasks,
+            "Only child".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(epic.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        // Complete the child through update_task — must auto-close like set_status.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        update_task(
+            tmp.path(),
+            &tasks,
+            &child.id,
+            Some(Status::Done),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks[&epic.id].status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_delete_scrubs_dangling_references() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let a = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Dep target".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let b = create_task(
+            tmp.path(),
+            &tasks,
+            "Dependent".into(),
+            Priority::P2,
+            vec![],
+            vec![a.id.clone()],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let c = create_task(
+            tmp.path(),
+            &tasks,
+            "Child of deleted".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(a.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        delete_task(tmp.path(), &tasks, &a.id).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert!(tasks[&b.id].depends_on.is_empty(), "dep should be scrubbed");
+        assert_eq!(tasks[&c.id].parent, None, "parent should be cleared");
+        // And the dependent is now ready instead of silently blocked.
+        let ready = list_ready(&tasks, None, None, None);
+        assert!(ready.iter().any(|t| t.id == b.id));
+    }
+
+    #[tokio::test]
+    async fn test_prune_scrubs_dangling_references() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let a = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Cancelled dep".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let b = create_task(
+            tmp.path(),
+            &tasks,
+            "Dependent".into(),
+            Priority::P2,
+            vec![],
+            vec![a.id.clone()],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, &a.id, Status::Cancelled).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        prune_tasks(tmp.path(), &tasks, false).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert!(tasks[&b.id].depends_on.is_empty(), "dep should be scrubbed");
     }
 
     #[test]
