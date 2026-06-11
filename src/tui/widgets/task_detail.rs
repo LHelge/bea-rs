@@ -6,7 +6,6 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
-use crate::graph::Graph;
 use crate::task::Task;
 
 use super::super::style::Theme;
@@ -22,7 +21,6 @@ pub(in crate::tui) struct DetailMetrics {
 
 pub(in crate::tui) struct TaskDetailWidget<'a> {
     task: Option<&'a Task>,
-    graph: &'a Graph,
     task_map: &'a HashMap<String, Task>,
     scroll: u16,
     border_style: Style,
@@ -33,7 +31,6 @@ pub(in crate::tui) struct TaskDetailWidget<'a> {
 impl<'a> TaskDetailWidget<'a> {
     pub fn new(
         task: Option<&'a Task>,
-        graph: &'a Graph,
         task_map: &'a HashMap<String, Task>,
         scroll: u16,
         border_style: Style,
@@ -42,7 +39,6 @@ impl<'a> TaskDetailWidget<'a> {
     ) -> Self {
         Self {
             task,
-            graph,
             task_map,
             scroll,
             border_style,
@@ -73,11 +69,11 @@ impl TaskDetailWidget<'_> {
         // Sub-widget: task info (title + metadata)
         lines.extend(TaskInfoWidget::new(task, self.task_map, self.theme).lines());
 
-        // Sub-widget: dependency tree
-        lines.extend(DepTreeWidget::new(task, self.graph, self.task_map, self.theme).lines());
+        // Sub-widget: direct dependencies
+        lines.extend(DepTreeWidget::new(task, self.task_map, self.theme).lines());
 
-        // Sub-widget: subtask graph (for epics)
-        lines.extend(SubtaskGraphWidget::new(task, self.graph, self.task_map, self.theme).lines());
+        // Sub-widget: subtask tree (for epics)
+        lines.extend(SubtaskGraphWidget::new(task, self.task_map, self.theme).lines());
 
         // Sub-widget: body
         lines.extend(BodyWidget::new(&task.body, self.theme).lines());

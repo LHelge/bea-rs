@@ -34,6 +34,14 @@ pub enum Error {
     #[error("editor failed: {reason}")]
     EditorFailed { reason: String },
 
+    /// The task cannot be archived because active tasks depend on it.
+    #[error("task {id} is not archivable — active dependents: {}", blockers.join(", "))]
+    NotArchivable { id: String, blockers: Vec<String> },
+
+    /// The task is not found in the archive.
+    #[error("task not found in archive: {0}")]
+    NotArchived(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

@@ -86,6 +86,10 @@ async fn test_handshake_and_tool_list() {
         "delete_task",
         "search_tasks",
         "get_graph",
+        "plan_epic",
+        "archive_task",
+        "restore_task",
+        "list_archived",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }

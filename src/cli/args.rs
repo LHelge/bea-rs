@@ -21,7 +21,19 @@ pub struct Args {
 #[derive(Subcommand, PartialEq)]
 pub enum Command {
     /// Initialize a new .bears/ directory
-    Init,
+    Init {
+        /// Scaffold Claude Code integration files (CLAUDE.md, .mcp.json)
+        #[arg(long)]
+        claude: bool,
+
+        /// Scaffold GitHub Copilot integration files (.github/copilot-instructions.md, .github/mcp.json)
+        #[arg(long)]
+        copilot: bool,
+
+        /// Scaffold OpenAI Codex integration files (AGENTS.md)
+        #[arg(long)]
+        codex: bool,
+    },
 
     /// Create a new task
     Create {
@@ -74,6 +86,10 @@ pub enum Command {
         /// Include done and cancelled tasks
         #[arg(long, short = 'a')]
         all: bool,
+
+        /// Show archived tasks instead of active tasks
+        #[arg(long, conflicts_with_all = ["status", "priority", "tag", "epic", "all"])]
+        archived: bool,
     },
 
     /// Show tasks that are ready to work on
@@ -132,6 +148,10 @@ pub enum Command {
         /// New title
         #[arg(long)]
         title: Option<String>,
+
+        /// Set parent epic ID (use empty string "" to clear)
+        #[arg(long)]
+        parent: Option<String>,
     },
 
     /// Set task status
@@ -189,11 +209,30 @@ pub enum Command {
         id: String,
     },
 
-    /// Delete completed/cancelled tasks
+    /// Delete completed/cancelled tasks [deprecated: prefer `bea archive`]
     Prune {
         /// Also delete done tasks
         #[arg(long)]
         done: bool,
+    },
+
+    /// Archive a task (or sweep all archivable tasks if no ID given)
+    Archive {
+        /// Task ID or prefix to archive (omit to sweep all done/cancelled tasks)
+        id: Option<String>,
+    },
+
+    /// Restore a task from the archive
+    Restore {
+        /// Task ID or prefix to restore
+        id: String,
+    },
+
+    /// Show archived tasks as a chronological log (most-recent-first)
+    Log {
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Open a task in $EDITOR for editing

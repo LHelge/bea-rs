@@ -8,64 +8,79 @@ use owo_colors::Style;
 
 use crate::error::{Error, Result};
 use crate::graph::{DepNode, DepNodeJson};
+use crate::scaffold;
 use crate::service;
 use crate::store;
-use crate::task::{self, Priority, Status, Task};
+use crate::task::{self, Priority, Status, Task, TaskType};
 
-use super::{color_id, color_status, color_tags, format_priority, output_json};
+use super::{color_id, color_priority, color_status, color_tags, format_priority, output};
 
-pub fn cmd_init(base: &Path, json: bool) -> Result<()> {
+pub fn cmd_init(base: &Path, claude: bool, copilot: bool, codex: bool, json: bool) -> Result<()> {
     let dir = store::init(base)?;
+
+    // Collect requested harness labels
+    let mut labels: Vec<&str> = Vec::new();
+    if claude {
+        labels.push("claude");
+    }
+    if copilot {
+        labels.push("copilot");
+    }
+    if codex {
+        labels.push("codex");
+    }
+
+    let scaffolded = scaffold::scaffold(base, &labels)?;
+
     if json {
-        output_json(&serde_json::json!({ "path": dir.display().to_string() }))?;
+        let paths: Vec<String> = std::iter::once(dir.display().to_string())
+            .chain(scaffolded.iter().map(|p| p.display().to_string()))
+            .collect();
+        output(&serde_json::json!({
+            "path": dir.display().to_string(),
+            "scaffolded": paths[1..],
+        }))?;
     } else {
         println!("Initialized bears in {}", dir.display());
+        for p in &scaffolded {
+            println!("  wrote {}", p.display());
+        }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_create(
     base: &Path,
     tasks: &HashMap<String, Task>,
-    new: service::NewTask,
+    title: String,
+    priority: Priority,
+    tags: Vec<String>,
+    depends_on: Vec<String>,
+    parent: Option<String>,
+    body: Option<String>,
+    epic: bool,
     json: bool,
 ) -> Result<()> {
-    let t = service::create_task(base, tasks, new)?;
+    let task_type = if epic { TaskType::Epic } else { TaskType::Task };
+    let t = service::create_task(
+        base,
+        tasks,
+        title,
+        priority,
+        tags,
+        depends_on,
+        parent,
+        body.unwrap_or_default(),
+        task_type,
+    )?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
         println!("Created task {} — {}", t.id, t.title);
     }
     Ok(())
-}
-
-/// Print the standard one-line row for a task; epics get the "Epic:" prefix
-/// and a done/total progress counter.
-fn print_task_row(tasks: &HashMap<String, Task>, t: &Task, eff: &HashMap<String, Priority>) {
-    if t.task_type.is_epic() {
-        let p = service::epic_progress(tasks, &t.id);
-        println!(
-            "[{}] {} {} {} {} [{}/{}] [{}]",
-            color_id(&t.id),
-            format_priority(&t.priority, eff.get(&t.id)),
-            color_status(&t.status),
-            "Epic:".if_supports_color(Stdout, |t| t.bright_magenta()),
-            t.title,
-            p.done,
-            p.total,
-            color_tags(&t.tags),
-        );
-    } else {
-        println!(
-            "[{}] {} {} — {} [{}]",
-            color_id(&t.id),
-            format_priority(&t.priority, eff.get(&t.id)),
-            color_status(&t.status),
-            t.title,
-            color_tags(&t.tags)
-        );
-    }
 }
 
 pub fn cmd_list(
@@ -89,12 +104,36 @@ pub fn cmd_list(
 
     if json {
         let summaries: Vec<_> = filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-        output_json(&summaries)?;
-    } else if filtered.is_empty() {
-        println!("No tasks found.");
+        output(&summaries)?;
     } else {
-        for t in &filtered {
-            print_task_row(tasks, t, &eff);
+        if filtered.is_empty() {
+            println!("No tasks found.");
+        } else {
+            for t in &filtered {
+                if t.task_type.is_epic() {
+                    let p = service::epic_progress(tasks, &t.id);
+                    println!(
+                        "[{}] {} {} {} {} [{}/{}] [{}]",
+                        color_id(&t.id),
+                        format_priority(&t.priority, eff.get(&t.id)),
+                        color_status(&t.status),
+                        "Epic:".if_supports_color(Stdout, |t| t.bright_magenta()),
+                        t.title,
+                        p.done,
+                        p.total,
+                        color_tags(&t.tags),
+                    );
+                } else {
+                    println!(
+                        "[{}] {} {} — {} [{}]",
+                        color_id(&t.id),
+                        format_priority(&t.priority, eff.get(&t.id)),
+                        color_status(&t.status),
+                        t.title,
+                        color_tags(&t.tags)
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -112,39 +151,133 @@ pub fn cmd_ready(
 
     if json {
         let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-        output_json(&summaries)?;
-    } else if ready.is_empty() {
-        println!("No tasks ready.");
+        output(&summaries)?;
     } else {
-        // Ready tasks are all open, so the status column is omitted.
-        for t in &ready {
-            println!(
-                "[{}] {} — {} [{}]",
-                color_id(&t.id),
-                format_priority(&t.priority, eff.get(&t.id)),
-                t.title,
-                color_tags(&t.tags)
-            );
+        if ready.is_empty() {
+            println!("No tasks ready.");
+        } else {
+            for t in &ready {
+                println!(
+                    "[{}] {} — {} [{}]",
+                    color_id(&t.id),
+                    format_priority(&t.priority, eff.get(&t.id)),
+                    t.title,
+                    color_tags(&t.tags)
+                );
+            }
         }
     }
     Ok(())
 }
 
 pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
-    let epics = service::list_epics(tasks);
-    let eff = service::effective_priorities(tasks);
+    let mut epics: Vec<&Task> = tasks.values().filter(|t| t.task_type.is_epic()).collect();
+    epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
     if json {
         let out: Vec<_> = epics
             .iter()
             .map(|t| t.epic_summary(service::epic_progress(tasks, &t.id)))
             .collect();
-        output_json(&out)?;
+        output(&out)?;
     } else if epics.is_empty() {
         println!("No epics found.");
     } else {
         for t in &epics {
-            print_task_row(tasks, t, &eff);
+            let p = service::epic_progress(tasks, &t.id);
+            let prefix = "Epic:"
+                .if_supports_color(Stdout, |t| t.bright_magenta())
+                .to_string();
+            println!(
+                "[{}] {} {} {} {} [{}/{}] [{}]",
+                color_id(&t.id),
+                color_priority(&t.priority),
+                color_status(&t.status),
+                prefix,
+                t.title,
+                p.done,
+                p.total,
+                color_tags(&t.tags),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Display an archived task (no active task context — effective priority not available).
+/// `plan` is ignored for archived tasks (archive is read-only; children may not be present).
+pub fn cmd_show_archived(task: &Task, _plan: bool, json: bool) -> Result<()> {
+    if json {
+        let detail = task.detail(None);
+        // Annotate JSON output so callers know this came from the archive
+        let mut json_val = serde_json::to_value(&detail)?;
+        if let Some(obj) = json_val.as_object_mut() {
+            obj.insert("archived".to_string(), serde_json::Value::Bool(true));
+        }
+        output(&json_val)?;
+    } else {
+        println!(
+            "[{}] {} {}",
+            color_id(&task.id),
+            task.title.if_supports_color(Stdout, |t| t.bold()),
+            "(archived)".if_supports_color(Stdout, |t| t.dimmed()),
+        );
+        println!(
+            "{} {}",
+            "Status:  ".if_supports_color(Stdout, |t| t.bold()),
+            color_status(&task.status)
+        );
+        println!(
+            "{} {}",
+            "Priority:".if_supports_color(Stdout, |t| t.bold()),
+            color_priority(&task.priority)
+        );
+        println!(
+            "{} {}",
+            "Tags:    ".if_supports_color(Stdout, |t| t.bold()),
+            if task.tags.is_empty() {
+                "—".to_string()
+            } else {
+                color_tags(&task.tags)
+            }
+        );
+        if !task.depends_on.is_empty() {
+            println!(
+                "{} {}",
+                "Deps:    ".if_supports_color(Stdout, |t| t.bold()),
+                task.depends_on
+                    .iter()
+                    .map(|d| color_id(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if let Some(ref parent) = task.parent {
+            println!(
+                "{} {}",
+                "Parent:  ".if_supports_color(Stdout, |t| t.bold()),
+                color_id(parent)
+            );
+        }
+        if !task.assignee.is_empty() {
+            println!(
+                "{} {}",
+                "Assignee:".if_supports_color(Stdout, |t| t.bold()),
+                task.assignee
+            );
+        }
+        println!(
+            "{} {}",
+            "Created: ".if_supports_color(Stdout, |t| t.bold()),
+            task.created
+        );
+        println!(
+            "{} {}",
+            "Updated: ".if_supports_color(Stdout, |t| t.bold()),
+            task.updated
+        );
+        if !task.body.is_empty() {
+            println!("\n{}", task.body);
         }
     }
     Ok(())
@@ -160,7 +293,7 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool)
     let ep = eff.get(&t.id);
 
     if json {
-        output_json(&t.detail(ep))?;
+        output(&t.detail(ep))?;
     } else {
         if t.task_type.is_epic() {
             let p = service::epic_progress(tasks, &t.id);
@@ -261,7 +394,7 @@ fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<
     if json {
         let eff = service::effective_priorities(tasks);
         let details: Vec<_> = all.iter().map(|t| t.detail(eff.get(&t.id))).collect();
-        output_json(&details)?;
+        output(&details)?;
     } else {
         for (i, t) in all.iter().enumerate() {
             print!("# {}. {}\n\n", i + 1, t.title);
@@ -273,17 +406,38 @@ fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_update(
     base: &Path,
     tasks: &HashMap<String, Task>,
     id: &str,
-    fields: service::UpdateFields,
+    status: Option<Status>,
+    priority: Option<Priority>,
+    tags: Option<Vec<String>>,
+    assignee: Option<String>,
+    body: Option<String>,
+    title: Option<String>,
+    parent: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let t = service::update_task(base, tasks, id, fields)?;
+    // Map CLI parent arg: None = unchanged, "" = clear, "id" = set
+    let parent_update: Option<Option<String>> =
+        parent.map(|p| if p.is_empty() { None } else { Some(p) });
+    let t = service::update_task(
+        base,
+        tasks,
+        id,
+        status,
+        priority,
+        tags,
+        assignee,
+        body,
+        title,
+        parent_update,
+    )?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
         println!("Updated task {} — {}", t.id, t.title);
     }
@@ -300,7 +454,7 @@ pub fn cmd_status(
     let t = service::set_status(base, tasks, id, status)?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
         println!(
             "[{}] {} → {}",
@@ -319,12 +473,13 @@ pub fn cmd_dep_add(
     depends_on: &str,
     json: bool,
 ) -> Result<()> {
+    let resolved_dep = store::resolve_prefix(tasks, depends_on)?;
     let t = service::add_dependency(base, tasks, id, depends_on)?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
-        println!("[{}] now depends on [{}]", id, depends_on);
+        println!("[{}] now depends on [{}]", t.id, resolved_dep);
     }
     Ok(())
 }
@@ -336,12 +491,13 @@ pub fn cmd_dep_remove(
     depends_on: &str,
     json: bool,
 ) -> Result<()> {
+    let resolved_dep = store::resolve_prefix(tasks, depends_on)?;
     let t = service::remove_dependency(base, tasks, id, depends_on)?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
-        println!("[{}] no longer depends on [{}]", id, depends_on);
+        println!("[{}] no longer depends on [{}]", t.id, resolved_dep);
     }
     Ok(())
 }
@@ -354,9 +510,9 @@ pub fn cmd_dep_tree(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Resu
 
     if json {
         let json_tree = DepNodeJson::from_dep_node(&tree);
-        output_json(&json_tree)?;
+        output(&json_tree)?;
     } else {
-        let eff = graph.effective_priorities(tasks);
+        let eff = graph.effective_priorities_all(tasks);
         println!(
             "Dependency tree for {}:\n",
             tree.task.title.if_supports_color(Stdout, |t| t.bold())
@@ -394,6 +550,12 @@ fn print_tree(
         format!(
             " {}",
             "[CYCLE]".if_supports_color(Stdout, |s| s.style(style))
+        )
+    } else if node.seen {
+        let style = Style::new().dimmed();
+        format!(
+            " {}",
+            "(see above)".if_supports_color(Stdout, |s| s.style(style))
         )
     } else {
         String::new()
@@ -448,8 +610,9 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
     let graph = service::build_graph(tasks);
 
     if json {
-        let adj = graph.adjacency_list();
-        output_json(&adj)?;
+        // Use bounded adjacency list: exclude isolated nodes; `--all` controls done/cancelled.
+        let adj = graph.bounded_adjacency_list(tasks, all, None, None);
+        output(&adj)?;
         return Ok(());
     }
 
@@ -458,7 +621,8 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
         return Ok(());
     }
 
-    let eff = graph.effective_priorities(tasks);
+    // Compute effective priorities once in O(V+E)
+    let eff = graph.effective_priorities_all(tasks);
 
     // Roots: tasks that no other task depends on
     let all_deps: HashSet<&str> = tasks
@@ -500,7 +664,7 @@ pub fn cmd_prune(
     let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
-        output_json(&summaries)?;
+        output(&summaries)?;
     } else {
         if deleted.is_empty() {
             println!("No tasks to prune.");
@@ -517,7 +681,7 @@ pub fn cmd_delete(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bo
     let t = service::delete_task(base, tasks, id)?;
 
     if json {
-        output_json(&t.summary(None))?;
+        output(&t.summary(None))?;
     } else {
         println!("Deleted task {} — {}", t.id, t.title);
     }
@@ -526,16 +690,110 @@ pub fn cmd_delete(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bo
 
 pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: bool) -> Result<()> {
     let results = service::search_tasks(tasks, query, all);
-    let eff = service::effective_priorities(tasks);
 
     if json {
-        let summaries: Vec<_> = results.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-        output_json(&summaries)?;
-    } else if results.is_empty() {
-        println!("No tasks matching \"{query}\".");
+        let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
+        output(&summaries)?;
     } else {
-        for t in &results {
-            print_task_row(tasks, t, &eff);
+        if results.is_empty() {
+            println!("No tasks matching \"{query}\".");
+        } else {
+            for t in &results {
+                println!(
+                    "[{}] {} {} — {} [{}]",
+                    color_id(&t.id),
+                    color_priority(&t.priority),
+                    color_status(&t.status),
+                    t.title,
+                    color_tags(&t.tags)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `bea archive [id]` — archive a single task (cascade) or sweep all archivable tasks.
+pub async fn cmd_archive(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let archived_ids: Vec<String> = match id {
+        Some(id_or_prefix) => service::archive_task(base, tasks, id_or_prefix)?,
+        None => service::archive_all(base, tasks)?,
+    };
+
+    if json {
+        output(&serde_json::json!({ "archived": archived_ids }))?;
+    } else if archived_ids.is_empty() {
+        println!("Nothing to archive.");
+    } else {
+        for id in &archived_ids {
+            println!("Archived {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `bea restore <id>` — restore a task (and its cascade) from the archive.
+pub async fn cmd_restore(base: &Path, id: &str, json: bool) -> Result<()> {
+    let restored_ids = service::restore_task(base, id).await?;
+
+    if json {
+        output(&serde_json::json!({ "restored": restored_ids }))?;
+    } else {
+        for id in &restored_ids {
+            println!("Restored {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `bea list --archived` — list tasks in the archive.
+pub async fn cmd_list_archived(base: &Path, json: bool) -> Result<()> {
+    let archived = service::list_archive(base, None).await?;
+
+    if json {
+        let summaries: Vec<_> = archived.iter().map(|t| t.summary(None)).collect();
+        output(&summaries)?;
+    } else if archived.is_empty() {
+        println!("No archived tasks.");
+    } else {
+        for t in &archived {
+            println!(
+                "[{}] {} {} — {} [{}]",
+                color_id(&t.id),
+                color_priority(&t.priority),
+                color_status(&t.status),
+                t.title,
+                color_tags(&t.tags)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `bea log [--limit N]` — display archived tasks as a chronological log (most-recent-first).
+pub async fn cmd_log(base: &Path, limit: Option<usize>, json: bool) -> Result<()> {
+    let archived = service::list_archive(base, limit).await?;
+
+    if json {
+        let summaries: Vec<_> = archived.iter().map(|t| t.summary(None)).collect();
+        output(&summaries)?;
+    } else if archived.is_empty() {
+        println!("No archived tasks.");
+    } else {
+        for t in &archived {
+            println!(
+                "[{}] {} {} — {} [{}]",
+                color_id(&t.id),
+                color_priority(&t.priority),
+                color_status(&t.status),
+                t.title,
+                color_tags(&t.tags)
+            );
         }
     }
     Ok(())
@@ -544,7 +802,8 @@ pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: b
 pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     // Resolve prefix and load task
     let original = service::get_task(tasks, id)?;
-    let path = store::find_task_path(base, &original.id)?;
+    let original_id = original.id.clone();
+    let path = store::find_task_path(base, &original_id)?;
 
     crate::editor::open_in_editor(&path)?;
 
@@ -566,13 +825,10 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
 
     // The ID is the task's identity — changing it in the editor would orphan
     // the old file and duplicate the task, so force it back.
-    let id_changed = edited.id != original.id;
+    let id_changed = edited.id != original_id;
     if id_changed {
-        eprintln!(
-            "warning: task ID cannot be changed via edit; keeping {}",
-            original.id
-        );
-        edited.id = original.id.clone();
+        eprintln!("warning: task ID cannot be changed via edit; keeping {original_id}");
+        edited.id = original_id.clone();
     }
 
     // Check if anything (besides a reverted ID) changed
@@ -588,7 +844,7 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     store::save(base, &edited)?;
 
     if json {
-        output_json(&edited.summary(None))?;
+        output(&edited.summary(None))?;
     } else {
         println!("Edited task {} — {}", edited.id, edited.title);
     }

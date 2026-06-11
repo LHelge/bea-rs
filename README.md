@@ -95,6 +95,17 @@ Create the `.bears/` directory and `.bears.yml` config in the current directory.
 bea init
 ```
 
+Optionally scaffold coding-agent integration files with one or more harness flags:
+
+```sh
+bea init --claude    # CLAUDE.md + .mcp.json + .claude/skills/ + .claude/agents/
+bea init --copilot   # .github/copilot-instructions.md + .github/mcp.json + .github/skills/ + .github/agents/
+bea init --codex     # AGENTS.md
+bea init --claude --copilot   # combine flags
+```
+
+Flags are **idempotent**: re-running them on an already-initialized directory is safe and refreshes the files. When merging `.mcp.json` / `.github/mcp.json`, any pre-existing unrelated server entries are preserved. The generated MCP server entry always uses `bea mcp` (not `cargo run`).
+
 ### `bea create`
 ```sh
 bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--body "..."] [--epic]
@@ -133,6 +144,7 @@ bea show <id>
 bea update <id> --status blocked
 bea update <id> --priority P0 --tag urgent,backend
 bea update <id> --title "New title" --body "Updated description"
+bea update <id> --parent <epic-id>    # reparent under an epic (use "" to detach)
 ```
 
 ### `bea epics`
@@ -170,12 +182,25 @@ bea delete <id>
 ```
 
 ### `bea prune`
-Delete cancelled tasks. Use `--done` to also delete completed tasks.
+Permanently delete cancelled tasks. Use `--done` to also delete completed tasks. For **recoverable** cleanup, prefer `bea archive`.
 
 ```sh
 bea prune
 bea prune --done
 ```
+
+### `bea archive` / `bea restore` / `bea log`
+Move settled work out of the active set into `.bears/archive/`, keeping `list`/`ready`/`search`/`graph`/`epics` focused on active tasks. Unlike `prune`, archiving is **reversible**.
+
+```sh
+bea archive            # sweep: archive every archivable task
+bea archive <id>       # archive one task (and its settled epic children)
+bea restore <id>       # bring an archived task (and its deps + parent epic) back
+bea list --archived    # list archived tasks
+bea log [--limit N]    # archived tasks, most recently archived first
+```
+
+A task is **archivable** only when it is `done`/`cancelled` **and** no active task still depends on it (otherwise archiving is refused, naming the blockers). Archived tasks are hidden from all normal listings; `bea show <id>` still finds them (labelled as archived), but mutating an archived task is refused until you `restore` it.
 
 ### `bea graph`
 Show the dependency graph as a tree. Hides `done` and `cancelled` tasks by default; use `--all` / `-a` to include them.
@@ -224,6 +249,16 @@ bea completions fish | source
 
 ---
 
+## Interactive TUI
+
+```sh
+bea tui
+```
+
+A full-screen terminal UI for browsing and managing tasks, with **live refresh** when `.bears/` changes on disk (e.g. while an AI agent edits tasks in the background). Press `m` to cycle the list view — **Open**, **Ready**, **Epics**, **Completed** (done/cancelled still in the active set), **Archive** (loaded from `.bears/archive/`), **All** — `/` to filter by text, and edit the selected task in your `$EDITOR`. The detail pane shows a task's direct dependencies, and for epics the full subtask tree.
+
+---
+
 ## JSON output
 
 Every command accepts `--json` for machine-readable output:
@@ -249,20 +284,24 @@ bea mcp   # starts MCP server over stdio
 | Tool | Description |
 |---|---|
 | `list_ready` | Tasks ready to work on (`limit?`, `tag?`, `epic?`) |
-| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`, `epic?`) |
+| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?`) |
 | `list_epics` | List all epics with progress |
-| `get_task` | Full task details (`id`) |
-| `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `body?`, `type?`) |
-| `update_task` | Update fields (`id`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`) |
+| `get_task` | Full task details (`id`); falls back to the archive, marking the result `archived: true` |
+| `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?`) |
+| `update_task` | Update fields (`id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?`) |
 | `start_task` | Set status to `in_progress` (`id`) |
 | `complete_task` | Set status to `done` (`id`) |
 | `cancel_task` | Set status to `cancelled` (`id`) |
-| `prune_tasks` | Delete cancelled tasks (`include_done?`) |
+| `prune_tasks` | Permanently delete cancelled tasks (`include_done?`) |
 | `add_dependency` | Add a dependency, cycle-safe (`id`, `depends_on`) |
 | `remove_dependency` | Remove a dependency (`id`, `depends_on`) |
 | `delete_task` | Permanently delete a task (`id`) |
-| `search_tasks` | Full-text search (`query`) |
-| `get_graph` | Adjacency list of all dependencies |
+| `search_tasks` | Full-text search (`query`, `limit?`, `active_only?`) |
+| `plan_epic` | An epic's child tasks in topological execution order (`id`) |
+| `get_graph` | Bounded dependency adjacency list (`include_done?`, `epic?`, `limit?`) |
+| `archive_task` | Archive a task (and settled children), or sweep all archivable tasks (`id?`) |
+| `restore_task` | Restore an archived task and its cascade (`id`) |
+| `list_archived` | List archived tasks, most recent first (`limit?`) |
 
 ### Register with Claude Code
 
@@ -298,20 +337,25 @@ All three of `fmt`, `clippy`, and `test` must pass cleanly before committing.
 
 ```
 src/
-  main.rs        Entry point — dispatch to CLI or MCP server
+  main.rs        Entry point — dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs       CLI module root and dispatch
     args.rs      clap command and argument definitions
-    cmd.rs       Command handlers (list, show, create, etc.)
+    cmd.rs       Command handlers (list, show, create, edit, graph, etc.)
   mcp/
     mod.rs       MCP module root and server setup
     params.rs    Tool parameter structs (serde + JSON Schema)
     tools.rs     MCP tool implementations and tests
-  service.rs     Business logic (create, update, epic progress, etc.)
-  store.rs       Read/write .bears/ directory
+  tui/           Interactive ratatui terminal UI (widgets, watcher, input)
+  service.rs     Business logic (create, update, reparent, epic auto-close, archive)
+  store.rs       Read/write .bears/ directory, incl. the archive layer
   task.rs        Task struct, frontmatter parse/render, ID & slug
   graph.rs       Dependency graph, ready computation, cycle detection
+  scaffold.rs    `bea init` harness scaffolding (Claude/Copilot/Codex)
   config.rs      .bears.yml configuration
+  editor.rs      $EDITOR integration for `bea edit`
   error.rs       Error types
+templates/       Embedded harness templates for init scaffolding
 .bears/          Task files (created by `bea init`)
+  archive/       Archived task files
 ```

@@ -445,6 +445,8 @@ mod tests {
         app.handle_key(make_key(KeyCode::Char('m')));
         assert_eq!(app.filter.list_mode, ListMode::Epics);
         app.handle_key(make_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.list_mode, ListMode::Completed);
+        app.handle_key(make_key(KeyCode::Char('m')));
         assert_eq!(app.filter.list_mode, ListMode::Archive);
         app.handle_key(make_key(KeyCode::Char('m')));
         assert_eq!(app.filter.list_mode, ListMode::All);

@@ -2,6 +2,29 @@ use crate::task::{self, Priority, Status, Task};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Return `true` if `task` is individually ready to work on.
+///
+/// A task is ready when:
+/// - its status is [`Status::Open`],
+/// - its type is a task (not an epic), and
+/// - every entry in `depends_on` resolves to a [`Status::Done`] task; a
+///   missing dependency is treated as **not done** and therefore blocks
+///   readiness.
+///
+/// This is the single canonical readiness predicate used by both
+/// [`Graph::ready`] and the TUI's Ready filter.
+pub fn is_task_ready(tasks: &HashMap<String, Task>, task: &Task) -> bool {
+    task.status == Status::Open
+        && task.task_type.is_task()
+        && task
+            .depends_on
+            .iter()
+            .all(|dep_id| match tasks.get(dep_id) {
+                Some(dep) => dep.status == Status::Done,
+                None => false, // missing dep blocks readiness
+            })
+}
+
 /// Dependency graph built from task `depends_on` fields.
 pub struct Graph {
     /// task_id -> set of task IDs it depends on
@@ -36,6 +59,9 @@ impl Graph {
     }
 
     /// Return tasks that are ready: status is Open and all dependencies are Done.
+    ///
+    /// Effective priorities are computed once in O(V+E) rather than per-task
+    /// inside the sort comparator.
     pub fn ready<'a>(
         &self,
         tasks: &'a HashMap<String, Task>,
@@ -43,26 +69,22 @@ impl Graph {
         limit: Option<usize>,
         epic: Option<&str>,
     ) -> Vec<&'a Task> {
+        let eff = self.effective_priorities_all(tasks);
+
         let mut result: Vec<&Task> = tasks
             .values()
-            .filter(|t| t.status == Status::Open)
-            .filter(|t| t.task_type.is_task()) // epics are not directly workable
-            .filter(|t| {
-                // All dependencies must be done
-                t.depends_on.iter().all(|dep_id| match tasks.get(dep_id) {
-                    Some(dep) => dep.status == Status::Done,
-                    None => false, // missing dep blocks readiness
-                })
-            })
+            .filter(|t| is_task_ready(tasks, t))
             .filter(|t| task::matches_tag(t, tag))
             .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
             .collect();
 
-        // Sort by effective priority (P0 first), then by creation date (oldest first)
-        let eff = self.effective_priorities(tasks);
+        // Sort by effective priority (P0 first), then by creation date (oldest first).
+        // The priority map was computed once above — no repeated BFS in the comparator.
         result.sort_by(|a, b| {
             eff.get(&a.id)
-                .cmp(&eff.get(&b.id))
+                .copied()
+                .unwrap_or(a.priority)
+                .cmp(&eff.get(&b.id).copied().unwrap_or(b.priority))
                 .then(a.created.cmp(&b.created))
         });
 
@@ -73,30 +95,101 @@ impl Graph {
         result
     }
 
-    /// Compute effective priorities for all tasks in a single pass.
+    /// Compute the effective priority of a single task.
+    /// This is the minimum (highest urgency) of the task's own priority and
+    /// the priorities of all tasks that depend on it, transitively.
     ///
-    /// A task's effective priority is the minimum (highest urgency) of its own
-    /// priority and the priorities of all tasks that transitively depend on it.
-    /// Computed by relaxation along dependency edges: priorities only ever
-    /// decrease, so this terminates even on cyclic (hand-edited) graphs.
-    pub fn effective_priorities(&self, tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
-        let mut eff: HashMap<String, Priority> =
-            tasks.values().map(|t| (t.id.clone(), t.priority)).collect();
+    /// For bulk computation prefer [`Graph::effective_priorities_all`] which
+    /// runs in O(V+E) instead of O(V+E) per call.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn effective_priority(&self, id: &str, tasks: &HashMap<String, Task>) -> Priority {
+        self.effective_priorities_all(tasks)
+            .remove(id)
+            .unwrap_or_else(|| tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3))
+    }
 
-        let mut queue: VecDeque<&str> = tasks.keys().map(String::as_str).collect();
-        while let Some(id) = queue.pop_front() {
-            let p = eff[id];
-            if let Some(deps) = self.edges.get(id) {
+    /// Compute effective priorities for ALL tasks in a single O(V+E) pass.
+    ///
+    /// `effective(x) = min(own(x), min over direct dependents y of effective(y))`
+    ///
+    /// We process nodes in reverse-topological order (dependents before their
+    /// dependencies) so that by the time we visit a node its dependents are
+    /// already resolved. Nodes that participate in a cycle are not reached by
+    /// the topological pass and keep their own priority as a safe fallback.
+    pub fn effective_priorities_all(
+        &self,
+        tasks: &HashMap<String, Task>,
+    ) -> HashMap<String, Priority> {
+        // --- Step 1: Kahn topological sort over *all* known nodes ---------------
+        // We sort forward along `edges` (A depends-on B → edge A→B).
+        // Collect every node id from both maps.
+        let all_ids: HashSet<&str> = self
+            .edges
+            .keys()
+            .chain(self.reverse.keys())
+            .map(String::as_str)
+            .collect();
+
+        // in_degree counts how many dependencies each node has (intra-graph only).
+        let mut in_degree: HashMap<&str, usize> = all_ids.iter().map(|&id| (id, 0)).collect();
+        for id in &all_ids {
+            if let Some(deps) = self.edges.get(*id) {
                 for dep in deps {
-                    if let Some(dep_eff) = eff.get_mut(dep.as_str())
-                        && p < *dep_eff
-                    {
-                        *dep_eff = p;
-                        queue.push_back(dep.as_str());
+                    if all_ids.contains(dep.as_str()) {
+                        *in_degree.entry(id).or_default() += 1;
                     }
                 }
             }
         }
+
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut topo_order: Vec<&str> = Vec::with_capacity(all_ids.len());
+        while let Some(current) = queue.pop_front() {
+            topo_order.push(current);
+            if let Some(dependents) = self.reverse.get(current) {
+                for dep in dependents {
+                    if let Some(d) = in_degree.get_mut(dep.as_str()) {
+                        *d -= 1;
+                        if *d == 0 {
+                            queue.push_back(dep.as_str());
+                        }
+                    }
+                }
+            }
+        }
+        // Any id not reached by Kahn's is in a cycle — will use own priority.
+
+        // --- Step 2: propagate in reverse-topological order ---------------------
+        // Process dependents first (end of topo_order) down to dependencies (start).
+        let mut eff: HashMap<String, Priority> = HashMap::with_capacity(all_ids.len());
+
+        // Seed: every node starts with its own priority.
+        for &id in &all_ids {
+            let own = tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3);
+            eff.insert(id.to_string(), own);
+        }
+
+        // Walk in reverse topological order: process dependents before dependencies.
+        for &id in topo_order.iter().rev() {
+            // Collect the best priority among all direct dependents of `id`.
+            let best_dependent: Option<Priority> = self
+                .reverse
+                .get(id)
+                .into_iter()
+                .flat_map(|s| s.iter())
+                .filter_map(|dep_id| eff.get(dep_id.as_str()).copied())
+                .min();
+
+            if let Some(best) = best_dependent {
+                let entry = eff.entry(id.to_string()).or_insert(Priority::P3);
+                *entry = (*entry).min(best);
+            }
+        }
+
         eff
     }
 
@@ -131,10 +224,17 @@ impl Graph {
     }
 
     /// Build a dependency tree for display.
-    /// Cycle-safe: nodes already on the current path are emitted as leaf markers.
+    ///
+    /// Uses two sets to bound rendering:
+    /// - `visiting` (path-local): cycle detection — a node on the current
+    ///   recursion path is emitted as a leaf with `cycle: true`.
+    /// - `seen` (render-global): DAG deduplication — a node already fully
+    ///   expanded on *any* earlier path is emitted as a leaf with `seen: true`
+    ///   (and no children), preventing exponential blowup on diamond shapes.
     pub fn dep_tree<'a>(&self, tasks: &'a HashMap<String, Task>, id: &str) -> Option<DepNode<'a>> {
-        let mut visited = HashSet::new();
-        self.dep_tree_inner(tasks, id, &mut visited)
+        let mut visiting = HashSet::new();
+        let mut seen = HashSet::new();
+        self.dep_tree_inner(tasks, id, &mut visiting, &mut seen)
     }
 
     fn dep_tree_inner<'a>(
@@ -142,22 +242,36 @@ impl Graph {
         tasks: &'a HashMap<String, Task>,
         id: &str,
         visiting: &mut HashSet<String>,
+        seen: &mut HashSet<String>,
     ) -> Option<DepNode<'a>> {
         let task = tasks.get(id)?;
 
         if !visiting.insert(id.to_string()) {
-            // Already on the current recursion path — cycle detected
+            // Already on the current recursion path — cycle detected.
             return Some(DepNode {
                 task,
                 children: Vec::new(),
                 cycle: true,
+                seen: false,
+            });
+        }
+
+        if !seen.insert(id.to_string()) {
+            // Already fully expanded on an earlier path — emit a reference leaf
+            // to avoid re-expanding (prevents exponential blowup on diamonds).
+            visiting.remove(id);
+            return Some(DepNode {
+                task,
+                children: Vec::new(),
+                cycle: false,
+                seen: true,
             });
         }
 
         let children = task
             .depends_on
             .iter()
-            .filter_map(|dep_id| self.dep_tree_inner(tasks, dep_id, visiting))
+            .filter_map(|dep_id| self.dep_tree_inner(tasks, dep_id, visiting, seen))
             .collect();
 
         visiting.remove(id);
@@ -166,6 +280,7 @@ impl Graph {
             task,
             children,
             cycle: false,
+            seen: false,
         })
     }
 
@@ -198,17 +313,33 @@ impl Graph {
             }
         }
 
-        // Seed with zero-in-degree nodes, sorted by priority then created
-        let mut queue: Vec<&str> = in_degree
+        // Seed with zero-in-degree nodes, sorted by priority then created.
+        // Use VecDeque for O(1) front-pop (Vec::remove(0) is O(n)).
+        // NOTE: newly-ready nodes are sorted among themselves and appended to the
+        // back of the queue rather than merged into the existing entries, so the
+        // overall ordering is only approximately priority-sorted when independent
+        // batches interleave. This is intentional: the fully-correct merge would
+        // require a priority-queue rebuild on every step and is not worth the
+        // complexity for the plan display use-case.
+        let mut seed: Vec<&str> = in_degree
             .iter()
             .filter(|&(_, deg)| *deg == 0)
             .map(|(&id, _)| id)
             .collect();
-        queue.sort_by(|a, b| compare_ids(tasks, a, b));
-
+        seed.sort_by(|a, b| {
+            let ta = tasks.get(*a);
+            let tb = tasks.get(*b);
+            match (ta, tb) {
+                (Some(ta), Some(tb)) => ta
+                    .priority
+                    .cmp(&tb.priority)
+                    .then(ta.created.cmp(&tb.created)),
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+        let mut queue: VecDeque<&str> = seed.into_iter().collect();
         let mut result: Vec<&'a Task> = Vec::new();
-        while !queue.is_empty() {
-            let current = queue.remove(0);
+        while let Some(current) = queue.pop_front() {
             if let Some(task) = tasks.get(current) {
                 result.push(task);
             }
@@ -226,8 +357,18 @@ impl Graph {
                         }
                     }
                 }
-                // Sort newly ready by priority then created
-                newly_ready.sort_by(|a, b| compare_ids(tasks, a, b));
+                // Sort newly ready by priority then created before appending
+                newly_ready.sort_by(|a, b| {
+                    let ta = tasks.get(*a);
+                    let tb = tasks.get(*b);
+                    match (ta, tb) {
+                        (Some(ta), Some(tb)) => ta
+                            .priority
+                            .cmp(&tb.priority)
+                            .then(ta.created.cmp(&tb.created)),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
                 queue.extend(newly_ready);
             }
         }
@@ -239,7 +380,7 @@ impl Graph {
             .filter(|id| !sorted_ids.contains(id.as_str()))
             .filter_map(|id| tasks.get(id))
             .collect();
-        cyclic.sort_by(|a, b| task::priority_then_created(a, b));
+        cyclic.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
         SubsetTopo {
             sorted: result,
@@ -247,7 +388,8 @@ impl Graph {
         }
     }
 
-    /// Get adjacency list for JSON output.
+    /// Get adjacency list for JSON output (full, unfiltered).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn adjacency_list(&self) -> HashMap<&str, Vec<&str>> {
         self.edges
             .iter()
@@ -257,13 +399,82 @@ impl Graph {
             })
             .collect()
     }
-}
 
-/// Canonical task ordering applied to task IDs (unknown IDs compare equal).
-fn compare_ids(tasks: &HashMap<String, Task>, a: &str, b: &str) -> std::cmp::Ordering {
-    match (tasks.get(a), tasks.get(b)) {
-        (Some(ta), Some(tb)) => task::priority_then_created(ta, tb),
-        _ => std::cmp::Ordering::Equal,
+    /// Get a bounded adjacency list suitable for MCP/JSON output.
+    ///
+    /// Excludes:
+    /// - Done/cancelled tasks by default (unless `include_done` is true)
+    /// - Isolated nodes that have no dependencies and no dependents within
+    ///   the included set
+    ///
+    /// Optional filters:
+    /// - `epic`: include only children of the given epic ID (plus the epic itself)
+    /// - `limit`: cap the number of nodes in the output
+    pub fn bounded_adjacency_list<'a>(
+        &'a self,
+        tasks: &'a HashMap<String, Task>,
+        include_done: bool,
+        epic: Option<&str>,
+        limit: Option<usize>,
+    ) -> HashMap<&'a str, Vec<&'a str>> {
+        use crate::task::Status;
+
+        // Step 1: build the eligible node set
+        let eligible: HashSet<&str> = tasks
+            .values()
+            .filter(|t| {
+                // Status filter
+                if !include_done && (t.status == Status::Done || t.status == Status::Cancelled) {
+                    return false;
+                }
+                // Epic filter: if specified, include only direct children + the epic itself
+                if let Some(e) = epic {
+                    return t.id == e || t.parent.as_deref() == Some(e);
+                }
+                true
+            })
+            .map(|t| t.id.as_str())
+            .collect();
+
+        // Step 2: compute intra-eligible edges
+        // A node is connected if it has at least one dep or dependent within eligible set
+        let mut connected: HashSet<&str> = HashSet::new();
+        for &id in &eligible {
+            if let Some(deps) = self.edges.get(id) {
+                for dep in deps {
+                    if eligible.contains(dep.as_str()) {
+                        connected.insert(id);
+                        connected.insert(dep.as_str());
+                    }
+                }
+            }
+        }
+
+        // Step 3: build adjacency map for connected nodes only
+        let mut result: Vec<(&str, Vec<&str>)> = connected
+            .iter()
+            .map(|&id| {
+                let deps: Vec<&str> = self
+                    .edges
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|s| s.iter())
+                    .filter(|dep| eligible.contains(dep.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+                (id, deps)
+            })
+            .collect();
+
+        // Sort deterministically by id for stable output
+        result.sort_by_key(|(id, _)| *id);
+
+        // Apply limit
+        if let Some(limit) = limit {
+            result.truncate(limit);
+        }
+
+        result.into_iter().collect()
     }
 }
 
@@ -279,8 +490,11 @@ pub struct SubsetTopo<'a> {
 pub struct DepNode<'a> {
     pub task: &'a Task,
     pub children: Vec<DepNode<'a>>,
-    /// True when this node was already seen on the current path (cycle).
+    /// True when this node was already seen on the **current path** (cycle).
     pub cycle: bool,
+    /// True when this node was already fully expanded on an **earlier path**
+    /// (DAG diamond deduplication). Distinct from `cycle`.
+    pub seen: bool,
 }
 
 #[derive(Serialize)]
@@ -292,6 +506,8 @@ pub struct DepNodeJson {
     pub children: Vec<DepNodeJson>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cycle: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
 }
 
 impl DepNodeJson {
@@ -307,6 +523,7 @@ impl DepNodeJson {
                 .map(DepNodeJson::from_dep_node)
                 .collect(),
             cycle: node.cycle,
+            seen: node.seen,
         }
     }
 }
@@ -455,6 +672,97 @@ mod tests {
         assert_eq!(ready.len(), 3);
     }
 
+    // --- is_task_ready predicate tests -------------------------------------------
+
+    #[test]
+    fn test_is_task_ready_no_deps() {
+        let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
+        assert!(is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_dep_done() {
+        let tasks = make_tasks(vec![
+            make_task("dep", Status::Done, Priority::P1, vec![]),
+            make_task("a", Status::Open, Priority::P1, vec!["dep"]),
+        ]);
+        assert!(is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_dep_not_done() {
+        let tasks = make_tasks(vec![
+            make_task("dep", Status::Open, Priority::P1, vec![]),
+            make_task("a", Status::Open, Priority::P1, vec!["dep"]),
+        ]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_missing_dep_blocks() {
+        // A dep that does not exist in the task map blocks readiness.
+        let tasks = make_tasks(vec![make_task(
+            "a",
+            Status::Open,
+            Priority::P1,
+            vec!["nonexistent"],
+        )]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_excludes_epics() {
+        let mut epic = make_task("e", Status::Open, Priority::P0, vec![]);
+        epic.task_type = TaskType::Epic;
+        let tasks = make_tasks(vec![epic]);
+        assert!(!is_task_ready(&tasks, tasks.get("e").unwrap()));
+    }
+
+    #[test]
+    fn test_is_task_ready_excludes_non_open() {
+        let tasks = make_tasks(vec![make_task(
+            "a",
+            Status::InProgress,
+            Priority::P1,
+            vec![],
+        )]);
+        assert!(!is_task_ready(&tasks, tasks.get("a").unwrap()));
+    }
+
+    /// Verify that `Graph::ready` and `is_task_ready` agree on every task:
+    /// every task in the ready list satisfies the predicate and vice-versa.
+    #[test]
+    fn test_ready_and_is_task_ready_agree() {
+        let tasks = make_tasks(vec![
+            // t1: open, no deps → ready
+            make_task("t1", Status::Open, Priority::P1, vec![]),
+            // t2: open, dep on t1 (open, not done) → NOT ready
+            make_task("t2", Status::Open, Priority::P1, vec!["t1"]),
+            // t3: open, dep on t4 (done) → ready
+            make_task("t3", Status::Open, Priority::P1, vec!["t4"]),
+            // t4: done → not in ready list (not Open)
+            make_task("t4", Status::Done, Priority::P1, vec![]),
+            // t5: open, dep on "ghost" (missing) → NOT ready
+            make_task("t5", Status::Open, Priority::P1, vec!["ghost"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let ready_ids: std::collections::HashSet<&str> = graph
+            .ready(&tasks, None, None, None)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+
+        for task in tasks.values() {
+            let predicate = is_task_ready(&tasks, task);
+            let in_ready = ready_ids.contains(task.id.as_str());
+            assert_eq!(
+                predicate, in_ready,
+                "is_task_ready and graph.ready disagree on task '{}'",
+                task.id
+            );
+        }
+    }
+
     #[test]
     fn test_cycle_self() {
         let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P1, vec![])]);
@@ -529,6 +837,44 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_adjacency_list_excludes_done_and_isolated() {
+        // Graph:
+        //   a (open) -> b (open)   ← connected pair
+        //   c (done)               ← isolated done node
+        //   d (open, isolated)     ← isolated open node
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec![]),
+            make_task("c", Status::Done, Priority::P1, vec![]),
+            make_task("d", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+
+        // Default: exclude done, exclude isolated
+        let adj = graph.bounded_adjacency_list(&tasks, false, None, None);
+        assert!(adj.contains_key("a"), "connected open node a should appear");
+        assert!(adj.contains_key("b"), "connected open node b should appear");
+        assert!(!adj.contains_key("c"), "done node c should be excluded");
+        assert!(
+            !adj.contains_key("d"),
+            "isolated open node d should be excluded"
+        );
+
+        // include_done=true: c is now eligible but still isolated → excluded
+        let adj_all = graph.bounded_adjacency_list(&tasks, true, None, None);
+        assert!(adj_all.contains_key("a"));
+        assert!(adj_all.contains_key("b"));
+        assert!(
+            !adj_all.contains_key("c"),
+            "isolated done node c excluded even with include_done=true"
+        );
+        assert!(
+            !adj_all.contains_key("d"),
+            "isolated open node d still excluded with include_done=true"
+        );
+    }
+
+    #[test]
     fn test_dep_tree_direct_cycle() {
         // a -> b -> a  (direct cycle)
         let tasks = make_tasks(vec![
@@ -587,7 +933,9 @@ mod tests {
 
     #[test]
     fn test_dep_tree_no_cycle() {
-        // Diamond: a -> b, a -> c, b -> d, c -> d (no cycle — d appears twice but not cyclic)
+        // Diamond: a -> b, a -> c, b -> d, c -> d (no cycle).
+        // With DAG deduplication, d is fully expanded under the FIRST child that
+        // visits it and emitted as a `seen` reference leaf under the second.
         let tasks = make_tasks(vec![
             make_task("a", Status::Open, Priority::P1, vec!["b", "c"]),
             make_task("b", Status::Open, Priority::P1, vec!["d"]),
@@ -597,14 +945,35 @@ mod tests {
         let graph = Graph::build(&tasks);
         let tree = graph.dep_tree(&tasks, "a").unwrap();
         assert!(!tree.cycle);
-        // d should appear under both b and c, and neither should be marked as cycle
+        assert!(!tree.seen);
+        // Both b and c appear under a (neither is cycle or seen at that level)
+        assert_eq!(tree.children.len(), 2);
         for child in &tree.children {
             assert!(!child.cycle);
-            for grandchild in &child.children {
-                assert_eq!(grandchild.task.id, "d");
-                assert!(!grandchild.cycle);
-            }
+            // Each should have exactly one child for d
+            assert_eq!(child.children.len(), 1);
+            let d_node = &child.children[0];
+            assert_eq!(d_node.task.id, "d");
+            assert!(!d_node.cycle);
+            // d is expanded fully the first time; second occurrence is `seen`
         }
+        // Exactly one of the two d appearances is seen (the second visit)
+        let d_nodes: Vec<_> = tree
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .collect();
+        assert_eq!(d_nodes.len(), 2);
+        let seen_count = d_nodes.iter().filter(|n| n.seen).count();
+        let full_count = d_nodes.iter().filter(|n| !n.seen && !n.cycle).count();
+        assert_eq!(
+            seen_count, 1,
+            "exactly one d occurrence should be a seen-ref"
+        );
+        assert_eq!(
+            full_count, 1,
+            "exactly one d occurrence should be fully expanded"
+        );
     }
 
     #[test]
@@ -612,7 +981,7 @@ mod tests {
         // Task with no dependents: effective == own
         let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P3, vec![])]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P3);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P3);
     }
 
     #[test]
@@ -624,9 +993,9 @@ mod tests {
             make_task("b", Status::Open, Priority::P1, vec!["a"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P1);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P1);
         // b has no dependents, so effective == own
-        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P1);
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P1);
     }
 
     #[test]
@@ -639,9 +1008,9 @@ mod tests {
             make_task("c", Status::Open, Priority::P0, vec!["b"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
-        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P0);
-        assert_eq!(graph.effective_priorities(&tasks)["c"], Priority::P0);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
     }
 
     #[test]
@@ -655,9 +1024,9 @@ mod tests {
             make_task("d", Status::Open, Priority::P0, vec!["b", "c"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
-        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P0);
-        assert_eq!(graph.effective_priorities(&tasks)["c"], Priority::P0);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
     }
 
     #[test]
@@ -668,7 +1037,7 @@ mod tests {
             make_task("b", Status::Open, Priority::P3, vec!["a"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
+        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
     }
 
     #[test]
@@ -771,5 +1140,248 @@ mod tests {
         let subset: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         let sorted = graph.topo_sort_subset(&subset, &tasks).sorted;
         assert_eq!(sorted.len(), 2);
+    }
+
+    // --- Coupled-graph regression guards ------------------------------------------
+    //
+    // Fast structural tests (always run) verify that algorithmic fixes hold for
+    // small representative graphs without any timing dependency.
+    //
+    // Heavy timing tests are marked `#[ignore]` and must be run explicitly with
+    //   cargo test -- --ignored
+    // They use std::time::Instant with generous bounds; any reasonable hardware
+    // should satisfy them.
+
+    fn count_nodes(node: &DepNode<'_>) -> usize {
+        1 + node.children.iter().map(count_nodes).sum::<usize>()
+    }
+
+    /// Fast structural check: effective priorities on a long chain are correct.
+    /// If effective_priorities_all were O(V²) or O(V*E), the values would still
+    /// be correct but the large graph below would timeout — this test documents
+    /// expected values on a chain without relying on timing.
+    #[test]
+    fn test_effective_priority_long_chain_correct() {
+        // Build chain: t0 <- t1 <- t2 <- ... <- t19
+        // t19 has priority P0; all others have P3.
+        // effective(t0) should be P0 (propagated from t19 through the chain).
+        let n = 20usize;
+        let mut task_list = Vec::new();
+        for i in 0..n {
+            let priority = if i == n - 1 {
+                Priority::P0
+            } else {
+                Priority::P3
+            };
+            task_list.push(make_task(&format!("t{i}"), Status::Open, priority, vec![]));
+        }
+        // Wire chain: t_{i+1} depends on t_i
+        for i in 0..n - 1 {
+            task_list[i + 1].depends_on = vec![format!("t{i}")];
+        }
+        let tasks = make_tasks(task_list);
+        let graph = Graph::build(&tasks);
+
+        // effective(t0) must be P0 (t19 depends transitively on t0's output)
+        let eff = graph.effective_priorities_all(&tasks);
+        assert_eq!(
+            eff["t0"],
+            Priority::P0,
+            "t0 effective priority should be P0"
+        );
+        assert_eq!(
+            eff["t9"],
+            Priority::P0,
+            "t9 effective priority should be P0"
+        );
+        // t19 has own P0
+        assert_eq!(eff["t19"], Priority::P0);
+    }
+
+    #[test]
+    fn test_dep_tree_deep_diamond_linear_node_count() {
+        // Build a "double-fan" diamond: root depends on L layers, each layer
+        // node depends on all nodes in the next layer, converging to a single
+        // shared leaf at the bottom.
+        //
+        //   root
+        //    |
+        //   L1a, L1b          (both depend on L2a, L2b)
+        //       |
+        //   L2a, L2b          (both depend on leaf)
+        //       |
+        //    leaf
+        //
+        // Without deduplication the tree would expand leaf 4 times (2^2).
+        // With the `seen` fix it appears at most once as a full node plus
+        // `seen`-ref placeholders — total node count stays bounded by O(V+E).
+        let tasks = make_tasks(vec![
+            make_task("root", Status::Open, Priority::P1, vec!["l1a", "l1b"]),
+            make_task("l1a", Status::Open, Priority::P1, vec!["l2a", "l2b"]),
+            make_task("l1b", Status::Open, Priority::P1, vec!["l2a", "l2b"]),
+            make_task("l2a", Status::Open, Priority::P1, vec!["leaf"]),
+            make_task("l2b", Status::Open, Priority::P1, vec!["leaf"]),
+            make_task("leaf", Status::Open, Priority::P1, vec![]),
+        ]);
+        let graph = Graph::build(&tasks);
+        let tree = graph.dep_tree(&tasks, "root").unwrap();
+
+        // 6 distinct nodes → maximum rendered nodes = 6 (V) + 4 (E where
+        // second-visit refs are emitted) = at most V+E = 10. In practice we
+        // get exactly V + (number of seen-ref appearances) which is at most
+        // V+E, well below the exponential 2^layers.
+        let node_count = count_nodes(&tree);
+        let v = tasks.len(); // 6
+        let e: usize = tasks.values().map(|t| t.depends_on.len()).sum(); // 8
+        assert!(
+            node_count <= v + e,
+            "node_count={node_count} exceeded V+E={} — exponential blowup detected",
+            v + e
+        );
+    }
+
+    // --- #[ignore]'d timing benchmarks (run with: cargo test -- --ignored) --------
+    //
+    // These build a densely coupled graph of N tasks and assert that the key
+    // operations complete well within a generous wall-clock bound. They are
+    // `#[ignore]` to avoid slowing down the default `cargo test` run.
+
+    /// Build N tasks wired as a full "staircase": task i depends on task i-1,
+    /// plus every 5th task depends on a shared "bottom" task.
+    fn make_dense_tasks(n: usize) -> HashMap<String, Task> {
+        let mut list = Vec::with_capacity(n + 1);
+        // Shared bottom-of-chain task
+        list.push(make_task("bottom", Status::Done, Priority::P2, vec![]));
+        for i in 0..n {
+            let id = format!("t{i:04}");
+            let priority = if i % 10 == 0 {
+                Priority::P0
+            } else {
+                Priority::P3
+            };
+            list.push(make_task(&id, Status::Open, priority, vec![]));
+        }
+        // Wire dependencies after creation (make_task takes &str slice)
+        let mut map: HashMap<String, Task> = list.into_iter().map(|t| (t.id.clone(), t)).collect();
+        for i in 0..n {
+            let id = format!("t{i:04}");
+            let mut deps = vec!["bottom".to_string()];
+            if i > 0 {
+                deps.push(format!("t{:04}", i - 1));
+            }
+            map.get_mut(&id).unwrap().depends_on = deps;
+        }
+        map
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_effective_priorities_large_graph() {
+        // 500-node staircase — each node depends on 1-2 predecessors.
+        // effective_priorities_all should finish in well under 1 second.
+        let n = 500;
+        let tasks = make_dense_tasks(n);
+        let graph = Graph::build(&tasks);
+
+        let start = std::time::Instant::now();
+        let eff = graph.effective_priorities_all(&tasks);
+        let elapsed = start.elapsed();
+
+        assert_eq!(eff.len(), n + 1); // n tasks + bottom
+        assert!(
+            elapsed.as_millis() < 500,
+            "effective_priorities_all on {n} tasks took {}ms (expected <500ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_ready_large_graph() {
+        // 500-node staircase. Only t0000 is truly ready (all deps done = bottom only).
+        // Graph::ready should finish in well under 1 second.
+        let n = 500;
+        let tasks = make_dense_tasks(n);
+        let graph = Graph::build(&tasks);
+
+        let start = std::time::Instant::now();
+        let ready = graph.ready(&tasks, None, None, None);
+        let elapsed = start.elapsed();
+
+        // t0000 depends only on "bottom" (done), so it must be ready
+        assert!(
+            ready.iter().any(|t| t.id == "t0000"),
+            "t0000 should be in the ready list"
+        );
+        assert!(
+            elapsed.as_millis() < 500,
+            "graph.ready on {n} tasks took {}ms (expected <500ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_dep_tree_diamond_deep() {
+        // Build a deep 6-layer binary diamond: layer 0 → layer 1 (×2) → ... → layer 5 (1 node).
+        // Without the `seen` fix this would be exponential (2^5 = 32 leaf expansions).
+        // With the fix, node count should stay linear in V+E.
+        let layers = 6usize;
+        // layer 0: 1 node (root)
+        // layer k: 2^k nodes, each depending on all nodes in layer k+1
+        // layer 5: 1 node (shared leaf)
+        // We'll use owned ids; can't use &str in make_task with dynamic strings directly.
+        // Build manually.
+        let mut map: HashMap<String, Task> = HashMap::new();
+        let root = make_task("root", Status::Open, Priority::P1, vec![]);
+        map.insert("root".to_string(), root);
+
+        let mut layer_ids: Vec<Vec<String>> = Vec::new();
+        // layer 0 = root
+        layer_ids.push(vec!["root".to_string()]);
+        // layers 1..=layers-1
+        for l in 1..layers {
+            let count = if l == layers - 1 {
+                1
+            } else {
+                2usize.pow(l as u32)
+            };
+            let ids: Vec<String> = (0..count).map(|i| format!("l{l}_{i}")).collect();
+            layer_ids.push(ids);
+        }
+
+        // Create all tasks (no deps yet)
+        for ids in &layer_ids {
+            for id in ids {
+                let t = make_task(id, Status::Open, Priority::P1, vec![]);
+                map.insert(id.clone(), t);
+            }
+        }
+        // Wire: each node in layer l depends on all nodes in layer l+1
+        for l in 0..layers - 1 {
+            let next = layer_ids[l + 1].clone();
+            for id in &layer_ids[l] {
+                map.get_mut(id).unwrap().depends_on = next.clone();
+            }
+        }
+
+        let graph = Graph::build(&map);
+        let start = std::time::Instant::now();
+        let tree = graph.dep_tree(&map, "root").unwrap();
+        let elapsed = start.elapsed();
+
+        let node_count = count_nodes(&tree);
+        let v = map.len();
+        let e: usize = map.values().map(|t| t.depends_on.len()).sum();
+        assert!(
+            node_count <= v + e,
+            "node_count={node_count} exceeded V+E={} — exponential blowup",
+            v + e
+        );
+        assert!(
+            elapsed.as_millis() < 500,
+            "dep_tree on {layers}-layer diamond took {}ms (expected <500ms)",
+            elapsed.as_millis()
+        );
     }
 }

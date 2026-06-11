@@ -23,6 +23,10 @@ pub struct ListTasksFilterParams {
     pub tag: Option<String>,
     /// Filter by parent epic ID
     pub epic: Option<String>,
+    /// Max number of results
+    pub limit: Option<u64>,
+    /// Exclude done and cancelled tasks (default: false — show all)
+    pub active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -54,6 +58,8 @@ pub struct CreateTaskParams {
 pub struct UpdateTaskParams {
     /// Task ID
     pub id: String,
+    /// New title
+    pub title: Option<String>,
     /// New status
     pub status: Option<Status>,
     /// New priority
@@ -64,6 +70,8 @@ pub struct UpdateTaskParams {
     pub assignee: Option<String>,
     /// New body (markdown)
     pub body: Option<String>,
+    /// Set parent epic ID (use empty string "" to clear parent)
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -78,10 +86,49 @@ pub struct DepParams {
 pub struct SearchParams {
     /// Search query
     pub query: String,
+    /// Max number of results
+    pub limit: Option<u64>,
+    /// Exclude done and cancelled tasks (default: false — show all)
+    pub active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PruneParams {
-    /// Also delete done tasks (default: only cancelled)
+    /// Also permanently delete done tasks (default: only cancelled).
+    /// Prefer archive_task (no id) over prune_tasks to preserve history.
     pub include_done: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PlanEpicParams {
+    /// Epic task ID
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetGraphParams {
+    /// Include done and cancelled tasks (default: false)
+    pub include_done: Option<bool>,
+    /// Filter to direct children of a given epic ID
+    pub epic: Option<String>,
+    /// Max number of nodes to return
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArchiveTaskParams {
+    /// Task ID or prefix to archive. Omit to sweep all archivable tasks.
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RestoreTaskParams {
+    /// Archived task ID or prefix to restore
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListArchivedParams {
+    /// Max number of archived tasks to return (most recently updated first)
+    pub limit: Option<u64>,
 }
