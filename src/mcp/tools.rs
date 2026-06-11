@@ -3,13 +3,11 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::error::Error;
-use crate::service;
-use crate::store;
-use crate::task::{self, Priority, Status};
+use crate::service::{self, NewTask, UpdateFields};
+use crate::task::Priority;
 
 use super::params::*;
-use super::{BeaMcp, ok_json, parse_priority, parse_status, tool_ok};
+use super::{BeaMcp, ok_json};
 
 #[tool_router]
 impl BeaMcp {
@@ -18,22 +16,18 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<ListReadyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let limit = params.limit.map(|v| v as usize);
-                let ready = service::list_ready(
-                    &tasks,
-                    params.tag.as_deref(),
-                    limit,
-                    params.epic.as_deref(),
-                );
-                let eff = service::effective_priorities(&tasks);
-                let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-                ok_json(serde_json::json!(summaries))
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let ready = service::list_ready(
+                &tasks,
+                params.tag.as_deref(),
+                params.limit.map(|v| v as usize),
+                params.epic.as_deref(),
+            );
+            let eff = service::effective_priorities(&tasks);
+            let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+            ok_json(&summaries)
+        })
+        .await
     }
 
     #[tool(description = "List tasks with optional filters")]
@@ -41,26 +35,20 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<ListTasksFilterParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let status = params.status.as_deref().map(parse_status).transpose()?;
-                let priority = params.priority.as_deref().map(parse_priority).transpose()?;
-                let filtered = service::list_tasks(
-                    &tasks,
-                    status,
-                    priority,
-                    params.tag.as_deref(),
-                    true, // MCP always shows all statuses unless filtered
-                    params.epic.as_deref(),
-                );
-                let eff = service::effective_priorities(&tasks);
-                let summaries: Vec<_> =
-                    filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-                ok_json(serde_json::json!(summaries))
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let filtered = service::list_tasks(
+                &tasks,
+                params.status,
+                params.priority,
+                params.tag.as_deref(),
+                true, // MCP always shows all statuses unless filtered
+                params.epic.as_deref(),
+            );
+            let eff = service::effective_priorities(&tasks);
+            let summaries: Vec<_> = filtered.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+            ok_json(&summaries)
+        })
+        .await
     }
 
     #[tool(description = "Get full details of a single task")]
@@ -68,16 +56,12 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t = service::get_task(&tasks, &params.id)?;
-                let eff = service::effective_priorities(&tasks);
-                let ep = eff.get(&t.id);
-                ok_json(serde_json::to_value(t.detail(ep))?)
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let t = service::get_task(&tasks, &params.id)?;
+            let eff = service::effective_priorities(&tasks);
+            ok_json(&t.detail(eff.get(&t.id)))
+        })
+        .await
     }
 
     #[tool(description = "Create a new task")]
@@ -85,43 +69,20 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let priority = params
-                    .priority
-                    .as_deref()
-                    .map(parse_priority)
-                    .transpose()?
-                    .unwrap_or(Priority::P2);
-
-                let task_type = params
-                    .task_type
-                    .as_deref()
-                    .map(|s| s.parse::<task::TaskType>())
-                    .transpose()
-                    .map_err(|e| Error::InvalidFilter {
-                        field: "type".into(),
-                        value: e.clone(),
-                        expected: "task, epic".into(),
-                    })?
-                    .unwrap_or_default();
-
-                let t = service::create_task(
-                    &self.base,
-                    &tasks,
-                    params.title,
-                    priority,
-                    params.tags.unwrap_or_default(),
-                    params.depends_on.unwrap_or_default(),
-                    params.parent,
-                    params.body.unwrap_or_default(),
-                    task_type,
-                )?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let new = NewTask {
+                priority: params.priority.unwrap_or(Priority::P2),
+                tags: params.tags.unwrap_or_default(),
+                depends_on: params.depends_on.unwrap_or_default(),
+                parent: params.parent,
+                body: params.body.unwrap_or_default(),
+                task_type: params.task_type.unwrap_or_default(),
+                ..NewTask::new(params.title)
+            };
+            let t = service::create_task(&self.base, &tasks, new)?;
+            ok_json(&t.summary(None))
+        })
+        .await
     }
 
     #[tool(description = "Update task fields")]
@@ -129,26 +90,19 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let status = params.status.as_deref().map(parse_status).transpose()?;
-                let priority = params.priority.as_deref().map(parse_priority).transpose()?;
-                let t = service::update_task(
-                    &self.base,
-                    &tasks,
-                    &params.id,
-                    status,
-                    priority,
-                    params.tags,
-                    params.assignee,
-                    params.body,
-                    None, // MCP doesn't support title update currently
-                )?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let fields = UpdateFields {
+                status: params.status,
+                priority: params.priority,
+                tags: params.tags,
+                assignee: params.assignee,
+                body: params.body,
+                title: None, // MCP doesn't support title update currently
+            };
+            let t = service::update_task(&self.base, &tasks, &params.id, fields)?;
+            ok_json(&t.summary(None))
+        })
+        .await
     }
 
     #[tool(description = "Start a task (set status to in_progress)")]
@@ -156,14 +110,8 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t = service::set_status(&self.base, &tasks, &params.id, Status::InProgress)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
+        self.set_status_tool(&params.id, crate::task::Status::InProgress)
+            .await
     }
 
     #[tool(description = "Complete a task (set status to done)")]
@@ -171,62 +119,8 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t = service::set_status(&self.base, &tasks, &params.id, Status::Done)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
-    }
-
-    #[tool(description = "Add a dependency between tasks")]
-    async fn add_dependency(
-        &self,
-        Parameters(params): Parameters<DepParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t =
-                    service::add_dependency(&self.base, &tasks, &params.id, &params.depends_on)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
-    }
-
-    #[tool(description = "Remove a dependency between tasks")]
-    async fn remove_dependency(
-        &self,
-        Parameters(params): Parameters<DepParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t =
-                    service::remove_dependency(&self.base, &tasks, &params.id, &params.depends_on)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
-    }
-
-    #[tool(description = "Search tasks by text query")]
-    async fn search_tasks(
-        &self,
-        Parameters(params): Parameters<SearchParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let results = service::search_tasks(&tasks, &params.query, true);
-                let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
-                ok_json(serde_json::json!(summaries))
-            }
-            .await,
-        )
+        self.set_status_tool(&params.id, crate::task::Status::Done)
+            .await
     }
 
     #[tool(description = "Cancel a task (set status to cancelled)")]
@@ -234,14 +128,45 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t = service::set_status(&self.base, &tasks, &params.id, Status::Cancelled)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
+        self.set_status_tool(&params.id, crate::task::Status::Cancelled)
+            .await
+    }
+
+    #[tool(description = "Add a dependency between tasks")]
+    async fn add_dependency(
+        &self,
+        Parameters(params): Parameters<DepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.with_tasks(|tasks| {
+            let t = service::add_dependency(&self.base, &tasks, &params.id, &params.depends_on)?;
+            ok_json(&t.summary(None))
+        })
+        .await
+    }
+
+    #[tool(description = "Remove a dependency between tasks")]
+    async fn remove_dependency(
+        &self,
+        Parameters(params): Parameters<DepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.with_tasks(|tasks| {
+            let t = service::remove_dependency(&self.base, &tasks, &params.id, &params.depends_on)?;
+            ok_json(&t.summary(None))
+        })
+        .await
+    }
+
+    #[tool(description = "Search tasks by text query")]
+    async fn search_tasks(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.with_tasks(|tasks| {
+            let results = service::search_tasks(&tasks, &params.query, true);
+            let summaries: Vec<_> = results.iter().map(|t| t.summary(None)).collect();
+            ok_json(&summaries)
+        })
+        .await
     }
 
     #[tool(
@@ -251,16 +176,13 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<PruneParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let include_done = params.include_done.unwrap_or(false);
-                let deleted = service::prune_tasks(&self.base, &tasks, include_done)?;
-                let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
-                ok_json(serde_json::json!(summaries))
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let include_done = params.include_done.unwrap_or(false);
+            let deleted = service::prune_tasks(&self.base, &tasks, include_done)?;
+            let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
+            ok_json(&summaries)
+        })
+        .await
     }
 
     #[tool(description = "Permanently delete a task by ID")]
@@ -268,45 +190,51 @@ impl BeaMcp {
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let t = service::delete_task(&self.base, &tasks, &params.id)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let t = service::delete_task(&self.base, &tasks, &params.id)?;
+            ok_json(&t.summary(None))
+        })
+        .await
     }
 
     #[tool(description = "Get the full dependency graph as an adjacency list")]
     async fn get_graph(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let graph = service::build_graph(&tasks);
-                let adj = graph.adjacency_list();
-                ok_json(serde_json::json!(adj))
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let graph = service::build_graph(&tasks);
+            ok_json(&graph.adjacency_list())
+        })
+        .await
     }
 
     #[tool(description = "List all epics with progress summary")]
     async fn list_epics(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        tool_ok(
-            async {
-                let tasks = store::load_all(&self.base).await?;
-                let mut epics: Vec<&task::Task> =
-                    tasks.values().filter(|t| t.task_type.is_epic()).collect();
-                epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
-                let summaries: Vec<_> = epics
-                    .iter()
-                    .map(|t| t.epic_summary(service::epic_progress(&tasks, &t.id)))
-                    .collect();
-                ok_json(serde_json::json!(summaries))
-            }
-            .await,
-        )
+        self.with_tasks(|tasks| {
+            let summaries: Vec<_> = service::list_epics(&tasks)
+                .iter()
+                .map(|t| t.epic_summary(service::epic_progress(&tasks, &t.id)))
+                .collect();
+            ok_json(&summaries)
+        })
+        .await
+    }
+}
+
+impl BeaMcp {
+    /// Shared body for the start/complete/cancel status tools.
+    async fn set_status_tool(
+        &self,
+        id: &str,
+        status: crate::task::Status,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.with_tasks(|tasks| {
+            let t = service::set_status(&self.base, &tasks, id, status)?;
+            ok_json(&t.summary(None))
+        })
+        .await
+    }
+
+    pub(super) fn build_tool_router() -> ToolRouter<Self> {
+        Self::tool_router()
     }
 }
 
@@ -322,18 +250,13 @@ impl ServerHandler for BeaMcp {
     }
 }
 
-impl BeaMcp {
-    pub(super) fn build_tool_router() -> ToolRouter<Self> {
-        Self::tool_router()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::*;
 
     use crate::store;
+    use crate::task::Priority;
 
     use super::super::BeaMcp;
     use super::super::params::*;
@@ -362,23 +285,32 @@ mod tests {
         }
     }
 
+    fn create_params(title: &str) -> CreateTaskParams {
+        CreateTaskParams {
+            title: title.into(),
+            priority: None,
+            tags: None,
+            depends_on: None,
+            parent: None,
+            body: None,
+            task_type: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_tool_create_and_list() {
         let (_tmp, mcp) = setup();
         let result = mcp
             .create_task(Parameters(CreateTaskParams {
-                title: "Test task".into(),
-                priority: Some("P1".into()),
+                priority: Some(Priority::P1),
                 tags: Some(vec!["backend".into()]),
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
+                ..create_params("Test task")
             }))
             .await
             .unwrap();
         let json = extract_json(&result);
         assert_eq!(json["title"], "Test task");
+        assert_eq!(json["priority"], "P1");
         let id = json["id"].as_str().unwrap();
 
         let list = mcp
@@ -401,13 +333,8 @@ mod tests {
         let (_tmp, mcp) = setup();
         let result = mcp
             .create_task(Parameters(CreateTaskParams {
-                title: "Detail task".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
                 body: Some("Some body".into()),
-                task_type: None,
+                ..create_params("Detail task")
             }))
             .await
             .unwrap();
@@ -423,15 +350,7 @@ mod tests {
     async fn test_tool_start_complete() {
         let (_tmp, mcp) = setup();
         let result = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "Flow task".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
+            .create_task(Parameters(create_params("Flow task")))
             .await
             .unwrap();
         let id = extract_json(&result)["id"].as_str().unwrap().to_string();
@@ -453,27 +372,14 @@ mod tests {
     async fn test_tool_ready() {
         let (_tmp, mcp) = setup();
         let t1 = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "First".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
+            .create_task(Parameters(create_params("First")))
             .await
             .unwrap();
         let id1 = extract_json(&t1)["id"].as_str().unwrap().to_string();
 
         mcp.create_task(Parameters(CreateTaskParams {
-            title: "Second".into(),
-            priority: None,
-            tags: None,
             depends_on: Some(vec![id1.clone()]),
-            parent: None,
-            body: None,
-            task_type: None,
+            ..create_params("Second")
         }))
         .await
         .unwrap();
@@ -516,28 +422,15 @@ mod tests {
     async fn test_tool_dependency_cycle() {
         let (_tmp, mcp) = setup();
         let t1 = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "A".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
+            .create_task(Parameters(create_params("A")))
             .await
             .unwrap();
         let id_a = extract_json(&t1)["id"].as_str().unwrap().to_string();
 
         let t2 = mcp
             .create_task(Parameters(CreateTaskParams {
-                title: "B".into(),
-                priority: None,
-                tags: None,
                 depends_on: Some(vec![id_a.clone()]),
-                parent: None,
-                body: None,
-                task_type: None,
+                ..create_params("B")
             }))
             .await
             .unwrap();
@@ -557,27 +450,14 @@ mod tests {
     async fn test_tool_search() {
         let (_tmp, mcp) = setup();
         mcp.create_task(Parameters(CreateTaskParams {
-            title: "Implement OAuth".into(),
-            priority: None,
             tags: Some(vec!["auth".into()]),
-            depends_on: None,
-            parent: None,
-            body: None,
-            task_type: None,
+            ..create_params("Implement OAuth")
         }))
         .await
         .unwrap();
-        mcp.create_task(Parameters(CreateTaskParams {
-            title: "Fix database".into(),
-            priority: None,
-            tags: None,
-            depends_on: None,
-            parent: None,
-            body: None,
-            task_type: None,
-        }))
-        .await
-        .unwrap();
+        mcp.create_task(Parameters(create_params("Fix database")))
+            .await
+            .unwrap();
 
         let results = mcp
             .search_tasks(Parameters(SearchParams {
@@ -595,15 +475,7 @@ mod tests {
     async fn test_tool_delete_task() {
         let (_tmp, mcp) = setup();
         let result = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "To be deleted".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
+            .create_task(Parameters(create_params("To be deleted")))
             .await
             .unwrap();
         let id = extract_json(&result)["id"].as_str().unwrap().to_string();
@@ -623,27 +495,14 @@ mod tests {
     async fn test_tool_graph() {
         let (_tmp, mcp) = setup();
         let t1 = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "A".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
+            .create_task(Parameters(create_params("A")))
             .await
             .unwrap();
         let id_a = extract_json(&t1)["id"].as_str().unwrap().to_string();
 
         mcp.create_task(Parameters(CreateTaskParams {
-            title: "B".into(),
-            priority: None,
-            tags: None,
             depends_on: Some(vec![id_a]),
-            parent: None,
-            body: None,
-            task_type: None,
+            ..create_params("B")
         }))
         .await
         .unwrap();
@@ -654,85 +513,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_list_invalid_status_filter() {
-        let (_tmp, mcp) = setup();
-        let result = mcp
-            .list_all_tasks(Parameters(ListTasksFilterParams {
-                status: Some("bogus".into()),
-                priority: None,
-                tag: None,
-                epic: None,
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-        assert!(extract_text(&result).contains("invalid status"));
-    }
-
-    #[tokio::test]
-    async fn test_tool_list_invalid_priority_filter() {
-        let (_tmp, mcp) = setup();
-        let result = mcp
-            .list_all_tasks(Parameters(ListTasksFilterParams {
-                status: None,
-                priority: Some("P9".into()),
-                tag: None,
-                epic: None,
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-        assert!(extract_text(&result).contains("invalid priority"));
-    }
-
-    #[tokio::test]
-    async fn test_tool_create_invalid_priority() {
+    async fn test_tool_create_unknown_parent_is_tool_error() {
         let (_tmp, mcp) = setup();
         let result = mcp
             .create_task(Parameters(CreateTaskParams {
-                title: "Bad priority".into(),
-                priority: Some("high".into()),
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
+                parent: Some("zzzz".into()),
+                ..create_params("Orphan")
             }))
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
-        assert!(extract_text(&result).contains("invalid priority"));
-    }
-
-    #[tokio::test]
-    async fn test_tool_update_invalid_status() {
-        let (_tmp, mcp) = setup();
-        let t = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "Task".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
-            .await
-            .unwrap();
-        let id = extract_json(&t)["id"].as_str().unwrap().to_string();
-
-        let result = mcp
-            .update_task(Parameters(UpdateTaskParams {
-                id,
-                status: Some("invalid".into()),
-                priority: None,
-                tags: None,
-                assignee: None,
-                body: None,
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-        assert!(extract_text(&result).contains("invalid status"));
+        assert!(extract_text(&result).contains("not found"));
     }
 }

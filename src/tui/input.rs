@@ -185,7 +185,7 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
-                let status = ALL_STATUSES[selected].clone();
+                let status = ALL_STATUSES[selected];
                 self.mode = Mode::Normal;
                 Action::UpdateStatus(task_id, status)
             }

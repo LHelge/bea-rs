@@ -11,8 +11,9 @@ use owo_colors::Stream::Stdout;
 use serde::Serialize;
 
 use crate::error::Result;
+use crate::service::{NewTask, UpdateFields};
 use crate::store;
-use crate::task::{Priority, Status};
+use crate::task::{Priority, Status, TaskType};
 
 pub async fn run(cli: Args, base: &Path) -> Result<()> {
     // Handle commands that don't need task data
@@ -38,9 +39,18 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             parent,
             body,
             epic,
-        } => cmd::cmd_create(
-            base, &tasks, title, priority, tag, depends_on, parent, body, epic, cli.json,
-        ),
+        } => {
+            let new = NewTask {
+                priority,
+                tags: tag,
+                depends_on,
+                parent,
+                body: body.unwrap_or_default(),
+                task_type: if epic { TaskType::Epic } else { TaskType::Task },
+                ..NewTask::new(title)
+            };
+            cmd::cmd_create(base, &tasks, new, cli.json)
+        }
         Command::List {
             status,
             priority,
@@ -59,9 +69,17 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             assignee,
             body,
             title,
-        } => cmd::cmd_update(
-            base, &tasks, &id, status, priority, tag, assignee, body, title, cli.json,
-        ),
+        } => {
+            let fields = UpdateFields {
+                status,
+                priority,
+                tags: tag,
+                assignee,
+                body,
+                title,
+            };
+            cmd::cmd_update(base, &tasks, &id, fields, cli.json)
+        }
         Command::Status { id, status } => cmd::cmd_status(base, &tasks, &id, status, cli.json),
         Command::Start { id } => cmd::cmd_status(base, &tasks, &id, Status::InProgress, cli.json),
         Command::Done { id } => cmd::cmd_status(base, &tasks, &id, Status::Done, cli.json),
@@ -129,9 +147,8 @@ fn color_tags(tags: &[String]) -> String {
     joined.if_supports_color(Stdout, |t| t.dimmed()).to_string()
 }
 
-fn output<T: Serialize>(value: &T, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(value)?);
-    }
+/// Print a value as pretty JSON. Callers decide whether JSON mode is active.
+fn output_json<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

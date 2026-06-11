@@ -203,22 +203,20 @@ impl App {
     pub(super) fn apply_filter(&mut self) {
         let selected_id = self.selected_task().map(|t| t.id.clone());
         let query_lower = self.filter.query.to_lowercase();
+        // Ready mode delegates to the canonical graph computation.
+        let ready_ids: Option<std::collections::HashSet<String>> =
+            (self.filter.list_mode == ListMode::Ready).then(|| {
+                self.graph
+                    .ready(&self.task_map, None, None, None)
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect()
+            });
         self.tasks = self
             .all_tasks
             .iter()
             .filter(|t| self.filter.matches(t, &query_lower))
-            .filter(|t| {
-                // For Ready mode, additionally check that all deps are done
-                if self.filter.list_mode == ListMode::Ready {
-                    t.depends_on.iter().all(|dep_id| {
-                        self.task_map
-                            .get(dep_id)
-                            .is_some_and(|dep| dep.status == Status::Done)
-                    })
-                } else {
-                    true
-                }
-            })
+            .filter(|t| ready_ids.as_ref().is_none_or(|ids| ids.contains(&t.id)))
             .cloned()
             .collect();
         let new_idx = selected_id

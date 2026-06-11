@@ -66,21 +66,10 @@ fn edit_task_in_editor(app: &App, task_id: &str, terminal: &mut DefaultTerminal)
 
 /// Create a new task and optionally open in editor. Returns the new task ID.
 fn create_task(app: &App, title: &str, terminal: &mut DefaultTerminal) -> Result<String> {
-    use crate::service;
-    use crate::task::{Priority, TaskType};
+    use crate::service::{self, NewTask};
 
     let (_, task_map) = load_tasks_sync(&app.base)?;
-    let task = service::create_task(
-        &app.base,
-        &task_map,
-        title.to_string(),
-        Priority::P2,
-        Vec::new(),
-        Vec::new(),
-        None,
-        String::new(),
-        TaskType::Task,
-    )?;
+    let task = service::create_task(&app.base, &task_map, NewTask::new(title))?;
 
     let id = task.id.clone();
     // Open in editor for body

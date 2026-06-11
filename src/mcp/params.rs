@@ -1,6 +1,8 @@
 use rmcp::schemars;
 use serde::Deserialize;
 
+use crate::task::{Priority, Status, TaskType};
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListReadyParams {
     /// Max number of results
@@ -13,10 +15,10 @@ pub struct ListReadyParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksFilterParams {
-    /// Filter by status (open, in_progress, done, blocked, cancelled)
-    pub status: Option<String>,
-    /// Filter by priority (P0, P1, P2, P3)
-    pub priority: Option<String>,
+    /// Filter by status
+    pub status: Option<Status>,
+    /// Filter by priority
+    pub priority: Option<Priority>,
     /// Filter by tag
     pub tag: Option<String>,
     /// Filter by parent epic ID
@@ -33,8 +35,8 @@ pub struct TaskIdParams {
 pub struct CreateTaskParams {
     /// Task title
     pub title: String,
-    /// Priority (P0, P1, P2, P3)
-    pub priority: Option<String>,
+    /// Priority (default P2)
+    pub priority: Option<Priority>,
     /// Tags
     pub tags: Option<Vec<String>>,
     /// IDs of tasks this depends on
@@ -45,17 +47,17 @@ pub struct CreateTaskParams {
     pub body: Option<String>,
     /// Type: "task" (default) or "epic"
     #[serde(rename = "type")]
-    pub task_type: Option<String>,
+    pub task_type: Option<TaskType>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UpdateTaskParams {
     /// Task ID
     pub id: String,
-    /// New status (open, in_progress, done, blocked, cancelled)
-    pub status: Option<String>,
-    /// New priority (P0, P1, P2, P3)
-    pub priority: Option<String>,
+    /// New status
+    pub status: Option<Status>,
+    /// New priority
+    pub priority: Option<Priority>,
     /// New tags (replaces existing)
     pub tags: Option<Vec<String>>,
     /// New assignee

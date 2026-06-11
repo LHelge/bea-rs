@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Open,
@@ -44,7 +44,9 @@ impl std::str::FromStr for Status {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskType {
     #[default]
@@ -83,32 +85,15 @@ impl std::str::FromStr for TaskType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Task priority. Declaration order defines urgency: P0 (highest) sorts first.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub enum Priority {
     P0,
     P1,
     P2,
     P3,
-}
-
-impl Ord for Priority {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let rank = |p: &Priority| -> u8 {
-            match p {
-                Priority::P0 => 0,
-                Priority::P1 => 1,
-                Priority::P2 => 2,
-                Priority::P3 => 3,
-            }
-        };
-        rank(self).cmp(&rank(other))
-    }
-}
-
-impl PartialOrd for Priority {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl fmt::Display for Priority {
@@ -187,7 +172,7 @@ impl Task {
             id: self.id.clone(),
             title: self.title.clone(),
             task_type: self.task_type,
-            status: self.status.clone(),
+            status: self.status,
             priority: self.priority,
             tags: self.tags.clone(),
             effective_priority: effective_priority
@@ -217,7 +202,7 @@ impl Task {
         crate::service::EpicSummary {
             id: self.id.clone(),
             title: self.title.clone(),
-            status: self.status.clone(),
+            status: self.status,
             priority: self.priority,
             tags: self.tags.clone(),
             progress,
@@ -265,9 +250,19 @@ pub fn matches_tag(task: &Task, tag: Option<&str>) -> bool {
     tag.is_none_or(|t| task.tags.iter().any(|tt| tt == t))
 }
 
-/// Canonical sort: priority ascending (P0 first), then creation date ascending.
+/// Canonical task ordering: priority ascending (P0 first), then creation date ascending.
+pub fn priority_then_created(a: &Task, b: &Task) -> std::cmp::Ordering {
+    a.priority.cmp(&b.priority).then(a.created.cmp(&b.created))
+}
+
+/// Canonical sort for owned tasks.
 pub fn sort_by_priority_owned(tasks: &mut [Task]) {
-    tasks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    tasks.sort_by(priority_then_created);
+}
+
+/// Canonical sort for borrowed tasks.
+pub fn sort_refs_by_priority(tasks: &mut [&Task]) {
+    tasks.sort_by(|a, b| priority_then_created(a, b));
 }
 
 /// Unambiguous character set for ID generation.

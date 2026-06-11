@@ -13,7 +13,7 @@ pub enum Error {
     #[error("ambiguous prefix '{prefix}' matches multiple tasks: {matches}")]
     AmbiguousPrefix { prefix: String, matches: String },
 
-    #[error("task {0} is not an epic — --plan only works on epics")]
+    #[error("task {0} is not an epic — plans can only be generated for epics")]
     NotAnEpic(String),
 
     #[error("parent {0} is not an epic — only epics can have child tasks")]
@@ -24,13 +24,6 @@ pub enum Error {
 
     #[error("unknown dependency ID(s): {}", ids.join(", "))]
     UnknownDependency { ids: Vec<String> },
-
-    #[error("invalid {field}: {value} (expected {expected})")]
-    InvalidFilter {
-        field: String,
-        value: String,
-        expected: String,
-    },
 
     #[error("invalid config: {reason}")]
     InvalidConfig { reason: String },

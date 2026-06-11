@@ -59,9 +59,10 @@ impl Graph {
             .collect();
 
         // Sort by effective priority (P0 first), then by creation date (oldest first)
+        let eff = self.effective_priorities(tasks);
         result.sort_by(|a, b| {
-            self.effective_priority(&a.id, tasks)
-                .cmp(&self.effective_priority(&b.id, tasks))
+            eff.get(&a.id)
+                .cmp(&eff.get(&b.id))
                 .then(a.created.cmp(&b.created))
         });
 
@@ -72,32 +73,31 @@ impl Graph {
         result
     }
 
-    /// Compute the effective priority of a task.
-    /// This is the minimum (highest urgency) of the task's own priority and
-    /// the priorities of all tasks that depend on it, transitively.
-    pub fn effective_priority(&self, id: &str, tasks: &HashMap<String, Task>) -> Priority {
-        let own = tasks.get(id).map(|t| t.priority).unwrap_or(Priority::P3);
+    /// Compute effective priorities for all tasks in a single pass.
+    ///
+    /// A task's effective priority is the minimum (highest urgency) of its own
+    /// priority and the priorities of all tasks that transitively depend on it.
+    /// Computed by relaxation along dependency edges: priorities only ever
+    /// decrease, so this terminates even on cyclic (hand-edited) graphs.
+    pub fn effective_priorities(&self, tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
+        let mut eff: HashMap<String, Priority> =
+            tasks.values().map(|t| (t.id.clone(), t.priority)).collect();
 
-        let mut best = own;
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(id.to_string());
-
-        while let Some(current) = queue.pop_front() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            if let Some(dependents) = self.reverse.get(&current) {
-                for dep in dependents {
-                    if let Some(t) = tasks.get(dep.as_str()) {
-                        best = best.min(t.priority);
+        let mut queue: VecDeque<&str> = tasks.keys().map(String::as_str).collect();
+        while let Some(id) = queue.pop_front() {
+            let p = eff[id];
+            if let Some(deps) = self.edges.get(id) {
+                for dep in deps {
+                    if let Some(dep_eff) = eff.get_mut(dep.as_str())
+                        && p < *dep_eff
+                    {
+                        *dep_eff = p;
+                        queue.push_back(dep.as_str());
                     }
-                    queue.push_back(dep.clone());
                 }
             }
         }
-
-        best
+        eff
     }
 
     /// Check if adding an edge from -> to would create a cycle.
@@ -204,17 +204,7 @@ impl Graph {
             .filter(|&(_, deg)| *deg == 0)
             .map(|(&id, _)| id)
             .collect();
-        queue.sort_by(|a, b| {
-            let ta = tasks.get(*a);
-            let tb = tasks.get(*b);
-            match (ta, tb) {
-                (Some(ta), Some(tb)) => ta
-                    .priority
-                    .cmp(&tb.priority)
-                    .then(ta.created.cmp(&tb.created)),
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
+        queue.sort_by(|a, b| compare_ids(tasks, a, b));
 
         let mut result: Vec<&'a Task> = Vec::new();
         while !queue.is_empty() {
@@ -237,17 +227,7 @@ impl Graph {
                     }
                 }
                 // Sort newly ready by priority then created
-                newly_ready.sort_by(|a, b| {
-                    let ta = tasks.get(*a);
-                    let tb = tasks.get(*b);
-                    match (ta, tb) {
-                        (Some(ta), Some(tb)) => ta
-                            .priority
-                            .cmp(&tb.priority)
-                            .then(ta.created.cmp(&tb.created)),
-                        _ => std::cmp::Ordering::Equal,
-                    }
-                });
+                newly_ready.sort_by(|a, b| compare_ids(tasks, a, b));
                 queue.extend(newly_ready);
             }
         }
@@ -259,7 +239,7 @@ impl Graph {
             .filter(|id| !sorted_ids.contains(id.as_str()))
             .filter_map(|id| tasks.get(id))
             .collect();
-        cyclic.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        cyclic.sort_by(|a, b| task::priority_then_created(a, b));
 
         SubsetTopo {
             sorted: result,
@@ -276,6 +256,14 @@ impl Graph {
                 (k.as_str(), deps)
             })
             .collect()
+    }
+}
+
+/// Canonical task ordering applied to task IDs (unknown IDs compare equal).
+fn compare_ids(tasks: &HashMap<String, Task>, a: &str, b: &str) -> std::cmp::Ordering {
+    match (tasks.get(a), tasks.get(b)) {
+        (Some(ta), Some(tb)) => task::priority_then_created(ta, tb),
+        _ => std::cmp::Ordering::Equal,
     }
 }
 
@@ -624,7 +612,7 @@ mod tests {
         // Task with no dependents: effective == own
         let tasks = make_tasks(vec![make_task("a", Status::Open, Priority::P3, vec![])]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priority("a", &tasks), Priority::P3);
+        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P3);
     }
 
     #[test]
@@ -636,9 +624,9 @@ mod tests {
             make_task("b", Status::Open, Priority::P1, vec!["a"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priority("a", &tasks), Priority::P1);
+        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P1);
         // b has no dependents, so effective == own
-        assert_eq!(graph.effective_priority("b", &tasks), Priority::P1);
+        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P1);
     }
 
     #[test]
@@ -651,9 +639,9 @@ mod tests {
             make_task("c", Status::Open, Priority::P0, vec!["b"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
-        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
-        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["c"], Priority::P0);
     }
 
     #[test]
@@ -667,9 +655,9 @@ mod tests {
             make_task("d", Status::Open, Priority::P0, vec!["b", "c"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
-        assert_eq!(graph.effective_priority("b", &tasks), Priority::P0);
-        assert_eq!(graph.effective_priority("c", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["b"], Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["c"], Priority::P0);
     }
 
     #[test]
@@ -680,7 +668,7 @@ mod tests {
             make_task("b", Status::Open, Priority::P3, vec!["a"]),
         ]);
         let graph = Graph::build(&tasks);
-        assert_eq!(graph.effective_priority("a", &tasks), Priority::P0);
+        assert_eq!(graph.effective_priorities(&tasks)["a"], Priority::P0);
     }
 
     #[test]

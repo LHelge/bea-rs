@@ -10,27 +10,42 @@ use crate::graph::Graph;
 use crate::store;
 use crate::task::{self, Priority, Status, Task, TaskType};
 
+/// Fields for creating a task. Build with [`NewTask::new`] and struct-update
+/// syntax for the non-default fields.
+pub struct NewTask {
+    pub title: String,
+    pub priority: Priority,
+    pub tags: Vec<String>,
+    pub depends_on: Vec<String>,
+    pub parent: Option<String>,
+    pub body: String,
+    pub task_type: TaskType,
+}
+
+impl NewTask {
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            priority: Priority::P2,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            parent: None,
+            body: String::new(),
+            task_type: TaskType::Task,
+        }
+    }
+}
+
 /// Create a new task with validation.
-#[allow(clippy::too_many_arguments)]
-pub fn create_task(
-    base: &Path,
-    tasks: &HashMap<String, Task>,
-    title: String,
-    priority: Priority,
-    tags: Vec<String>,
-    depends_on: Vec<String>,
-    parent: Option<String>,
-    body: String,
-    task_type: TaskType,
-) -> Result<Task> {
+pub fn create_task(base: &Path, tasks: &HashMap<String, Task>, new: NewTask) -> Result<Task> {
     let config = config::load(base)?;
     let existing_ids: HashSet<String> = tasks.keys().cloned().collect();
     let id = task::generate_id(&existing_ids, config.id_length as usize);
 
     // Resolve dependency IDs (prefixes allowed, like every other command)
-    let mut resolved_deps = Vec::with_capacity(depends_on.len());
+    let mut resolved_deps = Vec::with_capacity(new.depends_on.len());
     let mut unknown = Vec::new();
-    for dep in depends_on {
+    for dep in new.depends_on {
         match store::resolve_prefix(tasks, &dep) {
             Ok(dep_id) => resolved_deps.push(dep_id),
             Err(Error::TaskNotFound(_)) => unknown.push(dep),
@@ -42,7 +57,7 @@ pub fn create_task(
     }
 
     // Resolve and validate the parent: must exist and be an epic
-    let parent = match parent.filter(|p| !p.is_empty()) {
+    let parent = match new.parent.filter(|p| !p.is_empty()) {
         None => None,
         Some(p) => {
             let parent_id = store::resolve_prefix(tasks, &p)?;
@@ -53,12 +68,12 @@ pub fn create_task(
         }
     };
 
-    let mut t = Task::new(id, title, priority);
-    t.task_type = task_type;
-    t.tags = tags;
+    let mut t = Task::new(id, new.title, new.priority);
+    t.task_type = new.task_type;
+    t.tags = new.tags;
     t.depends_on = resolved_deps;
     t.parent = parent;
-    t.body = body;
+    t.body = new.body;
 
     store::save(base, &t)?;
     Ok(t)
@@ -110,39 +125,44 @@ pub fn get_task(tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Tas
     Ok(tasks[&id].clone())
 }
 
+/// Partial update: only `Some` fields are applied.
+#[derive(Default)]
+pub struct UpdateFields {
+    pub status: Option<Status>,
+    pub priority: Option<Priority>,
+    pub tags: Option<Vec<String>>,
+    pub assignee: Option<String>,
+    pub body: Option<String>,
+    pub title: Option<String>,
+}
+
 /// Update task fields. Only `Some` fields are changed.
-#[allow(clippy::too_many_arguments)]
 pub fn update_task(
     base: &Path,
     tasks: &HashMap<String, Task>,
     id_or_prefix: &str,
-    status: Option<Status>,
-    priority: Option<Priority>,
-    tags: Option<Vec<String>>,
-    assignee: Option<String>,
-    body: Option<String>,
-    title: Option<String>,
+    fields: UpdateFields,
 ) -> Result<Task> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
 
-    let status_changed = status.is_some();
-    if let Some(s) = status {
+    let status_changed = fields.status.is_some();
+    if let Some(s) = fields.status {
         t.status = s;
     }
-    if let Some(p) = priority {
+    if let Some(p) = fields.priority {
         t.priority = p;
     }
-    if let Some(tags) = tags {
+    if let Some(tags) = fields.tags {
         t.tags = tags;
     }
-    if let Some(a) = assignee {
+    if let Some(a) = fields.assignee {
         t.assignee = a;
     }
-    if let Some(b) = body {
+    if let Some(b) = fields.body {
         t.body = b;
     }
-    if let Some(title) = title {
+    if let Some(title) = fields.title {
         t.title = title;
     }
     t.updated = Utc::now();
@@ -336,12 +356,14 @@ pub fn build_graph(tasks: &HashMap<String, Task>) -> Graph {
 
 /// Compute effective priorities for all tasks.
 pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Priority> {
-    let graph = Graph::build(tasks);
-    let mut map = HashMap::new();
-    for id in tasks.keys() {
-        map.insert(id.clone(), graph.effective_priority(id, tasks));
-    }
-    map
+    Graph::build(tasks).effective_priorities(tasks)
+}
+
+/// List all epics, sorted by priority then creation date.
+pub fn list_epics(tasks: &HashMap<String, Task>) -> Vec<&Task> {
+    let mut epics: Vec<&Task> = tasks.values().filter(|t| t.task_type.is_epic()).collect();
+    task::sort_refs_by_priority(&mut epics);
+    epics
 }
 
 /// Progress of an epic: how many children are done vs total.
@@ -480,13 +502,14 @@ mod tests {
         let epic = create_task(
             tmp.path(),
             &tasks,
-            "My Epic".into(),
-            Priority::P1,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Epic,
+            NewTask {
+                priority: Priority::P1,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Epic,
+                ..NewTask::new("My Epic")
+            },
         )
         .unwrap();
 
@@ -494,13 +517,14 @@ mod tests {
         let child1 = create_task(
             tmp.path(),
             &tasks,
-            "Child 1".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(epic.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(epic.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child 1")
+            },
         )
         .unwrap();
 
@@ -508,13 +532,14 @@ mod tests {
         let child2 = create_task(
             tmp.path(),
             &tasks,
-            "Child 2".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(epic.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(epic.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child 2")
+            },
         )
         .unwrap();
 
@@ -538,13 +563,14 @@ mod tests {
         let result = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Orphan".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some("zzzz".into()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some("zzzz".into()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Orphan")
+            },
         );
         assert!(matches!(result, Err(Error::TaskNotFound(_))));
     }
@@ -557,13 +583,14 @@ mod tests {
         let plain = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Plain task".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Task,
+                ..NewTask::new("Plain task")
+            },
         )
         .unwrap();
 
@@ -571,13 +598,14 @@ mod tests {
         let result = create_task(
             tmp.path(),
             &tasks,
-            "Child".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(plain.id),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(plain.id),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child")
+            },
         );
         assert!(matches!(result, Err(Error::ParentNotEpic(_))));
     }
@@ -597,13 +625,14 @@ mod tests {
         let t = create_task(
             tmp.path(),
             &tasks,
-            "Uses prefixes".into(),
-            Priority::P2,
-            vec![],
-            vec!["ab".into()],
-            Some("wx".into()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec!["ab".into()],
+                parent: Some("wx".into()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Uses prefixes")
+            },
         )
         .unwrap();
         assert_eq!(t.depends_on, vec!["abcd"]);
@@ -618,13 +647,14 @@ mod tests {
         let t = create_task(
             tmp.path(),
             &HashMap::new(),
-            "No parent".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(String::new()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(String::new()),
+                task_type: TaskType::Task,
+                ..NewTask::new("No parent")
+            },
         )
         .unwrap();
         assert_eq!(t.parent, None);
@@ -638,13 +668,14 @@ mod tests {
         let epic = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Epic".into(),
-            Priority::P1,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Epic,
+            NewTask {
+                priority: Priority::P1,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Epic,
+                ..NewTask::new("Epic")
+            },
         )
         .unwrap();
 
@@ -652,26 +683,28 @@ mod tests {
         let child1 = create_task(
             tmp.path(),
             &tasks,
-            "Child 1".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(epic.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(epic.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child 1")
+            },
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let _child2 = create_task(
             tmp.path(),
             &tasks,
-            "Child 2".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(epic.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(epic.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child 2")
+            },
         )
         .unwrap();
 
@@ -694,26 +727,28 @@ mod tests {
         let epic = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Epic".into(),
-            Priority::P1,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Epic,
+            NewTask {
+                priority: Priority::P1,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Epic,
+                ..NewTask::new("Epic")
+            },
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let child = create_task(
             tmp.path(),
             &tasks,
-            "Only child".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(epic.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(epic.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Only child")
+            },
         )
         .unwrap();
 
@@ -723,12 +758,10 @@ mod tests {
             tmp.path(),
             &tasks,
             &child.id,
-            Some(Status::Done),
-            None,
-            None,
-            None,
-            None,
-            None,
+            UpdateFields {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -745,39 +778,42 @@ mod tests {
         let a = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Dep target".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Epic,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Epic,
+                ..NewTask::new("Dep target")
+            },
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let b = create_task(
             tmp.path(),
             &tasks,
-            "Dependent".into(),
-            Priority::P2,
-            vec![],
-            vec![a.id.clone()],
-            None,
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![a.id.clone()],
+                parent: None,
+                task_type: TaskType::Task,
+                ..NewTask::new("Dependent")
+            },
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let c = create_task(
             tmp.path(),
             &tasks,
-            "Child of deleted".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            Some(a.id.clone()),
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: Some(a.id.clone()),
+                task_type: TaskType::Task,
+                ..NewTask::new("Child of deleted")
+            },
         )
         .unwrap();
 
@@ -800,26 +836,28 @@ mod tests {
         let a = create_task(
             tmp.path(),
             &HashMap::new(),
-            "Cancelled dep".into(),
-            Priority::P2,
-            vec![],
-            vec![],
-            None,
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![],
+                parent: None,
+                task_type: TaskType::Task,
+                ..NewTask::new("Cancelled dep")
+            },
         )
         .unwrap();
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let b = create_task(
             tmp.path(),
             &tasks,
-            "Dependent".into(),
-            Priority::P2,
-            vec![],
-            vec![a.id.clone()],
-            None,
-            String::new(),
-            TaskType::Task,
+            NewTask {
+                priority: Priority::P2,
+                tags: vec![],
+                depends_on: vec![a.id.clone()],
+                parent: None,
+                task_type: TaskType::Task,
+                ..NewTask::new("Dependent")
+            },
         )
         .unwrap();
 
