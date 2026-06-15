@@ -92,6 +92,81 @@ jobs:
           body_path: RELEASE_NOTES.md
           make_latest: true
 
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute checksums from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir dl && cd dl
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            -p 'bea-macos-aarch64' -p 'bea-macos-x86_64' -p 'bea-linux-x86_64'
+          {
+            echo "VERSION=$VERSION"
+            echo "SHA_MAC_ARM=$(sha256sum bea-macos-aarch64 | cut -d' ' -f1)"
+            echo "SHA_MAC_X86=$(sha256sum bea-macos-x86_64 | cut -d' ' -f1)"
+            echo "SHA_LINUX_X86=$(sha256sum bea-linux-x86_64 | cut -d' ' -f1)"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout tap
+        uses: actions/checkout@v6
+        with:
+          repository: LHelge/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Render formula
+        run: |
+          mkdir -p tap/Formula
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          cat > tap/Formula/bears.rb <<EOF
+          class Bears < Formula
+            desc "File-based task tracker CLI and MCP server for AI agent workflows"
+            homepage "https://github.com/LHelge/bea-rs"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE}/bea-macos-aarch64"
+                sha256 "${SHA_MAC_ARM}"
+              end
+              on_intel do
+                url "${BASE}/bea-macos-x86_64"
+                sha256 "${SHA_MAC_X86}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "${BASE}/bea-linux-x86_64"
+                sha256 "${SHA_LINUX_X86}"
+              end
+            end
+
+            def install
+              bin.install Dir["bea-*"].first => "bea"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/bea --version")
+            end
+          end
+          EOF
+
+      - name: Commit & push
+        run: |
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/bears.rb
+          git commit -m "bears ${VERSION}" || { echo "No changes"; exit 0; }
+          git push
+
   publish:
     name: Publish to crates.io
     needs: release

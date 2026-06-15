@@ -21,6 +21,12 @@ Tasks live as Markdown files with YAML frontmatter in a `.bears/` directory — 
 cargo install bea-rs
 ```
 
+### Homebrew
+
+```sh
+brew install lhelge/tap/bears
+```
+
 ### Pre-built binary
 
 Download the latest release for your platform:
