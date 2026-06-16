@@ -28,6 +28,9 @@ pub enum Error {
     #[error("invalid config: {reason}")]
     InvalidConfig { reason: String },
 
+    #[error("{0}")]
+    InvalidUsage(String),
+
     #[error("invalid frontmatter in {path}: {reason}")]
     InvalidFrontmatter { path: PathBuf, reason: String },
 

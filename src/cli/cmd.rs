@@ -15,10 +15,47 @@ use crate::task::{self, Priority, Status, Task, TaskType};
 
 use super::{color_id, color_priority, color_status, color_tags, format_priority, output};
 
-pub fn cmd_init(base: &Path, claude: bool, copilot: bool, codex: bool, json: bool) -> Result<()> {
-    let dir = store::init(base)?;
+/// Map an affirmative-prompt response to a boolean. Accepts `y`/`yes`
+/// (case-insensitive); anything else (including empty) is treated as No.
+fn parse_yes(line: &str) -> bool {
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
 
-    // Collect requested harness labels
+/// Resolve the write policy for a scaffold run when the user passed neither
+/// `--force` nor `--append`.
+///
+/// - Nothing on disk yet → `Force` (plain create).
+/// - Files exist but stdin isn't a terminal (CI/pipe) → `SkipExisting` (never
+///   blocks waiting for input).
+/// - Files exist and we have a TTY → prompt once; `y`/`yes` → `Force`, else
+///   `SkipExisting`.
+fn resolve_overwrite_policy(any_exists: bool) -> Result<scaffold::WritePolicy> {
+    use std::io::{IsTerminal, Write};
+
+    if !any_exists {
+        return Ok(scaffold::WritePolicy::Force);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(scaffold::WritePolicy::SkipExisting);
+    }
+
+    eprint!(
+        "This directory already contains agent instructions and/or skills. \
+         Overwrite them? (y/N) "
+    );
+    std::io::stderr().flush().ok();
+
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(if parse_yes(&line) {
+        scaffold::WritePolicy::Force
+    } else {
+        scaffold::WritePolicy::SkipExisting
+    })
+}
+
+/// Collect the requested harness labels from the per-harness flags.
+fn collect_labels(claude: bool, copilot: bool, codex: bool) -> Vec<&'static str> {
     let mut labels: Vec<&str> = Vec::new();
     if claude {
         labels.push("claude");
@@ -29,8 +66,31 @@ pub fn cmd_init(base: &Path, claude: bool, copilot: bool, codex: bool, json: boo
     if codex {
         labels.push("codex");
     }
+    labels
+}
 
-    let scaffolded = scaffold::scaffold(base, &labels)?;
+pub fn cmd_init(
+    base: &Path,
+    claude: bool,
+    copilot: bool,
+    codex: bool,
+    force: bool,
+    json: bool,
+) -> Result<()> {
+    let dir = store::init(base)?;
+
+    let labels = collect_labels(claude, copilot, codex);
+
+    let policy = if force {
+        scaffold::WritePolicy::Force
+    } else {
+        let any_exists = scaffold::category_targets(base, &labels, scaffold::Category::All)
+            .iter()
+            .any(|p| p.exists());
+        resolve_overwrite_policy(any_exists)?
+    };
+
+    let scaffolded = scaffold::scaffold_category(base, &labels, scaffold::Category::All, policy)?;
 
     if json {
         let paths: Vec<String> = std::iter::once(dir.display().to_string())
@@ -42,6 +102,62 @@ pub fn cmd_init(base: &Path, claude: bool, copilot: bool, codex: bool, json: boo
         }))?;
     } else {
         println!("Initialized bears in {}", dir.display());
+        for p in &scaffolded {
+            println!("  wrote {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_agent_init(
+    base: &Path,
+    category: crate::cli::AgentCategory,
+    claude: bool,
+    copilot: bool,
+    codex: bool,
+    force: bool,
+    append: bool,
+    json: bool,
+) -> Result<()> {
+    use crate::cli::AgentCategory;
+
+    // `--append` only makes sense where there is an instruction file to append to.
+    if append && category == AgentCategory::Skills {
+        return Err(Error::InvalidUsage(
+            "--append is only valid for `instructions` or `all` (there is no instruction file to append to for `skills`)"
+                .to_string(),
+        ));
+    }
+
+    let labels = collect_labels(claude, copilot, codex);
+    if labels.is_empty() {
+        return Err(Error::InvalidUsage(
+            "select at least one harness: --claude, --copilot, or --codex".to_string(),
+        ));
+    }
+
+    let cat: scaffold::Category = category.into();
+
+    let policy = if force {
+        scaffold::WritePolicy::Force
+    } else if append {
+        scaffold::WritePolicy::Append
+    } else {
+        let any_exists = scaffold::category_targets(base, &labels, cat)
+            .iter()
+            .any(|p| p.exists());
+        resolve_overwrite_policy(any_exists)?
+    };
+
+    let scaffolded = scaffold::scaffold_category(base, &labels, cat, policy)?;
+
+    if json {
+        let paths: Vec<String> = scaffolded.iter().map(|p| p.display().to_string()).collect();
+        output(&serde_json::json!({ "scaffolded": paths }))?;
+    } else if scaffolded.is_empty() {
+        println!("Nothing to do (target files already exist; use --force to overwrite).");
+    } else {
         for p in &scaffolded {
             println!("  wrote {}", p.display());
         }
