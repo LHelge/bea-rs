@@ -1912,6 +1912,161 @@ fn test_init_claude_on_already_initialized_dir_is_idempotent() {
     );
 }
 
+/// Re-running `bea init --claude` non-interactively (no TTY) preserves an edited
+/// instruction file instead of clobbering it — and does not block on stdin.
+#[test]
+fn test_init_claude_non_interactive_preserves_edited_instruction() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+
+    std::fs::write(tmp.path().join("CLAUDE.md"), "MY EDITS").unwrap();
+
+    // Second run under assert_cmd has no TTY → SkipExisting, no prompt, no hang.
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
+        "MY EDITS",
+        "edited instruction file must be preserved on non-interactive re-init"
+    );
+
+    // .mcp.json still has the bears entry.
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap())
+            .unwrap();
+    assert!(mcp["mcpServers"]["bears"].is_object());
+}
+
+/// `bea init --claude --force` overwrites an edited instruction file.
+#[test]
+fn test_init_claude_force_overwrites() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+    std::fs::write(tmp.path().join("CLAUDE.md"), "MY EDITS").unwrap();
+
+    bea(&tmp)
+        .args(["init", "--claude", "--force"])
+        .assert()
+        .success();
+
+    let md = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+    assert!(!md.contains("MY EDITS"), "force must overwrite edits");
+    assert!(md.contains("Bears"), "template content must be restored");
+}
+
+/// `bea agent instructions --claude` writes only the instruction file — no
+/// `.mcp.json`, and no `.bears/` directory.
+#[test]
+fn test_agent_instructions_only() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "instructions", "--claude"])
+        .assert()
+        .success();
+
+    assert!(tmp.path().join("CLAUDE.md").exists());
+    assert!(!tmp.path().join(".mcp.json").exists());
+    assert!(
+        !tmp.path().join(".bears").exists(),
+        "agent must not create .bears/"
+    );
+}
+
+/// `bea agent skills --claude` writes skill/agent files and `.mcp.json`, but not
+/// the instruction file.
+#[test]
+fn test_agent_skills_creates_mcp() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "skills", "--claude"])
+        .assert()
+        .success();
+
+    assert!(!tmp.path().join("CLAUDE.md").exists());
+    assert!(tmp.path().join(".mcp.json").exists());
+    assert!(
+        tmp.path()
+            .join(".claude/skills/bears-planning/SKILL.md")
+            .exists()
+    );
+}
+
+/// `bea agent all --claude` scaffolds the same agent files as `bea init --claude`.
+#[test]
+fn test_agent_all_matches_init() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "all", "--claude"])
+        .assert()
+        .success();
+
+    assert!(tmp.path().join("CLAUDE.md").exists());
+    assert!(tmp.path().join(".mcp.json").exists());
+    assert!(
+        tmp.path()
+            .join(".claude/skills/bears-planning/SKILL.md")
+            .exists()
+    );
+    assert!(tmp.path().join(".claude/agents/planner.md").exists());
+}
+
+/// `bea agent skills --append` is rejected (no instruction file to append to).
+#[test]
+fn test_agent_skills_append_rejected() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "skills", "--claude", "--append"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only valid for"));
+}
+
+/// `--force` and `--append` cannot be combined (clap-level conflict).
+#[test]
+fn test_agent_force_append_conflict() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "instructions", "--claude", "--force", "--append"])
+        .assert()
+        .failure();
+}
+
+/// `bea agent` with no harness selected is a usage error.
+#[test]
+fn test_agent_requires_harness() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "instructions"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("at least one harness"));
+}
+
+/// `bea agent instructions --claude --append` preserves user text, appends the
+/// template, and is idempotent on a second run.
+#[test]
+fn test_agent_instructions_append_preserves_and_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("CLAUDE.md"), "MY NOTES").unwrap();
+
+    bea(&tmp)
+        .args(["agent", "instructions", "--claude", "--append"])
+        .assert()
+        .success();
+
+    let after_first = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+    assert!(after_first.contains("MY NOTES"));
+    assert!(after_first.contains("Bears"), "template must be appended");
+
+    // Second append must be a no-op (marker guard).
+    bea(&tmp)
+        .args(["agent", "instructions", "--claude", "--append"])
+        .assert()
+        .success();
+    let after_second = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+    assert_eq!(after_first, after_second, "re-append must not duplicate");
+}
+
 /// `.mcp.json` merge preserves a pre-existing unrelated server entry.
 #[test]
 fn test_init_claude_mcp_json_preserves_existing_server() {

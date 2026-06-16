@@ -90,8 +90,27 @@ templates/         # Embedded harness templates (via include_str!) for init scaf
 | `--copilot` | `.github/copilot-instructions.md`, `.github/skills/bears-planning/SKILL.md`, `.github/skills/bears-planning/references/cli-fallback.md`, `.github/agents/planner.agent.md` | `.github/mcp.json` (merged) |
 | `--codex` | `AGENTS.md` | none (Codex discovers servers another way) |
 
+`bea init` also accepts `--force` to overwrite existing files without prompting.
+
+**Overwrite guard.** If any target file already exists, `bea init` asks once —
+*"This directory already contains agent instructions and/or skills. Overwrite them? (y/N)"* — defaulting to **No**. On No, existing files are left untouched but any missing files are still created and `.mcp.json` still merges. When stdin is not a terminal (CI, pipes), it never prompts and behaves as No (skip existing). `--force` overwrites unconditionally. The `.mcp.json` merge always runs regardless (it's safe — only the `bears` key is touched).
+
+### `bea agent <category>` — fine-grained scaffolding
+
+`bea agent <instructions|skills|all> --claude/--copilot/--codex [--force] [--append]` scaffolds a subset of agent files **without** creating `.bears/`.
+
+| Category | Files |
+|----------|-------|
+| `instructions` | the top-level instruction file only (`CLAUDE.md` / `AGENTS.md` / `copilot-instructions.md`) |
+| `skills` | skill + references + planner-agent files, plus the `.mcp.json` merge |
+| `all` | everything (same as `bea init`'s scaffolding) |
+
+- `--force` overwrites existing files without prompting.
+- `--append` appends template content to the existing instruction file (under an `<!-- bears:begin -->` marker, idempotent). Only valid for `instructions`/`all`; `--append` with `skills` is a usage error. `--force` and `--append` are mutually exclusive.
+- With neither flag, the same single y/N overwrite prompt as `bea init` applies (skip when non-interactive).
+
 Key invariants:
-- Scaffolding is **idempotent**: running `bea init --claude` on an already-initialized dir re-writes the same files with the same content.
+- Scaffolding is **idempotent**: re-running with `--force` (or via the back-compat `scaffold()` wrapper) re-writes the same files with the same content; the default path preserves existing files.
 - MCP merge **preserves unrelated servers**: only the `bears` key is inserted/replaced; all other entries in the server map are left intact.
 - Generated `.mcp.json` / `.github/mcp.json` always uses `{ "command": "bea", "args": ["mcp"] }` — never `cargo run`.
 - Template files live in `templates/` under the crate root and are embedded via `include_str!` in `scaffold.rs`. They must be present in the source tree for `cargo package` to include them.

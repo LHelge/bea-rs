@@ -86,19 +86,49 @@ pub struct ScaffoldFile {
 
 /// Describes a complete coding-harness integration.
 pub struct Harness {
-    /// Plain files to write (idempotent overwrite).
-    pub files: &'static [ScaffoldFile],
+    /// The single top-level instruction file (`CLAUDE.md`, `AGENTS.md`,
+    /// `.github/copilot-instructions.md`).
+    pub instruction: ScaffoldFile,
+    /// Skill, reference, and planner-agent files (may be empty, e.g. Codex).
+    pub skills: &'static [ScaffoldFile],
     /// How to register the MCP server.
     pub mcp: McpStrategy,
 }
 
+/// Which subset of a harness's files to scaffold.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Category {
+    /// The instruction file only.
+    Instructions,
+    /// Skills/references/agent files plus the MCP merge.
+    Skills,
+    /// Everything (instruction + skills + MCP).
+    All,
+}
+
+/// How to resolve a plain file that already exists on disk.
+///
+/// The MCP merge is always performed regardless of policy (it is safe and
+/// idempotent — only the `bears` key is touched).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WritePolicy {
+    /// Overwrite every plain file unconditionally.
+    Force,
+    /// Write only files that do not yet exist; leave existing ones untouched.
+    SkipExisting,
+    /// Append template content to an existing instruction file; non-instruction
+    /// files are treated as `Force`.
+    Append,
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
-static CLAUDE_FILES: &[ScaffoldFile] = &[
-    ScaffoldFile {
-        target: "CLAUDE.md",
-        content: CLAUDE_MD,
-    },
+const CLAUDE_INSTRUCTION: ScaffoldFile = ScaffoldFile {
+    target: "CLAUDE.md",
+    content: CLAUDE_MD,
+};
+
+static CLAUDE_SKILLS: &[ScaffoldFile] = &[
     ScaffoldFile {
         target: ".claude/skills/bears-planning/SKILL.md",
         content: CLAUDE_SKILL_MD,
@@ -113,11 +143,12 @@ static CLAUDE_FILES: &[ScaffoldFile] = &[
     },
 ];
 
-static COPILOT_FILES: &[ScaffoldFile] = &[
-    ScaffoldFile {
-        target: ".github/copilot-instructions.md",
-        content: COPILOT_MD,
-    },
+const COPILOT_INSTRUCTION: ScaffoldFile = ScaffoldFile {
+    target: ".github/copilot-instructions.md",
+    content: COPILOT_MD,
+};
+
+static COPILOT_SKILLS: &[ScaffoldFile] = &[
     ScaffoldFile {
         target: ".github/skills/bears-planning/SKILL.md",
         content: COPILOT_SKILL_MD,
@@ -132,10 +163,10 @@ static COPILOT_FILES: &[ScaffoldFile] = &[
     },
 ];
 
-static CODEX_FILES: &[ScaffoldFile] = &[ScaffoldFile {
+const CODEX_INSTRUCTION: ScaffoldFile = ScaffoldFile {
     target: "AGENTS.md",
     content: CODEX_MD,
-}];
+};
 
 /// All supported harnesses.  Each entry is a `(&str label, &Harness)` pair
 /// where `label` corresponds to the CLI flag name (`claude`, `copilot`,
@@ -144,7 +175,8 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "claude",
         &Harness {
-            files: CLAUDE_FILES,
+            instruction: CLAUDE_INSTRUCTION,
+            skills: CLAUDE_SKILLS,
             mcp: McpStrategy::MergeJson {
                 target: ".mcp.json",
                 server_key: "mcpServers",
@@ -155,7 +187,8 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "copilot",
         &Harness {
-            files: COPILOT_FILES,
+            instruction: COPILOT_INSTRUCTION,
+            skills: COPILOT_SKILLS,
             mcp: McpStrategy::MergeJson {
                 target: ".github/mcp.json",
                 server_key: "servers",
@@ -166,7 +199,8 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
     (
         "codex",
         &Harness {
-            files: CODEX_FILES,
+            instruction: CODEX_INSTRUCTION,
+            skills: &[],
             mcp: McpStrategy::None,
         },
     ),
@@ -174,14 +208,53 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
 
 // ── Core helpers ──────────────────────────────────────────────────────────────
 
-/// Write `content` to `path`, creating all parent directories as needed.
-/// If the file already exists it is overwritten (idempotent refresh).
-pub fn write_file(path: &Path, content: &str) -> Result<()> {
+/// Marker separating an existing instruction file from appended bears content.
+/// An HTML comment so it stays invisible in the rendered Markdown, and a stable
+/// anchor that makes `--append` idempotent (re-running detects it and skips).
+const APPEND_MARKER: &str = "<!-- bears:begin -->";
+
+/// Write `content` to `path` according to `policy`, creating parent directories
+/// as needed.
+///
+/// Returns `Ok(true)` when the file was created or modified, `Ok(false)` when it
+/// was left untouched (i.e. `SkipExisting` and the file already exists).
+///
+/// `WritePolicy::Append` is only meaningful for instruction files (handled via
+/// [`append_instruction`]); here it behaves like `Force` so non-instruction
+/// files (skills/agents) are refreshed.
+pub fn write_file(path: &Path, content: &str, policy: WritePolicy) -> Result<bool> {
+    if policy == WritePolicy::SkipExisting && path.exists() {
+        return Ok(false);
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, content)?;
-    Ok(())
+    Ok(true)
+}
+
+/// Append `content` to the instruction file at `path`, separated by
+/// [`APPEND_MARKER`].
+///
+/// - If the file does not exist, it is created with `content` verbatim.
+/// - If the marker is already present, this is a no-op (idempotent re-append).
+///
+/// Returns `Ok(true)` when the file was created or modified.
+fn append_instruction(path: &Path, content: &str) -> Result<bool> {
+    if path.exists() {
+        let existing = fs::read_to_string(path)?;
+        if existing.contains(APPEND_MARKER) {
+            return Ok(false); // already appended — keep idempotent
+        }
+        let combined = format!("{existing}\n\n{APPEND_MARKER}\n{content}");
+        fs::write(path, combined)?;
+        return Ok(true);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(true)
 }
 
 /// Merge the `bears` MCP server entry into the JSON file at `path`.
@@ -231,10 +304,52 @@ pub fn merge_mcp_json(path: &Path, server_key: &str, seed_json: &str) -> Result<
 
 // ── Top-level scaffold entry point ────────────────────────────────────────────
 
-/// Scaffold all files for the given harness labels into `base`.
+/// Whether `category` includes the instruction file.
+fn category_has_instruction(category: Category) -> bool {
+    matches!(category, Category::Instructions | Category::All)
+}
+
+/// Whether `category` includes the skill files and MCP merge.
+fn category_has_skills(category: Category) -> bool {
+    matches!(category, Category::Skills | Category::All)
+}
+
+/// The plain-file targets (absolute paths) that scaffolding `category` for the
+/// given harness labels would touch.
 ///
-/// Returns the list of paths that were created or updated.
-pub fn scaffold(base: &Path, harness_labels: &[&str]) -> Result<Vec<PathBuf>> {
+/// Excludes the MCP JSON file, which always merges safely and should never gate
+/// an overwrite prompt. Used by callers to decide whether anything already
+/// exists before prompting.
+pub fn category_targets(base: &Path, harness_labels: &[&str], category: Category) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    for label in harness_labels {
+        let Some((_, harness)) = REGISTRY.iter().find(|(l, _)| l == label) else {
+            continue;
+        };
+        if category_has_instruction(category) {
+            targets.push(base.join(harness.instruction.target));
+        }
+        if category_has_skills(category) {
+            for f in harness.skills {
+                targets.push(base.join(f.target));
+            }
+        }
+    }
+    targets
+}
+
+/// Scaffold the files belonging to `category` for the given harness labels into
+/// `base`, resolving on-disk collisions per `policy`.
+///
+/// The MCP merge always runs for skill-bearing categories (it is safe and
+/// idempotent). Returns the list of paths that were actually created or
+/// modified (skipped files are omitted).
+pub fn scaffold_category(
+    base: &Path,
+    harness_labels: &[&str],
+    category: Category,
+    policy: WritePolicy,
+) -> Result<Vec<PathBuf>> {
     let mut written: Vec<PathBuf> = Vec::new();
 
     for label in harness_labels {
@@ -243,29 +358,58 @@ pub fn scaffold(base: &Path, harness_labels: &[&str]) -> Result<Vec<PathBuf>> {
             continue;
         };
 
-        // Write plain files
-        for f in harness.files {
-            let target = base.join(f.target);
-            write_file(&target, f.content)?;
-            written.push(target);
+        if category_has_instruction(category) {
+            let target = base.join(harness.instruction.target);
+            let changed = if policy == WritePolicy::Append {
+                append_instruction(&target, harness.instruction.content)?
+            } else {
+                write_file(&target, harness.instruction.content, policy)?
+            };
+            if changed {
+                written.push(target);
+            }
         }
 
-        // Handle MCP strategy
-        match &harness.mcp {
-            McpStrategy::MergeJson {
+        if category_has_skills(category) {
+            // Append has no meaning for generated skill/agent files — overwrite.
+            let skill_policy = if policy == WritePolicy::Append {
+                WritePolicy::Force
+            } else {
+                policy
+            };
+            for f in harness.skills {
+                let target = base.join(f.target);
+                if write_file(&target, f.content, skill_policy)? {
+                    written.push(target);
+                }
+            }
+
+            // MCP registration belongs to the skills category (runtime wiring for
+            // the planner skill); always merge.
+            if let McpStrategy::MergeJson {
                 target,
                 server_key,
                 seed_json,
-            } => {
+            } = &harness.mcp
+            {
                 let target_path = base.join(target);
                 merge_mcp_json(&target_path, server_key, seed_json)?;
                 written.push(target_path);
             }
-            McpStrategy::None => {}
         }
     }
 
     Ok(written)
+}
+
+/// Scaffold all files for the given harness labels into `base`, overwriting any
+/// that already exist.
+///
+/// Thin back-compat wrapper over [`scaffold_category`] preserving the original
+/// "everything, force overwrite" semantics. Used by the scaffold test suite.
+#[allow(dead_code)]
+pub fn scaffold(base: &Path, harness_labels: &[&str]) -> Result<Vec<PathBuf>> {
+    scaffold_category(base, harness_labels, Category::All, WritePolicy::Force)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -520,5 +664,176 @@ mod tests {
         assert!(result.is_ok());
         let written = result.unwrap();
         assert!(written.is_empty());
+    }
+
+    // ── Write-policy + category tests ──────────────────────────────────────────
+
+    /// `Force` overwrites an existing file and reports it as written.
+    #[test]
+    fn test_write_file_force_overwrites() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f.md");
+        fs::write(&path, "old").unwrap();
+
+        let changed = write_file(&path, "new", WritePolicy::Force).unwrap();
+        assert!(changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    /// `SkipExisting` leaves an existing file untouched and reports `false`,
+    /// but still creates a missing file.
+    #[test]
+    fn test_write_file_skip_existing() {
+        let tmp = TempDir::new().unwrap();
+        let existing = tmp.path().join("exists.md");
+        fs::write(&existing, "keep").unwrap();
+
+        let changed = write_file(&existing, "new", WritePolicy::SkipExisting).unwrap();
+        assert!(!changed, "existing file must be skipped");
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "keep");
+
+        let missing = tmp.path().join("missing.md");
+        let created = write_file(&missing, "new", WritePolicy::SkipExisting).unwrap();
+        assert!(created, "missing file must be created under SkipExisting");
+        assert_eq!(fs::read_to_string(&missing).unwrap(), "new");
+    }
+
+    /// `append_instruction` preserves user content and adds the template under a
+    /// marker; a second append is a no-op.
+    #[test]
+    fn test_append_instruction_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("CLAUDE.md");
+        fs::write(&path, "USER TEXT").unwrap();
+
+        let changed = append_instruction(&path, "TEMPLATE").unwrap();
+        assert!(changed);
+        let after_first = fs::read_to_string(&path).unwrap();
+        assert!(after_first.contains("USER TEXT"));
+        assert!(after_first.contains(APPEND_MARKER));
+        assert!(after_first.contains("TEMPLATE"));
+
+        let changed_again = append_instruction(&path, "TEMPLATE").unwrap();
+        assert!(!changed_again, "second append must be a no-op");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            after_first,
+            "file must be unchanged on re-append"
+        );
+    }
+
+    /// `append_instruction` on a missing file just creates it.
+    #[test]
+    fn test_append_instruction_creates_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("CLAUDE.md");
+        let changed = append_instruction(&path, "TEMPLATE").unwrap();
+        assert!(changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TEMPLATE");
+    }
+
+    /// `Category::Instructions` writes only the instruction file — no skills,
+    /// no `.mcp.json`.
+    #[test]
+    fn test_scaffold_category_instructions_only() {
+        let tmp = TempDir::new().unwrap();
+        let written = scaffold_category(
+            tmp.path(),
+            &["claude"],
+            Category::Instructions,
+            WritePolicy::Force,
+        )
+        .unwrap();
+
+        assert!(tmp.path().join("CLAUDE.md").exists());
+        assert!(!tmp.path().join(".mcp.json").exists());
+        assert!(
+            !tmp.path()
+                .join(".claude/skills/bears-planning/SKILL.md")
+                .exists()
+        );
+        assert!(written.iter().all(|p| !p.ends_with(".mcp.json")));
+    }
+
+    /// `Category::Skills` writes the skill files and merges `.mcp.json`, but not
+    /// the instruction file.
+    #[test]
+    fn test_scaffold_category_skills_includes_mcp() {
+        let tmp = TempDir::new().unwrap();
+        scaffold_category(
+            tmp.path(),
+            &["claude"],
+            Category::Skills,
+            WritePolicy::Force,
+        )
+        .unwrap();
+
+        assert!(!tmp.path().join("CLAUDE.md").exists());
+        assert!(tmp.path().join(".mcp.json").exists());
+        assert!(
+            tmp.path()
+                .join(".claude/skills/bears-planning/SKILL.md")
+                .exists()
+        );
+    }
+
+    /// `All` + `SkipExisting` keeps an edited instruction file but still creates
+    /// missing skill files and merges `.mcp.json`.
+    #[test]
+    fn test_scaffold_category_all_skip_existing() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "MY EDITS").unwrap();
+
+        scaffold_category(
+            tmp.path(),
+            &["claude"],
+            Category::All,
+            WritePolicy::SkipExisting,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
+            "MY EDITS",
+            "existing instruction file must be preserved"
+        );
+        assert!(
+            tmp.path()
+                .join(".claude/skills/bears-planning/SKILL.md")
+                .exists()
+        );
+        assert!(tmp.path().join(".mcp.json").exists());
+    }
+
+    /// `All` + `Append` keeps user instruction text (appending the template) and
+    /// overwrites the generated skill files.
+    #[test]
+    fn test_scaffold_category_all_append() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "MY EDITS").unwrap();
+
+        scaffold_category(tmp.path(), &["claude"], Category::All, WritePolicy::Append).unwrap();
+
+        let md = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert!(md.contains("MY EDITS"));
+        assert!(md.contains(APPEND_MARKER));
+        assert!(md.contains("Bears"), "template content must be appended");
+        assert!(
+            tmp.path()
+                .join(".claude/skills/bears-planning/SKILL.md")
+                .exists()
+        );
+    }
+
+    /// `category_targets` lists plain files but never `.mcp.json`.
+    #[test]
+    fn test_category_targets_excludes_mcp_json() {
+        let tmp = TempDir::new().unwrap();
+        let targets = category_targets(tmp.path(), &["claude"], Category::All);
+        assert!(targets.iter().any(|p| p.ends_with("CLAUDE.md")));
+        assert!(
+            targets.iter().all(|p| !p.ends_with(".mcp.json")),
+            ".mcp.json must be excluded from prompt-trigger targets"
+        );
     }
 }

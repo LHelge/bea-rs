@@ -33,6 +33,38 @@ pub enum Command {
         /// Scaffold OpenAI Codex integration files (AGENTS.md)
         #[arg(long)]
         codex: bool,
+
+        /// Overwrite existing agent files without prompting
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Scaffold coding-agent integration files (does not create .bears/)
+    Agent {
+        /// Which files to scaffold
+        #[arg(value_enum)]
+        category: AgentCategory,
+
+        /// Scaffold Claude Code files
+        #[arg(long)]
+        claude: bool,
+
+        /// Scaffold GitHub Copilot files
+        #[arg(long)]
+        copilot: bool,
+
+        /// Scaffold OpenAI Codex files
+        #[arg(long)]
+        codex: bool,
+
+        /// Overwrite existing files without prompting
+        #[arg(long)]
+        force: bool,
+
+        /// Append to an existing instruction file instead of overwriting
+        /// (only valid for the `instructions` and `all` categories)
+        #[arg(long, conflicts_with = "force")]
+        append: bool,
     },
 
     /// Create a new task
@@ -275,4 +307,25 @@ pub enum DepCommand {
         /// Task ID
         id: String,
     },
+}
+
+/// Which subset of agent integration files `bea agent` should scaffold.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentCategory {
+    /// Top-level instruction file only (CLAUDE.md / AGENTS.md / copilot-instructions.md)
+    Instructions,
+    /// Skill, reference, and planner-agent files plus MCP registration
+    Skills,
+    /// Everything (same files as `bea init`)
+    All,
+}
+
+impl From<AgentCategory> for crate::scaffold::Category {
+    fn from(c: AgentCategory) -> Self {
+        match c {
+            AgentCategory::Instructions => crate::scaffold::Category::Instructions,
+            AgentCategory::Skills => crate::scaffold::Category::Skills,
+            AgentCategory::All => crate::scaffold::Category::All,
+        }
+    }
 }

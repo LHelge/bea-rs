@@ -1,7 +1,7 @@
 mod args;
 mod cmd;
 
-pub use args::{Args, Command, DepCommand};
+pub use args::{AgentCategory, Args, Command, DepCommand};
 
 use std::path::Path;
 
@@ -22,7 +22,20 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             claude,
             copilot,
             codex,
-        } => return cmd::cmd_init(base, *claude, *copilot, *codex, cli.json),
+            force,
+        } => return cmd::cmd_init(base, *claude, *copilot, *codex, *force, cli.json),
+        Command::Agent {
+            category,
+            claude,
+            copilot,
+            codex,
+            force,
+            append,
+        } => {
+            return cmd::cmd_agent_init(
+                base, *category, *claude, *copilot, *codex, *force, *append, cli.json,
+            );
+        }
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut Args::command(), "bea", &mut std::io::stdout());
             return Ok(());
@@ -143,6 +156,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Archive { id } => cmd::cmd_archive(base, &tasks, id.as_deref(), cli.json).await,
         // Already handled above
         Command::Init { .. }
+        | Command::Agent { .. }
         | Command::Completions { .. }
         | Command::Restore { .. }
         | Command::Log { .. }
