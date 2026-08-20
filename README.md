@@ -326,6 +326,80 @@ Add to your Claude Code MCP config (`claude mcp add`):
 
 ---
 
+## Library usage
+
+The core is published as a library crate so an independent application can
+drive a bears repository directly, with no `bea` binary required on the user's
+machine.
+
+The package is `bea-rs`; the library is `bears`:
+
+```toml
+[dependencies]
+bears = { package = "bea-rs", version = "0.8", default-features = false }
+```
+
+`default-features = false` drops the CLI, TUI, and MCP frontends — the library
+then pulls in ~33 crates instead of ~180.
+
+```rust
+use bears::{Priority, Status, service, store, task::TaskType};
+
+let base = std::path::Path::new(".");
+store::init(base)?;
+
+// Every call re-reads the directory — there is no cache and no daemon.
+let tasks = store::load_all(base).await?;
+let task = service::create_task(
+    base,
+    &tasks,
+    "Design the API".to_string(),
+    Priority::P0,
+    vec!["backend".to_string()],   // tags
+    vec![],                        // depends_on
+    None,                          // parent epic
+    String::new(),                 // markdown body
+    TaskType::Task,
+)?;
+
+let tasks = store::load_all(base).await?;
+for t in service::list_ready(&tasks, None, None, None) {
+    println!("{} {} {}", t.id, t.priority, t.title);
+}
+
+service::set_status(base, &tasks, &task.id, Status::Done)?;
+```
+
+### Layout
+
+| Module | What it does |
+|--------|--------------|
+| `store` | Parse and write the `.bears/` directory, including the archive |
+| `task` | `Task`, the frontmatter format, ID and slug generation |
+| `graph` | Dependency graph, readiness, effective priority, cycle detection |
+| `service` | Business logic — create, update, reparent, archive, epic progress and auto-close |
+| `scaffold` | Write coding-agent integration files (`CLAUDE.md`, skills, MCP config) |
+| `error` | `Error` and `Result` |
+
+Most callers want `service`. It takes `&HashMap<String, Task>` from
+`store::load_all` and a `base` path, and writes changes straight to disk.
+
+### Features
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `cli` | yes | Builds the `bea` binary: CLI, MCP server, and TUI |
+| `schema` | via `cli` | Derives `schemars::JsonSchema` on `Status`, `Priority`, and `TaskType` — useful when exposing bears types in your own tool schemas |
+
+### Errors
+
+Library errors carry no frontend suggestions. `Error::NotInitialized` renders
+as ``not initialized: no `.bears` directory found`` — it is up to your frontend
+to add whatever remediation hint fits. The `bea` binary attaches its own hints
+in `hint_for()` in `main.rs`.
+
+---
+
 ## Development
 
 ```sh
@@ -343,7 +417,8 @@ All three of `fmt`, `clippy`, and `test` must pass cleanly before committing.
 
 ```
 src/
-  main.rs        Entry point — dispatch to CLI, MCP server, or TUI
+  lib.rs         Library root — public API (store, task, graph, service, ...)
+  main.rs        `bea` binary entry point — dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs       CLI module root and dispatch
     args.rs      clap command and argument definitions
@@ -359,7 +434,7 @@ src/
   graph.rs       Dependency graph, ready computation, cycle detection
   scaffold.rs    `bea init` harness scaffolding (Claude/Copilot/Codex)
   config.rs      .bears.yml configuration
-  editor.rs      $EDITOR integration for `bea edit`
+  editor.rs      $EDITOR integration for `bea edit` (binary-only)
   error.rs       Error types
 templates/       Embedded harness templates for init scaffolding
 .bears/          Task files (created by `bea init`)

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::ExitStatus;
 
-use crate::error::{Error, Result};
+use bears::error::{Error, Result};
 
 /// Resolve the user's preferred editor from environment variables.
 ///

@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`bea-rs` is a file-based task tracker CLI tool named `bears` (binary: `bea`). It manages a task/issue graph stored as markdown files with YAML frontmatter in a `.bears/` directory. It has two modes:
+`bea-rs` is a file-based task tracker named `bears` (binary: `bea`). It manages a task/issue graph stored as markdown files with YAML frontmatter in a `.bears/` directory.
+
+The crate ships **both a library and a binary**. The package is `bea-rs`; the library is `bears` (`[lib] name = "bears"`, since `bears` was taken on crates.io). The library is the core; the CLI, MCP server, and TUI are binary-only frontends built on top of it. It has three modes:
 
 1. **CLI mode** (`bea <command>`): Human-friendly interface for managing tasks
 2. **MCP server mode** (`bea mcp`): Exposes the same functionality as MCP tool calls over stdio for AI agents
@@ -21,6 +23,7 @@ cargo test <test_name>       # Run a specific test
 cargo clippy                 # Lint
 cargo fmt                    # Format code
 cargo add <crate>            # Add a new dependency (always use this, not manual Cargo.toml edits)
+cargo build --lib --no-default-features   # Verify the library still stands alone
 ```
 
 ## Task tracking
@@ -45,7 +48,8 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): 
 
 ```
 src/
-  main.rs          # Entry point: dispatch to CLI, MCP server, or TUI
+  lib.rs           # LIBRARY ROOT — public API surface (see "Library/binary split")
+  main.rs          # `bea` BINARY entry point: dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs         # CLI module root and dispatch
     args.rs        # clap command and argument definitions
@@ -67,9 +71,37 @@ src/
   graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
   scaffold.rs      # `bea init` harness-integration scaffolding (Claude/Copilot/Codex)
   config.rs        # .bears.yml configuration loading
-  editor.rs        # $EDITOR integration for `bea edit`
+  editor.rs        # $EDITOR integration for `bea edit` (binary-only)
   error.rs         # thiserror error types
 templates/         # Embedded harness templates (via include_str!) for init scaffolding
+```
+
+### Library/binary split
+
+`src/lib.rs` exposes `config`, `error`, `graph`, `scaffold`, `service`, `store`, `task`, plus the
+`Error`/`Result`/`Task`/`Status`/`Priority`/`TaskType` re-exports. `cli`, `mcp`, `tui`, and `editor`
+are declared in `main.rs` and are **not** part of the library.
+
+Consequences to respect when editing:
+
+- The core must never reference `cli`, `mcp`, or `tui`. Dependency arrows point inward only.
+- Frontend code refers to the core as `bears::store`, **not** `crate::store` — the binary is a
+  separate crate from the library.
+- `pub(crate)` in a core module is invisible to the frontends. Anything a frontend needs must be `pub`.
+- Frontend-only dependencies (clap, ratatui, crossterm, rmcp, notify, owo-colors, tui-markdown,
+  shell-words, clap_complete) are **optional** and gated behind the default `cli` feature; `[[bin]]`
+  carries `required-features = ["cli"]`. Adding a dep used only by a frontend means adding it to
+  that feature list, not just `[dependencies]`.
+- `schemars::JsonSchema` derives on the core enums are gated behind the `schema` feature via
+  `#[cfg_attr(feature = "schema", derive(...))]`, because JSON Schema is an MCP concern.
+- **Error messages carry no frontend hints.** The library states what went wrong; the frontend adds
+  remediation. CLI hints live in `hint_for()` in `main.rs`.
+
+Verify both configurations build after touching the split:
+
+```bash
+cargo build --lib --no-default-features   # library must stand alone
+cargo build                               # binary with all frontends
 ```
 
 ### Core design principles

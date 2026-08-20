@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::service::epic_progress;
-use crate::task::{Task, TaskType};
+use bears::service::epic_progress;
+use bears::task::{Task, TaskType};
 
 use super::super::style::Theme;
 
@@ -107,7 +107,7 @@ impl<'a> TaskInfoWidget<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Status, Task};
+    use bears::task::{Priority, Status, Task};
 
     #[test]
     fn basic_task_info_lines() {

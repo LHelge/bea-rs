@@ -10,9 +10,9 @@ use std::path::Path;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 
-use crate::error::Result;
-use crate::store;
-use crate::task::Task;
+use bears::error::Result;
+use bears::store;
+use bears::task::Task;
 
 pub use app::{Action, App};
 
@@ -111,8 +111,8 @@ fn edit_task_in_editor(app: &App, task_id: &str, terminal: &mut DefaultTerminal)
 
 /// Create a new task and optionally open in editor. Returns the new task ID.
 fn create_task(app: &App, title: &str, terminal: &mut DefaultTerminal) -> Result<String> {
-    use crate::service;
-    use crate::task::{Priority, TaskType};
+    use bears::service;
+    use bears::task::{Priority, TaskType};
 
     let (_, task_map) = load_tasks_sync(&app.base)?;
     let task = service::create_task(
@@ -206,7 +206,7 @@ async fn run_loop(
                     Action::UpdateStatus(id, status) => {
                         match (|| -> Result<()> {
                             let (_, task_map) = load_tasks_sync(&app.base)?;
-                            crate::service::set_status(&app.base, &task_map, &id, status)?;
+                            bears::service::set_status(&app.base, &task_map, &id, status)?;
                             reload(app)?;
                             Ok(())
                         })() {
@@ -217,7 +217,7 @@ async fn run_loop(
                     Action::DeleteTask(id) => {
                         match (|| -> Result<()> {
                             let (_, task_map) = load_tasks_sync(&app.base)?;
-                            crate::service::delete_task(&app.base, &task_map, &id)?;
+                            bears::service::delete_task(&app.base, &task_map, &id)?;
                             reload(app)?;
                             Ok(())
                         })() {
@@ -249,7 +249,7 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Status, Task};
+    use bears::task::{Priority, Status, Task};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -279,11 +279,11 @@ mod tests {
         std::fs::create_dir_all(&bears_dir).unwrap();
 
         let tasks: HashMap<String, Task> = HashMap::new();
-        let result = crate::service::set_status(
+        let result = bears::service::set_status(
             tmp.path(),
             &tasks,
             "nonexistent",
-            crate::task::Status::Done,
+            bears::task::Status::Done,
         );
         assert!(result.is_err(), "set_status on unknown task ID should fail");
     }
@@ -514,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn reload_applies_disk_state_to_app() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::store::init(tmp.path()).unwrap();
+        bears::store::init(tmp.path()).unwrap();
         let bears_dir = tmp.path().join(".bears");
 
         // Write two open tasks and one done task.
@@ -523,7 +523,7 @@ mod tests {
         write_task_file(&bears_dir, "t03", "Gamma Task", "done");
 
         // Load from disk and build initial app.
-        let task_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let task_map = bears::store::load_all(tmp.path()).await.unwrap();
         let mut task_list: Vec<Task> = task_map.values().cloned().collect();
         task_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
         let mut app = App::new(task_list, task_map, tmp.path().to_path_buf());
@@ -552,7 +552,7 @@ mod tests {
         std::fs::remove_file(bears_dir.join("t02-beta-task.md")).unwrap();
 
         // Re-load from disk and call App::reload (the path the watcher triggers).
-        let new_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let new_map = bears::store::load_all(tmp.path()).await.unwrap();
         let mut new_list: Vec<Task> = new_map.values().cloned().collect();
         new_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
         app.reload(new_list, new_map);
@@ -588,11 +588,11 @@ mod tests {
         // Graph must be rebuilt: there are no dependency edges, so every open
         // task should be recognised as ready by the graph helper.
         assert!(
-            crate::graph::is_task_ready(&app.task_map, app.task_map.get("t01").unwrap()),
+            bears::graph::is_task_ready(&app.task_map, app.task_map.get("t01").unwrap()),
             "t01 has no deps, so it must be ready"
         );
         assert!(
-            crate::graph::is_task_ready(&app.task_map, app.task_map.get("t04").unwrap()),
+            bears::graph::is_task_ready(&app.task_map, app.task_map.get("t04").unwrap()),
             "t04 has no deps, so it must be ready"
         );
     }
@@ -602,19 +602,19 @@ mod tests {
     #[tokio::test]
     async fn reload_rebuilds_graph_correctly() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::store::init(tmp.path()).unwrap();
+        bears::store::init(tmp.path()).unwrap();
         let bears_dir = tmp.path().join(".bears");
 
         // Two open tasks, no dependencies initially.
         write_task_file(&bears_dir, "u01", "Upstream Task", "open");
         write_task_file(&bears_dir, "u02", "Downstream Task", "open");
 
-        let task_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let task_map = bears::store::load_all(tmp.path()).await.unwrap();
         let task_list: Vec<Task> = task_map.values().cloned().collect();
         let mut app = App::new(task_list, task_map, tmp.path().to_path_buf());
 
         // Both tasks are initially ready (no deps).
-        assert!(crate::graph::is_task_ready(
+        assert!(bears::graph::is_task_ready(
             &app.task_map,
             app.task_map.get("u02").unwrap()
         ));
@@ -625,18 +625,18 @@ mod tests {
         std::fs::write(bears_dir.join("u02-downstream-task.md"), blocked_content).unwrap();
 
         // Reload from disk.
-        let new_map = crate::store::load_all(tmp.path()).await.unwrap();
+        let new_map = bears::store::load_all(tmp.path()).await.unwrap();
         let new_list: Vec<Task> = new_map.values().cloned().collect();
         app.reload(new_list, new_map);
 
         // After reload, u02 depends on open u01 → not ready.
         assert!(
-            !crate::graph::is_task_ready(&app.task_map, app.task_map.get("u02").unwrap()),
+            !bears::graph::is_task_ready(&app.task_map, app.task_map.get("u02").unwrap()),
             "u02 must not be ready after reload adds dep on open u01"
         );
         // u01 still has no deps → still ready.
         assert!(
-            crate::graph::is_task_ready(&app.task_map, app.task_map.get("u01").unwrap()),
+            bears::graph::is_task_ready(&app.task_map, app.task_map.get("u01").unwrap()),
             "u01 must still be ready"
         );
     }

@@ -6,12 +6,12 @@ use owo_colors::OwoColorize;
 use owo_colors::Stream::Stdout;
 use owo_colors::Style;
 
-use crate::error::{Error, Result};
-use crate::graph::{DepNode, DepNodeJson};
-use crate::scaffold;
-use crate::service;
-use crate::store;
-use crate::task::{self, Priority, Status, Task, TaskType};
+use bears::error::{Error, Result};
+use bears::graph::{DepNode, DepNodeJson};
+use bears::scaffold;
+use bears::service;
+use bears::store;
+use bears::task::{self, Priority, Status, Task, TaskType};
 
 use super::{color_id, color_priority, color_status, color_tags, format_priority, output};
 

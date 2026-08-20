@@ -1,12 +1,12 @@
 [package]
 name = "bea-rs"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 description = "A file-based task tracker CLI and MCP server for AI agent workflows"
 license = "MIT"
 repository = "https://github.com/LHelge/bea-rs"
 keywords = ["task", "cli", "mcp", "agent"]
-categories = ["command-line-utilities"]
+categories = ["command-line-utilities", "development-tools"]
 include = [
     "src/**",
     "templates/**",
@@ -16,32 +16,63 @@ include = [
     "LICENSE",
 ]
 
+[lib]
+name = "bears"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bea"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Derive `schemars::JsonSchema` on the public enums. Useful for library
+# consumers exposing bears types in their own tool/JSON schemas.
+schema = ["dep:schemars"]
+# Everything the `bea` binary needs: CLI parsing, the MCP server, and the TUI.
+# Library consumers should use `default-features = false`.
+cli = [
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:crossterm",
+    "dep:notify",
+    "dep:notify-debouncer-mini",
+    "dep:owo-colors",
+    "dep:ratatui",
+    "dep:rmcp",
+    "schema",
+    "dep:shell-words",
+    "dep:tui-markdown",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+    "tokio/sync",
+]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.6.1", features = ["derive"] }
-clap_complete = "4.6.5"
-crossterm = "0.29.0"
-notify = "8.2.0"
-notify-debouncer-mini = "0.7.0"
-owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+clap = { version = "4.6.1", features = ["derive"], optional = true }
+clap_complete = { version = "4.6.5", optional = true }
+crossterm = { version = "0.29.0", optional = true }
+notify = { version = "8.2.0", optional = true }
+notify-debouncer-mini = { version = "0.7.0", optional = true }
+owo-colors = { version = "4.3.0", features = ["supports-colors"], optional = true }
 rand = "0.10.1"
-ratatui = "0.30.1"
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io"] }
-schemars = "1.2.1"
+ratatui = { version = "0.30.1", optional = true }
+rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io"], optional = true }
+schemars = { version = "1.2.1", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yml = "0.0.13"
-shell-words = "1.1.1"
+shell-words = { version = "1.1.1", optional = true }
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["fs", "macros", "rt-multi-thread"] }
-tui-markdown = "0.3.7"
+tokio = { version = "1.52.3", features = ["fs", "rt"] }
+tui-markdown = { version = "0.3.7", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 rmcp = { version = "1.7.0", features = ["client", "transport-child-process"] }
 tempfile = "3.27.0"
+# Unit tests use #[tokio::test]; keep them working under --no-default-features.
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
