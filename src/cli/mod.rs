@@ -10,10 +10,10 @@ use owo_colors::OwoColorize;
 use owo_colors::Stream::Stdout;
 use serde::Serialize;
 
-use crate::error::{Error, Result};
-use crate::service;
-use crate::store;
-use crate::task::{Priority, Status};
+use bears::error::{Error, Result};
+use bears::service;
+use bears::store;
+use bears::task::{Priority, Status};
 
 pub async fn run(cli: Args, base: &Path) -> Result<()> {
     // Handle commands that don't need task data

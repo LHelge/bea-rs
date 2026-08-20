@@ -1,7 +1,7 @@
 use rmcp::schemars;
 use serde::Deserialize;
 
-use crate::task::{Priority, Status, TaskType};
+use bears::task::{Priority, Status, TaskType};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListReadyParams {

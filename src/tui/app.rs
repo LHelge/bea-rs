@@ -6,8 +6,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{ListState, Widget};
 
-use crate::graph;
-use crate::task::{Status, Task, TaskType};
+use bears::graph;
+use bears::task::{Status, Task, TaskType};
 
 use super::style::Theme;
 use super::widgets::{
@@ -411,7 +411,7 @@ impl App {
 #[cfg(test)]
 pub(super) mod test_helpers {
     use super::*;
-    use crate::task::{Priority, Task};
+    use bears::task::{Priority, Task};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     pub fn make_key(code: KeyCode) -> KeyEvent {
@@ -448,7 +448,7 @@ pub(super) mod test_helpers {
 mod tests {
     use super::test_helpers::*;
     use super::*;
-    use crate::task::{Priority, Status};
+    use bears::task::{Priority, Status};
 
     #[test]
     fn test_empty_app() {
@@ -517,8 +517,8 @@ mod tests {
     /// whose deps are all Done must be included.
     #[test]
     fn test_ready_filter_agrees_with_is_task_ready() {
-        use crate::graph;
-        use crate::task::{Priority, Task};
+        use bears::graph;
+        use bears::task::{Priority, Task};
 
         // Build a small set of tasks with varying readiness:
         //  - "ready":    Open, dep on "done_dep" (Done)  → ready

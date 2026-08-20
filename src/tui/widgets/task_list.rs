@@ -4,7 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget};
 
-use crate::task::{Task, TaskType};
+use bears::task::{Task, TaskType};
 
 use super::super::app::Filter;
 use super::super::style::{self, Theme};
@@ -93,7 +93,7 @@ impl StatefulWidget for TaskListWidget<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Task};
+    use bears::task::{Priority, Task};
     use ratatui::buffer::Buffer;
 
     fn sample_tasks() -> Vec<Task> {

@@ -7,7 +7,7 @@ use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::*;
 
-use crate::error::Error;
+use bears::error::Error;
 
 #[derive(Clone)]
 pub struct BeaMcp {
@@ -36,7 +36,7 @@ fn tool_ok(r: Result<CallToolResult, Error>) -> Result<CallToolResult, rmcp::Err
     Ok(r.unwrap_or_else(|e| CallToolResult::error(vec![Content::text(e.to_string())])))
 }
 
-pub async fn run(base: &Path) -> crate::error::Result<()> {
+pub async fn run(base: &Path) -> bears::error::Result<()> {
     let server = BeaMcp::new(base.to_path_buf());
     let service = server
         .serve(rmcp::transport::stdio())

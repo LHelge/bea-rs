@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::task::{Task, TaskType};
+use bears::task::{Task, TaskType};
 
 use super::super::style::{self, Theme};
 
@@ -166,7 +166,7 @@ fn render_children<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Status};
+    use bears::task::{Priority, Status};
 
     fn task(id: &str, title: &str) -> Task {
         Task::new(id.into(), title.into(), Priority::P1)

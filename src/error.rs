@@ -4,7 +4,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("not initialized — run `bea init` first")]
+    #[error("not initialized: no `.bears` directory found")]
     NotInitialized,
 
     #[error("task not found: {0}")]

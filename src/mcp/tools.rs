@@ -3,10 +3,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::error::Error;
-use crate::service;
-use crate::store;
-use crate::task::{self, Priority, Status, Task};
+use bears::error::Error;
+use bears::service;
+use bears::store;
+use bears::task::{self, Priority, Status, Task};
 
 use super::params::*;
 use super::{BeaMcp, ok_json, tool_ok};
@@ -445,8 +445,8 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::*;
 
-    use crate::store;
-    use crate::task::{Priority, Status, TaskType};
+    use bears::store;
+    use bears::task::{Priority, Status, TaskType};
 
     use super::super::BeaMcp;
     use super::super::params::*;

@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
-use crate::task::Task;
+use bears::task::Task;
 
 use super::super::style::Theme;
 use super::body::BodyWidget;

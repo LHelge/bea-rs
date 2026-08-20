@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::task::{Priority, Status};
+use bears::task::{Priority, Status};
 
 // ── Status indicators ────────────────────────────────────────────────────
 

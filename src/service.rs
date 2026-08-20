@@ -47,7 +47,7 @@ pub fn create_task(
     // full id so the stored parent matches the canonical task id (otherwise
     // epic_progress / reparenting lookups by full id would miss it).
     // The parent must exist and be an epic.
-    let parent = match parent.and_then(|p| if p.is_empty() { None } else { Some(p) }) {
+    let parent = match parent.filter(|p| !p.is_empty()) {
         Some(pid) => {
             let parent_id = store::resolve_prefix(tasks, &pid)?;
             if !tasks[&parent_id].task_type.is_epic() {

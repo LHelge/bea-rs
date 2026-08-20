@@ -37,7 +37,8 @@ macro_rules! impl_str_enum {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     #[serde(rename = "open")]
     Open,
@@ -61,9 +62,8 @@ impl_str_enum!(
     Status::Cancelled  => "cancelled",
 );
 
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskType {
     #[default]
     #[serde(rename = "task")]
@@ -89,9 +89,8 @@ impl_str_enum!(
     TaskType::Epic => "epic",
 );
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Priority {
     #[serde(rename = "P0")]
     P0,

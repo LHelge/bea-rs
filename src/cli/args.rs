@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::task::{Priority, Status};
+use bears::task::{Priority, Status};
 
 #[derive(Parser)]
 #[command(
@@ -320,12 +320,12 @@ pub enum AgentCategory {
     All,
 }
 
-impl From<AgentCategory> for crate::scaffold::Category {
+impl From<AgentCategory> for bears::scaffold::Category {
     fn from(c: AgentCategory) -> Self {
         match c {
-            AgentCategory::Instructions => crate::scaffold::Category::Instructions,
-            AgentCategory::Skills => crate::scaffold::Category::Skills,
-            AgentCategory::All => crate::scaffold::Category::All,
+            AgentCategory::Instructions => bears::scaffold::Category::Instructions,
+            AgentCategory::Skills => bears::scaffold::Category::Skills,
+            AgentCategory::All => bears::scaffold::Category::All,
         }
     }
 }
