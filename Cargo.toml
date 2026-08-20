@@ -1,6 +1,6 @@
 [package]
 name = "bea-rs"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "A file-based task tracker CLI and MCP server for AI agent workflows"
 license = "MIT"
@@ -59,7 +59,7 @@ notify-debouncer-mini = { version = "0.7.0", optional = true }
 owo-colors = { version = "4.3.0", features = ["supports-colors"], optional = true }
 rand = "0.10.1"
 ratatui = { version = "0.30.1", optional = true }
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io"], optional = true }
+rmcp = { version = "3.1.4", features = ["server", "macros", "transport-io"], optional = true }
 schemars = { version = "1.2.1", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -72,7 +72,7 @@ tui-markdown = { version = "0.3.7", optional = true }
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
-rmcp = { version = "1.7.0", features = ["client", "transport-child-process"] }
+rmcp = { version = "3.1.4", features = ["client", "transport-child-process"] }
 tempfile = "3.27.0"
 # Unit tests use #[tokio::test]; keep them working under --no-default-features.
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }

@@ -1,6 +1,6 @@
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use bears::error::Error;
@@ -443,7 +443,7 @@ impl BeaMcp {
 #[cfg(test)]
 mod tests {
     use rmcp::handler::server::wrapper::Parameters;
-    use rmcp::model::*;
+    use rmcp::model::{CallToolResult, ContentBlock};
 
     use bears::store;
     use bears::task::{Priority, Status, TaskType};
@@ -461,16 +461,16 @@ mod tests {
     }
 
     fn extract_json(result: &CallToolResult) -> serde_json::Value {
-        let text = match &result.content[0].raw {
-            RawContent::Text(t) => &t.text,
+        let text = match &result.content[0] {
+            ContentBlock::Text(t) => &t.text,
             _ => panic!("expected text content"),
         };
         serde_json::from_str(text).unwrap()
     }
 
     fn extract_text(result: &CallToolResult) -> &str {
-        match &result.content[0].raw {
-            RawContent::Text(t) => &t.text,
+        match &result.content[0] {
+            ContentBlock::Text(t) => &t.text,
             _ => panic!("expected text content"),
         }
     }

@@ -3,7 +3,7 @@
 //! schema validation, and tool dispatch.
 
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult, RawContent};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use tempfile::TempDir;
@@ -37,16 +37,16 @@ fn params(name: &'static str, args: serde_json::Value) -> CallToolRequestParams 
 }
 
 fn extract_json(result: &CallToolResult) -> serde_json::Value {
-    let text = match &result.content[0].raw {
-        RawContent::Text(t) => &t.text,
+    let text = match &result.content[0] {
+        ContentBlock::Text(t) => &t.text,
         other => panic!("expected text content, got {other:?}"),
     };
     serde_json::from_str(text).unwrap()
 }
 
 fn extract_text(result: &CallToolResult) -> &str {
-    match &result.content[0].raw {
-        RawContent::Text(t) => &t.text,
+    match &result.content[0] {
+        ContentBlock::Text(t) => &t.text,
         other => panic!("expected text content, got {other:?}"),
     }
 }
@@ -66,7 +66,11 @@ async fn test_handshake_and_tool_list() {
     let client = connect(&tmp).await;
 
     let info = client.peer_info().expect("no server info");
-    assert_eq!(info.server_info.name, "bears");
+    let server_info = info
+        .server_info
+        .as_ref()
+        .expect("no server implementation info");
+    assert_eq!(server_info.name, "bears");
 
     let tools = client.list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -231,15 +235,29 @@ async fn test_invalid_priority_rejected_by_schema() {
     let tmp = TempDir::new().unwrap();
     let client = connect(&tmp).await;
 
-    // Typed params: "high" is not a Priority, so this must fail at the
-    // protocol layer (invalid_params), before reaching the tool body.
+    // Typed params: "high" is not a Priority, so this is rejected at the
+    // deserialize layer, before reaching the tool body. rmcp reports that
+    // as a tool-level error result rather than a JSON-RPC protocol error.
     let result = client
         .call_tool(params(
             "create_task",
             serde_json::json!({ "title": "Bad", "priority": "high" }),
         ))
-        .await;
-    assert!(result.is_err(), "expected protocol-level invalid params");
+        .await
+        .expect("argument validation is a tool result, not a protocol error");
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        extract_text(&result).contains("failed to deserialize parameters"),
+        "unexpected message: {}",
+        extract_text(&result)
+    );
+
+    // No task was created — the tool body never ran.
+    let listed = client
+        .call_tool(params("list_all_tasks", serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&listed).as_array().unwrap().len(), 0);
 
     client.cancel().await.unwrap();
 }
