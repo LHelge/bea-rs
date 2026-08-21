@@ -43,11 +43,18 @@ pub enum Error {
     #[error("task {id} is not archivable — active dependents: {}", blockers.join(", "))]
     NotArchivable { id: String, blockers: Vec<String> },
 
-    /// The task cannot be released because nobody is working on it.
-    #[error(
-        "task {id} is not in progress (status: {status}) — only in-progress tasks can be released"
-    )]
-    NotInProgress { id: String, status: Status },
+    /// A workflow shortcut was used on a task whose status does not allow it.
+    ///
+    /// The workflow verbs (`release`, `review`, `reject`, `propose`, `accept`)
+    /// each move a task along one specific edge; setting a status directly is
+    /// always available as the escape hatch.
+    #[error("cannot {action} task {id}: expected status {expected}, but it is {actual}")]
+    InvalidStatus {
+        id: String,
+        action: &'static str,
+        expected: Status,
+        actual: Status,
+    },
 
     /// The task is not found in the archive.
     #[error("task not found in archive: {0}")]

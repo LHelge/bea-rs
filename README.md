@@ -58,6 +58,7 @@ bea create "Implement endpoints" --priority P1 --tag backend --depends-on <id>
 bea list
 bea ready           # what can I work on right now?
 bea start <id>
+bea review <id>     # done working — hand it to a reviewer
 bea done <id>
 bea release <id>    # stuck? hand it back to the pool
 ```
@@ -89,7 +90,12 @@ Any Markdown body goes here.
 
 Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are omitted when empty — a missing `attempts` counts as `0`.
 
-**Statuses:** `open` · `in_progress` · `done` · `blocked` · `cancelled`
+**Statuses:** `proposed` · `open` · `in_progress` · `review` · `done` · `blocked` · `cancelled`
+
+A task normally travels `open → in_progress → review → done`. `proposed` is the waiting room in
+front of the backlog: proposals are never ready and are hidden from `bea list` until accepted.
+`review` is finished work waiting for a second pair of eyes — it is not ready work either, and it
+does **not** unblock dependents, so nothing gets built on top of unreviewed code.
 
 **Types:** `task` (default) · `epic` (high-level objective grouping child tasks)
 
@@ -125,7 +131,8 @@ bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [
 Use `--epic` to create an epic instead of a regular task. Epics are high-level objectives that group child tasks via the `--parent` flag.
 
 ### `bea list`
-Hides `done` and `cancelled` tasks by default. Use `--all` / `-a` to show everything.
+Hides `done`, `cancelled` and `proposed` tasks by default. Use `--all` / `-a` to show everything, or
+`--status proposed` to see just the proposal queue.
 
 ```sh
 bea list
@@ -138,6 +145,9 @@ bea list --all
 
 ### `bea ready`
 Show tasks that are `open` and have all dependencies completed. Epics are excluded — only actionable tasks appear. This is the key command for agent workflows — always start here.
+
+`proposed` and `review` tasks never appear here: a proposal has not been accepted yet, and a task in
+review is finished work needing a reviewer, not new work. See `bea review` for that queue.
 
 ```sh
 bea ready
@@ -191,6 +201,36 @@ is cleared, so the task shows up in `bea ready` again for another worker. It app
 reopened. Use it when a worker gets stuck or is killed mid-task.
 
 When all children of an epic are completed, the epic is automatically marked as done.
+
+### `bea review` / `bea reject`
+Review is the step between "I finished it" and "it's done":
+
+```sh
+bea review <id>   # in_progress → review, submit your work
+bea review        # list everything awaiting review
+bea reject <id>   # review → open, changes needed (assignee kept)
+bea done <id>     # review → done, approved
+```
+
+`bea review` with no ID prints the review queue, sorted highest-priority first, with the assignee of
+each task so you can see who wrote it. It accepts the same `--tag`, `--epic` and `--limit` filters as
+`bea ready`. The queue is deliberately separate from `bea ready` — reviewing someone else's work and
+starting fresh work are different jobs, so an orchestrator can dispatch them to different workers.
+
+`bea reject` keeps the assignee, so a rejected task carries who wrote it and rework can be routed
+back to the same person. Use `bea release` instead to hand it back to the pool entirely.
+
+### `bea propose` / `bea accept`
+A proposal is work someone suggests but that has not been accepted into the backlog:
+
+```sh
+bea propose <id>   # open → proposed
+bea accept <id>    # proposed → open
+bea list --status proposed
+```
+
+Proposals never show up in `bea ready` or in a default `bea list`, so an agent can file ideas
+without drowning the real backlog.
 
 ### `bea dep`
 ```sh
@@ -311,12 +351,17 @@ bea mcp   # starts MCP server over stdio
 | Tool | Description |
 |---|---|
 | `list_ready` | Tasks ready to work on (`limit?`, `tag?`, `epic?`) |
-| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?`) |
+| `list_all_tasks` | All tasks with optional filters (`status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?`, `include_proposed?`) |
 | `list_epics` | List all epics with progress |
 | `get_task` | Full task details (`id`); falls back to the archive, marking the result `archived: true` |
 | `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?`) |
 | `update_task` | Update fields (`id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?`) |
 | `start_task` | Set status to `in_progress`, optionally claiming it (`id`, `assignee?`) |
+| `list_review` | Tasks awaiting review, separate from `list_ready` (`limit?`, `tag?`, `epic?`) |
+| `review_task` | Submit in-progress work for review (`id`) |
+| `reject_task` | Send a task under review back for changes (`id`) |
+| `propose_task` | Demote an open task to a proposal (`id`) |
+| `accept_task` | Accept a proposal into the backlog (`id`) |
 | `release_task` | Release an in-progress task: status → `open`, assignee cleared (`id`) |
 | `complete_task` | Set status to `done` (`id`) |
 | `cancel_task` | Set status to `cancelled` (`id`) |

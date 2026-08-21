@@ -73,6 +73,17 @@ bea release <id> --json
 # Complete a task (set done)
 bea done <id> --json
 
+# Submit finished work for review, or list the review queue
+bea review <id> --json
+bea review --json
+
+# Send a task under review back for changes
+bea reject <id> --json
+
+# Propose work without adding it to the backlog, and accept a proposal
+bea propose <id> --json
+bea accept <id> --json
+
 # Cancel a task
 bea cancel <id> --json
 ```

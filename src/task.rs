@@ -40,10 +40,16 @@ macro_rules! impl_str_enum {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
+    /// Suggested but not yet accepted into the backlog. Never ready.
+    #[serde(rename = "proposed")]
+    Proposed,
     #[serde(rename = "open")]
     Open,
     #[serde(rename = "in_progress")]
     InProgress,
+    /// Work is finished and waiting for someone else to look at it.
+    #[serde(rename = "review")]
+    Review,
     #[serde(rename = "done")]
     Done,
     #[serde(rename = "blocked")]
@@ -55,8 +61,10 @@ pub enum Status {
 impl_str_enum!(
     Status,
     "invalid status",
+    Status::Proposed   => "proposed",
     Status::Open       => "open",
     Status::InProgress => "in_progress",
+    Status::Review     => "review",
     Status::Done       => "done",
     Status::Blocked    => "blocked",
     Status::Cancelled  => "cancelled",

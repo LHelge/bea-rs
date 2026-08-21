@@ -208,11 +208,13 @@ pub fn cmd_list(
     all: bool,
     json: bool,
 ) -> Result<()> {
+    // `--all` is the CLI's "show me everything", proposals included.
     let filtered = service::list_tasks(
         tasks,
         status,
         priority,
         tag.as_deref(),
+        all,
         all,
         epic.as_deref(),
     );
@@ -282,6 +284,79 @@ pub fn cmd_ready(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// List the review queue (`bea review` with no ID).
+pub fn cmd_review_queue(
+    tasks: &HashMap<String, Task>,
+    tag: Option<&str>,
+    epic: Option<&str>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let queue = service::list_review(tasks, tag, limit, epic);
+    let eff = service::effective_priorities(tasks);
+
+    if json {
+        let summaries: Vec<_> = queue.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+        output(&summaries)?;
+    } else if queue.is_empty() {
+        println!("Nothing awaiting review.");
+    } else {
+        for t in &queue {
+            let who = if t.assignee.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", t.assignee)
+            };
+            println!(
+                "[{}] {} — {}{} [{}]",
+                color_id(&t.id),
+                format_priority(&t.priority, eff.get(&t.id)),
+                t.title,
+                who,
+                color_tags(&t.tags)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Submit an in-progress task for review (`bea review <id>`).
+pub fn cmd_review(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::review_task(base, tasks, id)?;
+    print_transition(&t, "awaiting review", json)
+}
+
+pub fn cmd_reject(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::reject_task(base, tasks, id)?;
+    print_transition(&t, "changes requested", json)
+}
+
+pub fn cmd_propose(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::propose_task(base, tasks, id)?;
+    print_transition(&t, "awaiting acceptance", json)
+}
+
+pub fn cmd_accept(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::accept_task(base, tasks, id)?;
+    print_transition(&t, "accepted", json)
+}
+
+/// Report a workflow move as `[id] title → status (note)`.
+fn print_transition(t: &Task, note: &str, json: bool) -> Result<()> {
+    if json {
+        output(&t.summary(None))?;
+    } else {
+        println!(
+            "[{}] {} → {} ({})",
+            color_id(&t.id),
+            t.title,
+            color_status(&t.status),
+            note
+        );
     }
     Ok(())
 }

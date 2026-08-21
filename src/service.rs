@@ -70,21 +70,31 @@ pub fn create_task(
 }
 
 /// List tasks with optional filters, sorted by priority then creation date.
+/// List tasks with optional filters.
+///
+/// `include_all` also yields done/cancelled tasks. Proposals are separate:
+/// they stay out of every listing unless `include_proposed` is set or the
+/// caller filters for `status = proposed` explicitly, so an unvetted proposal
+/// queue cannot drown the accepted backlog.
+#[allow(clippy::too_many_arguments)]
 pub fn list_tasks(
     tasks: &HashMap<String, Task>,
     status: Option<Status>,
     priority: Option<Priority>,
     tag: Option<&str>,
     include_all: bool,
+    include_proposed: bool,
     epic: Option<&str>,
 ) -> Vec<Task> {
     let mut filtered: Vec<Task> = tasks
         .values()
         .filter(|t| {
-            if status.is_some() || include_all {
+            if status.is_some() {
                 true
+            } else if t.status == Status::Proposed {
+                include_proposed
             } else {
-                task::is_active(t)
+                include_all || task::is_active(t)
             }
         })
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
@@ -107,6 +117,113 @@ pub fn list_ready(
     let graph = Graph::build(tasks);
     let ready = graph.ready(tasks, tag, limit, epic);
     ready.into_iter().cloned().collect()
+}
+
+/// Return tasks waiting for review, in canonical priority order.
+///
+/// The review queue is deliberately separate from [`list_ready`]: reviewing
+/// someone else's finished work and starting fresh work are different jobs, so
+/// an orchestrator can dispatch them to different workers.
+pub fn list_review(
+    tasks: &HashMap<String, Task>,
+    tag: Option<&str>,
+    limit: Option<usize>,
+    epic: Option<&str>,
+) -> Vec<Task> {
+    let mut queue: Vec<Task> = tasks
+        .values()
+        .filter(|t| t.status == Status::Review)
+        .filter(|t| task::matches_tag(t, tag))
+        .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
+        .cloned()
+        .collect();
+    task::sort_by_priority_owned(&mut queue);
+    if let Some(limit) = limit {
+        queue.truncate(limit);
+    }
+    queue
+}
+
+/// Move a task along one edge of the review workflow.
+///
+/// Each verb accepts exactly one starting status so that a shortcut can never
+/// quietly undo unrelated state (submitting a `done` task for review, say).
+/// `set_status` / `update_task` remain the escape hatch for any other move.
+fn transition(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    action: &'static str,
+    expected: Status,
+    to: Status,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let t = &tasks[&id];
+    if t.status != expected {
+        return Err(Error::InvalidStatus {
+            id: t.id.clone(),
+            action,
+            expected,
+            actual: t.status,
+        });
+    }
+    set_status(base, tasks, &id, to)
+}
+
+/// Submit in-progress work for review.
+pub fn review_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
+    transition(
+        base,
+        tasks,
+        id_or_prefix,
+        "review",
+        Status::InProgress,
+        Status::Review,
+    )
+}
+
+/// Send a task under review back for changes.
+///
+/// The assignee is kept: a rejected task carries who wrote it, so an
+/// orchestrator can route the rework back to the same worker. Use
+/// [`release_task`] instead to hand it to the pool.
+pub fn reject_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
+    transition(
+        base,
+        tasks,
+        id_or_prefix,
+        "reject",
+        Status::Review,
+        Status::Open,
+    )
+}
+
+/// Demote an open task to a proposal awaiting acceptance.
+pub fn propose_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+) -> Result<Task> {
+    transition(
+        base,
+        tasks,
+        id_or_prefix,
+        "propose",
+        Status::Open,
+        Status::Proposed,
+    )
+}
+
+/// Accept a proposal into the backlog, making it eligible for `ready`.
+pub fn accept_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
+    transition(
+        base,
+        tasks,
+        id_or_prefix,
+        "accept",
+        Status::Proposed,
+        Status::Open,
+    )
 }
 
 /// Get a single task by ID or prefix.
@@ -241,9 +358,11 @@ pub fn release_task(
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
     if t.status != Status::InProgress {
-        return Err(Error::NotInProgress {
+        return Err(Error::InvalidStatus {
             id: t.id.clone(),
-            status: t.status,
+            action: "release",
+            expected: Status::InProgress,
+            actual: t.status,
         });
     }
     t.status = Status::Open;
@@ -2281,7 +2400,13 @@ mod tests {
             let tasks = store::load_all(tmp.path()).await.unwrap();
             let err = release_task(tmp.path(), &tasks, "aaa").unwrap_err();
             assert!(
-                matches!(err, Error::NotInProgress { .. }),
+                matches!(
+                    err,
+                    Error::InvalidStatus {
+                        action: "release",
+                        ..
+                    }
+                ),
                 "releasing a {status} task should fail, got {err:?}"
             );
 
@@ -2412,5 +2537,208 @@ mod tests {
         let t = set_status(tmp.path(), &tasks, "aaa", Status::Done).unwrap();
         assert_eq!(t.attempt_count(), 0);
         assert_eq!(t.attempts, None);
+    }
+
+    // ── review & proposal workflow ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_review_workflow_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        start_task(tmp.path(), &tasks, "aaa", Some("agent-1".into())).unwrap();
+
+        // Finished work goes to review instead of straight to done.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = review_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.status, Status::Review);
+        assert_eq!(t.assignee, "agent-1", "review keeps the author");
+
+        // Reviewer wants changes: back to open, author retained.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = reject_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.status, Status::Open);
+        assert_eq!(t.assignee, "agent-1");
+        assert_eq!(t.attempt_count(), 1, "a rejection is not a new attempt");
+
+        // Second pass through, approved this time.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        start_task(tmp.path(), &tasks, "aaa", None).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        review_task(tmp.path(), &tasks, "aaa").unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = set_status(tmp.path(), &tasks, "aaa", Status::Done).unwrap();
+        assert_eq!(t.status, Status::Done);
+        assert_eq!(t.attempt_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_verbs_reject_wrong_starting_status() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        // review needs in_progress, reject needs review, accept needs proposed.
+        for (action, result) in [
+            ("review", review_task(tmp.path(), &tasks, "aaa")),
+            ("reject", reject_task(tmp.path(), &tasks, "aaa")),
+            ("accept", accept_task(tmp.path(), &tasks, "aaa")),
+        ] {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidStatus { action: a, actual, .. }
+                    if *a == action && *actual == Status::Open),
+                "{action} on an open task should fail, got {err:?}"
+            );
+        }
+
+        // Nothing was written.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks["aaa"].status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_propose_accept_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = propose_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.status, Status::Proposed);
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = accept_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_proposed_and_review_are_never_ready() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Proposed)).unwrap();
+        store::save(tmp.path(), &make_task("bbb", Status::Review)).unwrap();
+        store::save(tmp.path(), &make_task("ccc", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let ready = list_ready(&tasks, None, None, None);
+        let ready_ids: Vec<&str> = ready.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ready_ids, vec!["ccc"]);
+
+        let queue = list_review(&tasks, None, None, None);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, "bbb");
+    }
+
+    #[tokio::test]
+    async fn test_review_does_not_unblock_dependents() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Review)).unwrap();
+        let mut b = make_task("bbb", Status::Open);
+        b.depends_on = vec!["aaa".into()];
+        store::save(tmp.path(), &b).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert!(
+            list_ready(&tasks, None, None, None).is_empty(),
+            "unreviewed work must not unblock its dependents"
+        );
+
+        // Once approved, the dependent frees up.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, "aaa", Status::Done).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let ready = list_ready(&tasks, None, None, None);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "bbb");
+    }
+
+    #[tokio::test]
+    async fn test_proposals_hidden_from_default_listing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Proposed)).unwrap();
+        store::save(tmp.path(), &make_task("bbb", Status::Open)).unwrap();
+        store::save(tmp.path(), &make_task("ccc", Status::Done)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let ids = |v: Vec<Task>| -> Vec<String> { v.into_iter().map(|t| t.id).collect() };
+
+        // Default: no proposals, no done tasks.
+        assert_eq!(
+            ids(list_tasks(&tasks, None, None, None, false, false, None)),
+            vec!["bbb"]
+        );
+        // include_all alone still hides proposals (the MCP default).
+        assert_eq!(
+            ids(list_tasks(&tasks, None, None, None, true, false, None)),
+            vec!["bbb", "ccc"]
+        );
+        // Everything, the way `bea list --all` asks for it.
+        let mut all = ids(list_tasks(&tasks, None, None, None, true, true, None));
+        all.sort();
+        assert_eq!(all, vec!["aaa", "bbb", "ccc"]);
+        // An explicit status filter always wins.
+        assert_eq!(
+            ids(list_tasks(
+                &tasks,
+                Some(Status::Proposed),
+                None,
+                None,
+                false,
+                false,
+                None
+            )),
+            vec!["aaa"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_review_queue_filters_and_order() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut low = make_task("aaa", Status::Review);
+        low.priority = Priority::P3;
+        low.tags = vec!["backend".into()];
+        store::save(tmp.path(), &low).unwrap();
+        let mut high = make_task("bbb", Status::Review);
+        high.priority = Priority::P0;
+        store::save(tmp.path(), &high).unwrap();
+        store::save(tmp.path(), &make_task("ccc", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let queue = list_review(&tasks, None, None, None);
+        let ids: Vec<&str> = queue.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["bbb", "aaa"], "highest priority reviewed first");
+
+        let tagged = list_review(&tasks, Some("backend"), None, None);
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(tagged[0].id, "aaa");
+
+        assert_eq!(list_review(&tasks, None, Some(1), None).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_epic_does_not_close_while_a_child_is_in_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let epic = make_epic("eee");
+        store::save(tmp.path(), &epic).unwrap();
+        store::save(tmp.path(), &make_child("aaa", "eee", Status::Done)).unwrap();
+        store::save(tmp.path(), &make_child("bbb", "eee", Status::InProgress)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        review_task(tmp.path(), &tasks, "bbb").unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks["eee"].status,
+            Status::Open,
+            "an epic must not auto-close on unreviewed work"
+        );
     }
 }

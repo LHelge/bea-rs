@@ -155,7 +155,7 @@ Tasks are stored as `.bears/{id}-{slug}.md` with YAML frontmatter:
 ---
 id: a1b2
 title: Implement OAuth flow
-status: open          # open | in_progress | done | blocked | cancelled
+status: open          # proposed | open | in_progress | review | done | blocked | cancelled
 priority: P1          # P0 (critical) through P3
 type: task            # task (default) | epic
 created: 2026-03-15T10:30:00Z
@@ -178,7 +178,39 @@ Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`
 
 ### `ready` command
 
-The key command for agent workflows. Returns tasks where status is `open`, type is `task` (not `epic`), AND all `depends_on` tasks have status `done`. Sort by priority (P0 first), then creation date.
+The key command for agent workflows. Returns tasks where status is `open`, type is `task` (not `epic`), AND all `depends_on` tasks have status `done`. Sort by priority (P0 first), then creation date. `proposed` and `review` tasks are excluded for free by the `status == Open` check — see the review workflow section.
+
+### Review & proposal workflow
+
+The normal path is `open → in_progress → review → done`, with two statuses either side of the work:
+
+- **`proposed`** — suggested, not yet accepted into the backlog. Never ready, and filtered out of
+  `list_tasks` unless the caller passes `include_proposed` or filters `status = proposed`
+  explicitly (`bea list --all` passes both flags; MCP's `list_all_tasks` takes `include_proposed?`).
+- **`review`** — finished work waiting for a second pair of eyes. Never ready, and because
+  `is_task_ready` requires dependencies to be `done`, a task in review does **not** unblock its
+  dependents. Epics do not auto-close on it either, since auto-close needs every child resolved.
+
+`service::list_review` is the review queue, deliberately *not* folded into `list_ready`: reviewing
+someone else's work and starting fresh work are different jobs, so an orchestrator can dispatch them
+to different workers. `bea review` doubles as both verbs — with an ID it submits, without one it
+lists the queue (the same shape as `bea archive [id]`).
+
+**Workflow verbs are single edges.** `service::transition` is the shared helper: each verb accepts
+exactly one starting status and returns `Error::InvalidStatus { action, expected, actual }`
+otherwise, so a shortcut can never quietly undo unrelated state.
+
+| Verb | Edge |
+|------|------|
+| `review` | `in_progress` → `review` |
+| `reject` | `review` → `open` (assignee kept — rework routes back to the author) |
+| `propose` | `open` → `proposed` |
+| `accept` | `proposed` → `open` |
+| `release` | `in_progress` → `open` (assignee cleared) |
+
+`start` / `done` / `cancel` predate this and stay permissive blunt status setters, as does
+`bea status <id> <status>` / `update_task` — that pair is the documented escape hatch for any move
+the verbs refuse.
 
 ### Attempts
 
@@ -263,12 +295,17 @@ Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, 
 | Tool | Key params |
 |------|------------|
 | `list_ready` | `limit?`, `tag?`, `epic?` |
-| `list_all_tasks` | `status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?` |
+| `list_all_tasks` | `status?`, `priority?`, `tag?`, `epic?`, `limit?`, `active_only?`, `include_proposed?` |
 | `list_epics` | — |
 | `get_task` | `id` |
 | `create_task` | `title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?` |
 | `update_task` | `id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?` |
 | `start_task` | `id`, `assignee?` |
+| `list_review` | `limit?`, `tag?`, `epic?` |
+| `review_task` | `id` |
+| `reject_task` | `id` |
+| `propose_task` | `id` |
+| `accept_task` | `id` |
 | `release_task` | `id` |
 | `complete_task` | `id` |
 | `cancel_task` | `id` |
@@ -316,7 +353,7 @@ Keep the dependency tree small. Compilation should be fast.
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
-- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)

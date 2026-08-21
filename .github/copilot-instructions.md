@@ -19,6 +19,7 @@ Project planning and task tracking use Bears. Prefer managing tasks through MCP 
 - Find next task using `list_ready` (MCP) or `bea ready` (CLI).
 - Start a task with `start_task` (MCP) or `bea start <id>` (CLI); pass `assignee` / `--assignee` to claim it.
 - If you get stuck on a claimed task, hand it back with `release_task` (MCP) or `bea release <id>` (CLI) — status returns to `open` and the assignee is cleared.
+- When work needs a second pair of eyes, `review_task` / `bea review <id>` instead of completing it. Reviewers pull from `list_review` / `bea review` and either complete or `reject_task` it.
 - Tasks carry an `attempts` count that increments on each start. A high count means previous workers failed — change approach or escalate.
 - When done, mark complete with `complete_task` (MCP) or `bea complete <id>` (CLI).
 
@@ -118,6 +119,9 @@ Keep these tools aligned with implementation and schemas:
 - `update_task(id, status?, priority?, tags?, assignee?, body?)`
 - `start_task(id, assignee?)`
 - `release_task(id)`
+- `list_review(limit?, tag?, epic?)`
+- `review_task(id)` / `reject_task(id)`
+- `propose_task(id)` / `accept_task(id)`
 - `complete_task(id)`
 - `cancel_task(id)`
 - `add_dependency(id, depends_on)`
