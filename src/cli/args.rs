@@ -228,7 +228,7 @@ pub enum Command {
         limit: Option<usize>,
     },
 
-    /// Send a task under review back for changes (→ open, assignee kept)
+    /// Send a task under review back for changes (→ open, assignee cleared)
     Reject {
         /// Task ID
         id: String,

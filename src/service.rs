@@ -184,18 +184,27 @@ pub fn review_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &st
 
 /// Send a task under review back for changes.
 ///
-/// The assignee is kept: a rejected task carries who wrote it, so an
-/// orchestrator can route the rework back to the same worker. Use
-/// [`release_task`] instead to hand it to the pool.
+/// The assignee is cleared: a rejected task returns to the pool, and whoever
+/// claims it next picks up the rework from the findings recorded in the task
+/// body.
 pub fn reject_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
-    transition(
-        base,
-        tasks,
-        id_or_prefix,
-        "reject",
-        Status::Review,
-        Status::Open,
-    )
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let t = &tasks[&id];
+    if t.status != Status::Review {
+        return Err(Error::InvalidStatus {
+            id: t.id.clone(),
+            action: "reject",
+            expected: Status::Review,
+            actual: t.status,
+        });
+    }
+    let mut t = t.clone();
+    t.status = Status::Open;
+    t.assignee = String::new();
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+    on_status_changed(base, tasks, &t)?;
+    Ok(t)
 }
 
 /// Demote an open task to a proposal awaiting acceptance.
@@ -1286,11 +1295,14 @@ mod tests {
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let t = reject_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap();
         assert_eq!(t.status, Status::Open);
+        assert!(
+            t.assignee.is_empty(),
+            "reject hands the task back to the pool"
+        );
+        // The task no longer belongs to worker-1, so its fence now refuses it.
         let tasks = store::load_all(tmp.path()).await.unwrap();
-        let t = release_task_fenced(tmp.path(), &tasks, "aaa", "worker-1");
-        // After reject the task is open, so release (which requires in_progress)
-        // correctly refuses — the fence itself passed.
-        assert!(matches!(t.unwrap_err(), Error::InvalidStatus { .. }));
+        let err = release_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap_err();
+        assert!(matches!(err, Error::FenceViolation { .. }));
     }
 
     #[tokio::test]
@@ -2940,11 +2952,14 @@ mod tests {
         assert_eq!(t.status, Status::Review);
         assert_eq!(t.assignee, "agent-1", "review keeps the author");
 
-        // Reviewer wants changes: back to open, author retained.
+        // Reviewer wants changes: back to the pool — open, assignee cleared.
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let t = reject_task(tmp.path(), &tasks, "aaa").unwrap();
         assert_eq!(t.status, Status::Open);
-        assert_eq!(t.assignee, "agent-1");
+        assert!(
+            t.assignee.is_empty(),
+            "reject hands the task back to the pool"
+        );
         assert_eq!(t.attempt_count(), 1, "a rejection is not a new attempt");
 
         // Second pass through, approved this time.

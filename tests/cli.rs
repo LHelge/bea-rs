@@ -2344,7 +2344,7 @@ fn test_review_queue_and_transitions() {
         .stdout(predicate::str::contains("Add OAuth flow"))
         .stdout(predicate::str::contains("(linus)"));
 
-    // Changes requested sends it back, author kept.
+    // Changes requested sends it back to the pool.
     bea(&tmp)
         .args(["reject", &id])
         .assert()
@@ -2359,7 +2359,10 @@ fn test_review_queue_and_transitions() {
     let v: serde_json::Value =
         serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
     assert_eq!(v["status"], "open");
-    assert_eq!(v["assignee"], "linus");
+    assert!(
+        v["assignee"].is_null(),
+        "reject hands the task back to the pool"
+    );
 
     // Second pass: approve it.
     bea(&tmp).args(["start", &id]).assert().success();
