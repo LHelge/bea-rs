@@ -2252,7 +2252,7 @@ fn test_release_requires_in_progress() {
         .args(["release", &id])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not in progress"))
+        .stderr(predicate::str::contains("cannot release"))
         .stderr(predicate::str::contains("hint:"));
 }
 
@@ -2305,4 +2305,145 @@ fn test_attempts_counter() {
         serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
     assert_eq!(v["attempts"], 2);
     assert_eq!(v["status"], "done");
+}
+
+/// Create a task and return its ID.
+fn create(tmp: &TempDir, title: &str) -> String {
+    let output = bea(tmp).args(["--json", "create", title]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn test_review_queue_and_transitions() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let id = create(&tmp, "Add OAuth flow");
+
+    bea(&tmp)
+        .args(["start", &id, "-a", "linus"])
+        .assert()
+        .success();
+    bea(&tmp)
+        .args(["review", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("review (awaiting review)"));
+
+    // Out of ready, into the review queue.
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No tasks ready."));
+    bea(&tmp)
+        .arg("review")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Add OAuth flow"))
+        .stdout(predicate::str::contains("(linus)"));
+
+    // Changes requested sends it back, author kept.
+    bea(&tmp)
+        .args(["reject", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("open (changes requested)"));
+    bea(&tmp)
+        .arg("review")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing awaiting review."));
+    let output = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(v["status"], "open");
+    assert_eq!(v["assignee"], "linus");
+
+    // Second pass: approve it.
+    bea(&tmp).args(["start", &id]).assert().success();
+    bea(&tmp).args(["review", &id]).assert().success();
+    bea(&tmp).args(["done", &id]).assert().success();
+    bea(&tmp)
+        .arg("review")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing awaiting review."));
+}
+
+#[test]
+fn test_review_requires_in_progress() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let id = create(&tmp, "Not started");
+
+    bea(&tmp)
+        .args(["review", &id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot review"))
+        .stderr(predicate::str::contains("expected status in_progress"))
+        .stderr(predicate::str::contains("hint:"));
+
+    // The escape hatch still works.
+    bea(&tmp).args(["status", &id, "review"]).assert().success();
+    bea(&tmp)
+        .arg("review")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Not started"));
+}
+
+#[test]
+fn test_proposals_are_hidden_until_accepted() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let id = create(&tmp, "Maybe worth doing");
+    let other = create(&tmp, "Real backlog item");
+
+    bea(&tmp)
+        .args(["propose", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("proposed (awaiting acceptance)"));
+
+    // Hidden from the backlog and never ready...
+    bea(&tmp)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Real backlog item"))
+        .stdout(predicate::str::contains("Maybe worth doing").not());
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Maybe worth doing").not());
+
+    // ...but findable on purpose.
+    bea(&tmp)
+        .args(["list", "--status", "proposed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Maybe worth doing"));
+    bea(&tmp)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Maybe worth doing"));
+
+    bea(&tmp)
+        .args(["accept", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("open (accepted)"));
+    bea(&tmp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Maybe worth doing"));
+
+    // `other` exists only to prove the backlog is not empty above.
+    assert!(!other.is_empty());
 }

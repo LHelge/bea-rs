@@ -52,6 +52,7 @@ impl BeaMcp {
                     params.priority,
                     params.tag.as_deref(),
                     include_all,
+                    params.include_proposed.unwrap_or(false),
                     params.epic.as_deref(),
                 );
                 if let Some(limit) = params.limit {
@@ -189,6 +190,93 @@ impl BeaMcp {
             async {
                 let tasks = store::load_all(&self.base).await?;
                 let t = service::release_task(&self.base, &tasks, &params.id)?;
+                ok_json(serde_json::to_value(t.summary(None))?)
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "List tasks awaiting review (separate from list_ready — this is review work, not new work)"
+    )]
+    async fn list_review(
+        &self,
+        Parameters(params): Parameters<ListReviewParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let limit = params.limit.map(|v| v as usize);
+                let queue = service::list_review(
+                    &tasks,
+                    params.tag.as_deref(),
+                    limit,
+                    params.epic.as_deref(),
+                );
+                let eff = service::effective_priorities(&tasks);
+                let summaries: Vec<_> = queue.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "Submit an in-progress task for review instead of completing it")]
+    async fn review_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let t = service::review_task(&self.base, &tasks, &params.id)?;
+                ok_json(serde_json::to_value(t.summary(None))?)
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Send a task under review back for changes (status returns to open, assignee kept)"
+    )]
+    async fn reject_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let t = service::reject_task(&self.base, &tasks, &params.id)?;
+                ok_json(serde_json::to_value(t.summary(None))?)
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "Demote an open task to a proposal awaiting acceptance")]
+    async fn propose_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let t = service::propose_task(&self.base, &tasks, &params.id)?;
+                ok_json(serde_json::to_value(t.summary(None))?)
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "Accept a proposal into the backlog (status becomes open)")]
+    async fn accept_task(
+        &self,
+        Parameters(params): Parameters<TaskIdParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let t = service::accept_task(&self.base, &tasks, &params.id)?;
                 ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
@@ -521,6 +609,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -689,6 +778,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_review_queue_is_separate_from_ready() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Reviewable".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        mcp.start_task(Parameters(StartTaskParams {
+            id: id.clone(),
+            assignee: Some("agent-1".into()),
+        }))
+        .await
+        .unwrap();
+        let reviewed = mcp
+            .review_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&reviewed)["status"], "review");
+
+        // Waiting for review is not work an implementer should pick up.
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&ready).as_array().unwrap().is_empty(),
+            "review work must not appear in list_ready"
+        );
+
+        // ...but the reviewer finds it in its own queue.
+        let queue = mcp
+            .list_review(Parameters(ListReviewParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        let queue = extract_json(&queue);
+        assert_eq!(queue.as_array().unwrap().len(), 1);
+        assert_eq!(queue[0]["id"], id.as_str());
+        assert_eq!(queue[0]["assignee"], "agent-1");
+
+        // Changes requested: back to open, and ready for work again.
+        let rejected = mcp
+            .reject_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&rejected)["status"], "open");
+        assert_eq!(
+            extract_json(&rejected)["assignee"],
+            "agent-1",
+            "reject keeps the author"
+        );
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&ready).as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_proposals_hidden_until_asked_for() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Maybe worth doing".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        let proposed = mcp
+            .propose_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&proposed)["status"], "proposed");
+
+        let list = |status, include_proposed| ListTasksFilterParams {
+            status,
+            priority: None,
+            tag: None,
+            epic: None,
+            limit: None,
+            active_only: None,
+            include_proposed,
+        };
+
+        let default = mcp
+            .list_all_tasks(Parameters(list(None, None)))
+            .await
+            .unwrap();
+        assert!(
+            extract_json(&default).as_array().unwrap().is_empty(),
+            "proposals stay out of the default listing"
+        );
+
+        let opted_in = mcp
+            .list_all_tasks(Parameters(list(None, Some(true))))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&opted_in).as_array().unwrap().len(), 1);
+
+        let filtered = mcp
+            .list_all_tasks(Parameters(list(Some(Status::Proposed), None)))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&filtered).as_array().unwrap().len(), 1);
+
+        // A proposal is never ready until it is accepted.
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        assert!(extract_json(&ready).as_array().unwrap().is_empty());
+
+        let accepted = mcp
+            .accept_task(Parameters(TaskIdParams { id }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&accepted)["status"], "open");
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&ready).as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_workflow_verbs_report_wrong_status() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Fresh".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        let reviewed = mcp
+            .review_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(reviewed.is_error, Some(true));
+        assert!(extract_text(&reviewed).contains("cannot review"));
+
+        let rejected = mcp
+            .reject_task(Parameters(TaskIdParams { id }))
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(extract_text(&rejected).contains("cannot reject"));
+    }
+
+    #[tokio::test]
     async fn test_tool_attempts_visible_to_agents() {
         let (_tmp, mcp) = setup();
         let result = mcp
@@ -757,7 +1038,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(released.is_error, Some(true));
-        assert!(extract_text(&released).contains("not in progress"));
+        assert!(extract_text(&released).contains("cannot release"));
     }
 
     #[tokio::test]
@@ -1147,6 +1428,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1175,6 +1457,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: Some(true),
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1195,6 +1478,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: Some(false),
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1209,6 +1493,7 @@ mod tests {
                 epic: None,
                 limit: Some(1),
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1547,6 +1832,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1585,6 +1871,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1667,6 +1954,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1717,6 +2005,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();
@@ -1747,6 +2036,7 @@ mod tests {
                 epic: None,
                 limit: None,
                 active_only: None,
+                include_proposed: None,
             }))
             .await
             .unwrap();

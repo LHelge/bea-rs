@@ -14,6 +14,16 @@ pub struct ListReadyParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListReviewParams {
+    /// Max number of results
+    pub limit: Option<u64>,
+    /// Filter by tag
+    pub tag: Option<String>,
+    /// Filter by parent epic ID
+    pub epic: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksFilterParams {
     /// Filter by status
     pub status: Option<Status>,
@@ -27,6 +37,9 @@ pub struct ListTasksFilterParams {
     pub limit: Option<u64>,
     /// Exclude done and cancelled tasks (default: false — show all)
     pub active_only: Option<bool>,
+    /// Include proposals, which are hidden from listings by default
+    /// (default: false). Ignored when filtering by status.
+    pub include_proposed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

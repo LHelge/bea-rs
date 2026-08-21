@@ -210,6 +210,42 @@ pub enum Command {
         id: String,
     },
 
+    /// Submit an in-progress task for review, or list the review queue
+    Review {
+        /// Task ID to submit. Omit to list every task awaiting review.
+        id: Option<String>,
+
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Filter by parent epic ID
+        #[arg(long)]
+        epic: Option<String>,
+
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Send a task under review back for changes (→ open, assignee kept)
+    Reject {
+        /// Task ID
+        id: String,
+    },
+
+    /// Demote an open task to a proposal awaiting acceptance
+    Propose {
+        /// Task ID
+        id: String,
+    },
+
+    /// Accept a proposal into the backlog (→ open)
+    Accept {
+        /// Task ID
+        id: String,
+    },
+
     /// Complete a task (set status to done)
     Done {
         /// Task ID

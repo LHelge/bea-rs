@@ -5,8 +5,10 @@ use bears::task::{Priority, Status};
 // ── Status indicators ────────────────────────────────────────────────────
 
 pub(super) const ALL_STATUSES: &[Status] = &[
+    Status::Proposed,
     Status::Open,
     Status::InProgress,
+    Status::Review,
     Status::Done,
     Status::Blocked,
     Status::Cancelled,
@@ -14,8 +16,10 @@ pub(super) const ALL_STATUSES: &[Status] = &[
 
 pub(super) fn status_indicator(s: &Status) -> &'static str {
     match s {
+        Status::Proposed => "◇",
         Status::Open => "○",
         Status::InProgress => "●",
+        Status::Review => "◐",
         Status::Done => "✓",
         Status::Blocked => "⊘",
         Status::Cancelled => "✗",
@@ -63,8 +67,10 @@ pub(super) struct Theme {
     pub id_color: Color,
 
     // Status colors
+    pub status_proposed: Color,
     pub status_open: Color,
     pub status_in_progress: Color,
+    pub status_review: Color,
     pub status_done: Color,
     pub status_blocked: Color,
     pub status_cancelled: Color,
@@ -102,8 +108,10 @@ impl Default for Theme {
 
             id_color: Color::DarkGray,
 
+            status_proposed: Color::DarkGray,
             status_open: Color::Cyan,
             status_in_progress: Color::LightYellow,
+            status_review: Color::LightBlue,
             status_done: Color::LightGreen,
             status_blocked: Color::LightMagenta,
             status_cancelled: Color::DarkGray,
@@ -119,8 +127,10 @@ impl Default for Theme {
 impl Theme {
     pub fn status_color(&self, s: &Status) -> Color {
         match s {
+            Status::Proposed => self.status_proposed,
             Status::Open => self.status_open,
             Status::InProgress => self.status_in_progress,
+            Status::Review => self.status_review,
             Status::Done => self.status_done,
             Status::Blocked => self.status_blocked,
             Status::Cancelled => self.status_cancelled,

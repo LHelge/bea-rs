@@ -129,6 +129,30 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             let result = cmd::cmd_release(base, &tasks, &id, cli.json);
             augment_archived_error(base, result, &id).await
         }
+        Command::Review {
+            id,
+            tag,
+            epic,
+            limit,
+        } => match id {
+            Some(id) => {
+                let result = cmd::cmd_review(base, &tasks, &id, cli.json);
+                augment_archived_error(base, result, &id).await
+            }
+            None => cmd::cmd_review_queue(&tasks, tag.as_deref(), epic.as_deref(), limit, cli.json),
+        },
+        Command::Reject { id } => {
+            let result = cmd::cmd_reject(base, &tasks, &id, cli.json);
+            augment_archived_error(base, result, &id).await
+        }
+        Command::Propose { id } => {
+            let result = cmd::cmd_propose(base, &tasks, &id, cli.json);
+            augment_archived_error(base, result, &id).await
+        }
+        Command::Accept { id } => {
+            let result = cmd::cmd_accept(base, &tasks, &id, cli.json);
+            augment_archived_error(base, result, &id).await
+        }
         Command::Done { id } => {
             let result = cmd::cmd_status(base, &tasks, &id, Status::Done, cli.json);
             augment_archived_error(base, result, &id).await
@@ -211,8 +235,10 @@ fn format_priority(own: &Priority, effective: Option<&Priority>) -> String {
 
 fn color_status(s: &Status) -> String {
     match s {
+        Status::Proposed => s.if_supports_color(Stdout, |t| t.dimmed()).to_string(),
         Status::Open => s.to_string(),
         Status::InProgress => s.if_supports_color(Stdout, |t| t.cyan()).to_string(),
+        Status::Review => s.if_supports_color(Stdout, |t| t.blue()).to_string(),
         Status::Done => s.if_supports_color(Stdout, |t| t.green()).to_string(),
         Status::Blocked => s.if_supports_color(Stdout, |t| t.red()).to_string(),
         Status::Cancelled => s.if_supports_color(Stdout, |t| t.dimmed()).to_string(),

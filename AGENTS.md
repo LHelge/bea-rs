@@ -65,6 +65,11 @@ The server must be launched from the project root (where `.bears/` lives).
 | `update_task` | Update task fields (status, priority, tags, assignee, body) |
 | `start_task` | Set status to in_progress, optionally claiming it for an assignee |
 | `release_task` | Release an in-progress task back to the pool (status → open, assignee cleared) |
+| `list_review` | Tasks awaiting review — review work, not new work |
+| `review_task` | Submit in-progress work for review instead of completing it |
+| `reject_task` | Send a task under review back for changes (→ open, assignee kept) |
+| `propose_task` | Demote an open task to a proposal awaiting acceptance |
+| `accept_task` | Accept a proposal into the backlog (→ open) |
 | `complete_task` | Set status to done |
 | `cancel_task` | Set status to cancelled |
 | `prune_tasks` | Delete cancelled tasks (optionally also done tasks) |
@@ -83,13 +88,18 @@ The core pattern for AI agent workflows:
 2. start_task(id, assignee) → mark it in_progress and claim it
 3. get_task(id)            → read the full description
 4. ... do the work ...     → implement, test, commit
-5. complete_task(id)       → mark it done
+5. review_task(id)         → hand it to a reviewer (or complete_task to finish outright)
 6. list_ready              → repeat
 ```
 
 If a task turns out to be blocked or a worker gives up on it, call `release_task(id)` instead of
 `complete_task` — the status goes back to `open`, the assignee is cleared, and the task reappears
 in `list_ready` for whoever picks it up next.
+
+Reviewers work the other queue: `list_review` → read the task → `complete_task` to approve, or
+`reject_task` to send it back for changes. Tasks in review never show up in `list_ready`, and they
+do not unblock their dependents until they are actually done. File work you are unsure about with
+`propose_task` rather than adding it to the backlog outright.
 
 Every start counts: task responses carry an `attempts` field once work has begun on them. Check it
 when you pick a task up — a high count means earlier workers already failed at this, so try a
