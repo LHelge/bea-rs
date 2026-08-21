@@ -56,6 +56,27 @@ pub enum Error {
         actual: Status,
     },
 
+    /// A claim was refused because the task already belongs to someone else.
+    ///
+    /// Returned by the claiming primitives (`claim_task`, `assign_task`) after
+    /// a fresh read from disk, so two workers racing for the same task cannot
+    /// both walk away believing they hold it.
+    #[error("task {id} is already claimed by '{assignee}'")]
+    AlreadyClaimed { id: String, assignee: String },
+
+    /// A fenced mutation was refused because the task's assignee no longer
+    /// matches the token the caller claimed it with.
+    ///
+    /// This is the stale-writer guard: a worker whose task has been released,
+    /// reassigned, or reaped gets this error instead of silently clobbering
+    /// the new holder's state.
+    #[error("fence violation on task {id}: expected assignee '{expected}', but it is '{actual}'")]
+    FenceViolation {
+        id: String,
+        expected: String,
+        actual: String,
+    },
+
     /// The task is not found in the archive.
     #[error("task not found in archive: {0}")]
     NotArchived(String),

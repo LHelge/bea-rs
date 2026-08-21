@@ -375,6 +375,213 @@ pub fn release_task(
     Ok(t)
 }
 
+// ---------------------------------------------------------------------------
+// Assignee fencing
+//
+// `assignee` doubles as a fencing token for orchestrators driving a shared
+// store: work is taken through the claiming primitives below, and every later
+// mutation on the claimed task goes through a `_fenced` variant carrying that
+// token. A writer whose task has since been released, reassigned, or reaped
+// fails with a distinct error instead of silently clobbering the new holder's
+// state. All checks run against a fresh read from disk, not the caller's
+// snapshot. The unfenced functions remain the human/CLI path.
+// ---------------------------------------------------------------------------
+
+/// Verify — against a fresh read from disk — that a task's assignee still
+/// matches the token the caller claimed it with.
+///
+/// Returns the resolved task ID so fenced wrappers can reuse it. The
+/// read-check-write is not a file lock: concurrent writers sharing one store
+/// are expected to serialize among themselves (typically one orchestrator
+/// process holding the store behind a mutex); the fence is what catches a
+/// *stale* writer inside that discipline.
+fn assert_fence(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<String> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let current = store::load_one(base, &id)?;
+    if current.assignee != expected_assignee {
+        return Err(Error::FenceViolation {
+            id,
+            expected: expected_assignee.to_string(),
+            actual: current.assignee,
+        });
+    }
+    Ok(id)
+}
+
+/// Claim an open task and start it: the contention-checked counterpart of
+/// [`start_task`].
+///
+/// The task must be `open` and unclaimed (or already claimed by this same
+/// `assignee`) on a fresh read from disk; otherwise the claim is refused with
+/// [`Error::AlreadyClaimed`] rather than silently stealing it. On success the
+/// task is `in_progress`, assigned, and the attempt is counted.
+pub fn claim_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    assignee: &str,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = store::load_one(base, &id)?;
+    if t.status != Status::Open {
+        return Err(Error::InvalidStatus {
+            id,
+            action: "claim",
+            expected: Status::Open,
+            actual: t.status,
+        });
+    }
+    if !t.assignee.is_empty() && t.assignee != assignee {
+        return Err(Error::AlreadyClaimed {
+            id,
+            assignee: t.assignee,
+        });
+    }
+    let previous = t.status;
+    t.status = Status::InProgress;
+    record_attempt(&mut t, previous);
+    t.assignee = assignee.to_string();
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+    on_status_changed(base, tasks, &t)?;
+    Ok(t)
+}
+
+/// Claim a task for an assignee without touching its status.
+///
+/// The review-queue counterpart of [`claim_task`]: a reviewer takes a task
+/// that stays in `review` while they work it. Refused with
+/// [`Error::AlreadyClaimed`] when someone else holds the task on a fresh
+/// read, and with [`Error::InvalidUsage`] on `proposed` or terminal tasks,
+/// which have no work to claim.
+pub fn assign_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    assignee: &str,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = store::load_one(base, &id)?;
+    if matches!(
+        t.status,
+        Status::Done | Status::Cancelled | Status::Proposed
+    ) {
+        return Err(Error::InvalidUsage(format!(
+            "cannot assign task {id}: a {} task has no work to claim",
+            t.status
+        )));
+    }
+    if !t.assignee.is_empty() && t.assignee != assignee {
+        return Err(Error::AlreadyClaimed {
+            id,
+            assignee: t.assignee,
+        });
+    }
+    t.assignee = assignee.to_string();
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+    Ok(t)
+}
+
+/// Fenced [`release_task`]: refused with [`Error::FenceViolation`] unless the
+/// task is still assigned to `expected_assignee`.
+pub fn release_task_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    release_task(base, tasks, &id)
+}
+
+/// Fenced [`review_task`]: submit for review only while still holding the task.
+pub fn review_task_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    review_task(base, tasks, &id)
+}
+
+/// Fenced [`reject_task`]: send back for changes only while still holding the
+/// task (as its reviewer, via [`assign_task`]).
+pub fn reject_task_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    reject_task(base, tasks, &id)
+}
+
+/// Fenced [`set_status`]: the escape hatch, guarded by the fence.
+pub fn set_status_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    status: Status,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    set_status(base, tasks, &id, status)
+}
+
+/// Fenced [`update_task`]: field updates (body, tags, …) guarded by the fence.
+#[allow(clippy::too_many_arguments)]
+pub fn update_task_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    status: Option<Status>,
+    priority: Option<Priority>,
+    tags: Option<Vec<String>>,
+    assignee: Option<String>,
+    body: Option<String>,
+    title: Option<String>,
+    parent: Option<Option<String>>,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    update_task(
+        base, tasks, &id, status, priority, tags, assignee, body, title, parent,
+    )
+}
+
+/// Fenced [`add_dependency`]: the fence applies to the task whose
+/// `depends_on` list changes, not to the dependency target.
+pub fn add_dependency_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    dep_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    add_dependency(base, tasks, &id, dep_or_prefix)
+}
+
+/// Fenced [`remove_dependency`]: the fence applies to the task whose
+/// `depends_on` list changes, not to the dependency target.
+pub fn remove_dependency_fenced(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    dep_or_prefix: &str,
+    expected_assignee: &str,
+) -> Result<Task> {
+    let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
+    remove_dependency(base, tasks, &id, dep_or_prefix)
+}
+
 /// Count a new attempt when a task transitions *into* `in_progress`.
 ///
 /// An attempt starts when work is claimed, not when it is given up: that way
@@ -907,6 +1114,183 @@ mod tests {
 
     fn task_map(tasks: Vec<Task>) -> HashMap<String, Task> {
         tasks.into_iter().map(|t| (t.id.clone(), t)).collect()
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_claims_and_counts_attempt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let t = claim_task(tmp.path(), &tasks, "aaa", "worker-1").unwrap();
+        assert_eq!(t.status, Status::InProgress);
+        assert_eq!(t.assignee, "worker-1");
+        assert_eq!(t.attempt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_refuses_contended_claim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::Open);
+        a.assignee = "worker-1".into();
+        store::save(tmp.path(), &a).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let err = claim_task(tmp.path(), &tasks, "aaa", "worker-2").unwrap_err();
+        assert!(matches!(
+            err,
+            Error::AlreadyClaimed { ref assignee, .. } if assignee == "worker-1"
+        ));
+        // The refused claim must not have touched the file.
+        let on_disk = store::load_one(tmp.path(), "aaa").unwrap();
+        assert_eq!(on_disk.assignee, "worker-1");
+        assert_eq!(on_disk.status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_checks_disk_not_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+        // Snapshot taken while the task is unclaimed…
+        let stale = store::load_all(tmp.path()).await.unwrap();
+        // …then someone else claims it on disk.
+        let mut a = stale["aaa"].clone();
+        a.assignee = "worker-1".into();
+        store::save(tmp.path(), &a).unwrap();
+
+        let err = claim_task(tmp.path(), &stale, "aaa", "worker-2").unwrap_err();
+        assert!(matches!(err, Error::AlreadyClaimed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_requires_open() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Review)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let err = claim_task(tmp.path(), &tasks, "aaa", "worker-1").unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidStatus {
+                action: "claim",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_assign_task_keeps_status_and_refuses_contention() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Review)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let t = assign_task(tmp.path(), &tasks, "aaa", "reviewer-1").unwrap();
+        assert_eq!(t.status, Status::Review, "status must not change");
+        assert_eq!(t.assignee, "reviewer-1");
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let err = assign_task(tmp.path(), &tasks, "aaa", "reviewer-2").unwrap_err();
+        assert!(matches!(err, Error::AlreadyClaimed { .. }));
+
+        // Terminal and proposed tasks have no work to claim.
+        store::save(tmp.path(), &make_task("bbb", Status::Done)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let err = assign_task(tmp.path(), &tasks, "bbb", "reviewer-1").unwrap_err();
+        assert!(matches!(err, Error::InvalidUsage(_)));
+    }
+
+    #[tokio::test]
+    async fn test_fenced_mutations_reject_stale_writer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::InProgress);
+        a.assignee = "worker-1".into();
+        store::save(tmp.path(), &a).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        // worker-1 was reaped and the task reassigned on disk…
+        let mut a = tasks["aaa"].clone();
+        a.assignee = "worker-2".into();
+        store::save(tmp.path(), &a).unwrap();
+
+        // …so every fenced write from worker-1, even via a stale snapshot, fails.
+        let err = update_task_fenced(
+            tmp.path(),
+            &tasks,
+            "aaa",
+            None,
+            None,
+            None,
+            None,
+            Some("stale findings".into()),
+            None,
+            None,
+            "worker-1",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::FenceViolation { ref actual, .. } if actual == "worker-2"
+        ));
+        let err = release_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap_err();
+        assert!(matches!(err, Error::FenceViolation { .. }));
+        let err = review_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap_err();
+        assert!(matches!(err, Error::FenceViolation { .. }));
+        let err =
+            set_status_fenced(tmp.path(), &tasks, "aaa", Status::Done, "worker-1").unwrap_err();
+        assert!(matches!(err, Error::FenceViolation { .. }));
+
+        // The body write never happened.
+        let on_disk = store::load_one(tmp.path(), "aaa").unwrap();
+        assert_eq!(on_disk.body, "");
+    }
+
+    #[tokio::test]
+    async fn test_fenced_mutations_pass_for_current_holder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::InProgress);
+        a.assignee = "worker-1".into();
+        store::save(tmp.path(), &a).unwrap();
+        store::save(tmp.path(), &make_task("bbb", Status::Open)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let t = update_task_fenced(
+            tmp.path(),
+            &tasks,
+            "aaa",
+            None,
+            None,
+            None,
+            None,
+            Some("findings".into()),
+            None,
+            None,
+            "worker-1",
+        )
+        .unwrap();
+        assert_eq!(t.body, "findings");
+
+        let t = add_dependency_fenced(tmp.path(), &tasks, "aaa", "bbb", "worker-1").unwrap();
+        assert_eq!(t.depends_on, vec!["bbb".to_string()]);
+        let t = remove_dependency_fenced(tmp.path(), &tasks, "aaa", "bbb", "worker-1").unwrap();
+        assert!(t.depends_on.is_empty());
+
+        let t = review_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap();
+        assert_eq!(t.status, Status::Review);
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = reject_task_fenced(tmp.path(), &tasks, "aaa", "worker-1").unwrap();
+        assert_eq!(t.status, Status::Open);
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = release_task_fenced(tmp.path(), &tasks, "aaa", "worker-1");
+        // After reject the task is open, so release (which requires in_progress)
+        // correctly refuses — the fence itself passed.
+        assert!(matches!(t.unwrap_err(), Error::InvalidStatus { .. }));
     }
 
     #[tokio::test]
