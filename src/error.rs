@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::task::Status;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +42,12 @@ pub enum Error {
     /// The task cannot be archived because active tasks depend on it.
     #[error("task {id} is not archivable — active dependents: {}", blockers.join(", "))]
     NotArchivable { id: String, blockers: Vec<String> },
+
+    /// The task cannot be released because nobody is working on it.
+    #[error(
+        "task {id} is not in progress (status: {status}) — only in-progress tasks can be released"
+    )]
+    NotInProgress { id: String, status: Status },
 
     /// The task is not found in the archive.
     #[error("task not found in archive: {0}")]

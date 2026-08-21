@@ -63,7 +63,8 @@ The server must be launched from the project root (where `.bears/` lives).
 | `get_task` | Full details of a single task |
 | `create_task` | Create a new task or epic |
 | `update_task` | Update task fields (status, priority, tags, assignee, body) |
-| `start_task` | Set status to in_progress |
+| `start_task` | Set status to in_progress, optionally claiming it for an assignee |
+| `release_task` | Release an in-progress task back to the pool (status → open, assignee cleared) |
 | `complete_task` | Set status to done |
 | `cancel_task` | Set status to cancelled |
 | `prune_tasks` | Delete cancelled tasks (optionally also done tasks) |
@@ -78,13 +79,21 @@ The server must be launched from the project root (where `.bears/` lives).
 The core pattern for AI agent workflows:
 
 ```
-1. list_ready          → pick the highest-priority task
-2. start_task(id)      → mark it in_progress
-3. get_task(id)        → read the full description
-4. ... do the work ... → implement, test, commit
-5. complete_task(id)   → mark it done
-6. list_ready          → repeat
+1. list_ready              → pick the highest-priority task
+2. start_task(id, assignee) → mark it in_progress and claim it
+3. get_task(id)            → read the full description
+4. ... do the work ...     → implement, test, commit
+5. complete_task(id)       → mark it done
+6. list_ready              → repeat
 ```
+
+If a task turns out to be blocked or a worker gives up on it, call `release_task(id)` instead of
+`complete_task` — the status goes back to `open`, the assignee is cleared, and the task reappears
+in `list_ready` for whoever picks it up next.
+
+Every start counts: task responses carry an `attempts` field once work has begun on them. Check it
+when you pick a task up — a high count means earlier workers already failed at this, so try a
+different approach or escalate rather than repeating theirs.
 
 This loop ensures the agent always works on the most impactful unblocked task. Dependencies are respected automatically — a task only appears in `list_ready` when all its dependencies are done.
 

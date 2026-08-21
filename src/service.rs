@@ -137,9 +137,11 @@ pub fn update_task(
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
 
+    let previous_status = t.status;
     let status_changed = status.as_ref().is_some_and(|s| *s != t.status);
     if let Some(s) = status {
         t.status = s;
+        record_attempt(&mut t, previous_status);
     }
     if let Some(p) = priority {
         t.priority = p;
@@ -188,13 +190,83 @@ pub fn set_status(
 ) -> Result<Task> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
+    let previous = t.status;
     t.status = status;
+    record_attempt(&mut t, previous);
     t.updated = Utc::now();
     store::save(base, &t)?;
 
     on_status_changed(base, tasks, &t)?;
 
     Ok(t)
+}
+
+/// Start a task: set its status to `in_progress` and optionally claim it for
+/// an assignee.
+///
+/// `assignee` of `None` leaves the current assignee untouched; `Some("")`
+/// clears it.
+pub fn start_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+    assignee: Option<String>,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = tasks[&id].clone();
+    let previous = t.status;
+    t.status = Status::InProgress;
+    record_attempt(&mut t, previous);
+    if let Some(a) = assignee {
+        t.assignee = a;
+    }
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+
+    on_status_changed(base, tasks, &t)?;
+
+    Ok(t)
+}
+
+/// Release an in-progress task back to the pool: status returns to `open` and
+/// the assignee is cleared, so another worker can pick it up.
+///
+/// Only `in_progress` tasks can be released — releasing anything else is an
+/// error, so a stuck worker cannot accidentally reopen finished work.
+pub fn release_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+) -> Result<Task> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let mut t = tasks[&id].clone();
+    if t.status != Status::InProgress {
+        return Err(Error::NotInProgress {
+            id: t.id.clone(),
+            status: t.status,
+        });
+    }
+    t.status = Status::Open;
+    t.assignee = String::new();
+    t.updated = Utc::now();
+    store::save(base, &t)?;
+
+    on_status_changed(base, tasks, &t)?;
+
+    Ok(t)
+}
+
+/// Count a new attempt when a task transitions *into* `in_progress`.
+///
+/// An attempt starts when work is claimed, not when it is given up: that way
+/// the counter is already durable if the worker dies without releasing, and a
+/// task that succeeded on the third try reads `attempts: 3`. Re-starting a
+/// task that is already in progress (e.g. to hand it to another assignee) is
+/// the same attempt, so it does not bump the counter.
+fn record_attempt(t: &mut Task, previous: Status) {
+    if t.status == Status::InProgress && previous != Status::InProgress {
+        t.attempts = Some(t.attempt_count().saturating_add(1));
+    }
 }
 
 /// Apply side effects after a task's status has been changed and saved.
@@ -2128,5 +2200,217 @@ mod tests {
 
         let listed = list_archive(tmp.path(), None).await.unwrap();
         assert!(listed.is_empty());
+    }
+
+    // ── start / release ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_start_task_with_assignee() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = start_task(tmp.path(), &tasks, "aaa", Some("agent-1".into())).unwrap();
+        assert_eq!(t.status, Status::InProgress);
+        assert_eq!(t.assignee, "agent-1");
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks["aaa"].assignee, "agent-1", "assignee should persist");
+    }
+
+    #[tokio::test]
+    async fn test_start_task_without_assignee_leaves_it_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::Open);
+        a.assignee = "agent-1".into();
+        store::save(tmp.path(), &a).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = start_task(tmp.path(), &tasks, "aaa", None).unwrap();
+        assert_eq!(t.status, Status::InProgress);
+        assert_eq!(t.assignee, "agent-1", "omitted assignee must not clear it");
+    }
+
+    #[tokio::test]
+    async fn test_start_task_empty_assignee_clears_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::Open);
+        a.assignee = "agent-1".into();
+        store::save(tmp.path(), &a).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = start_task(tmp.path(), &tasks, "aaa", Some(String::new())).unwrap();
+        assert_eq!(t.assignee, "");
+    }
+
+    #[tokio::test]
+    async fn test_release_resets_status_and_assignee() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let mut a = make_task("aaa", Status::InProgress);
+        a.assignee = "agent-1".into();
+        store::save(tmp.path(), &a).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = release_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.status, Status::Open);
+        assert_eq!(t.assignee, "");
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks["aaa"].status, Status::Open);
+        assert_eq!(tasks["aaa"].assignee, "");
+    }
+
+    #[tokio::test]
+    async fn test_release_rejects_non_in_progress_tasks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        for status in [
+            Status::Open,
+            Status::Done,
+            Status::Cancelled,
+            Status::Blocked,
+        ] {
+            let mut a = make_task("aaa", status);
+            a.assignee = "agent-1".into();
+            store::save(tmp.path(), &a).unwrap();
+
+            let tasks = store::load_all(tmp.path()).await.unwrap();
+            let err = release_task(tmp.path(), &tasks, "aaa").unwrap_err();
+            assert!(
+                matches!(err, Error::NotInProgress { .. }),
+                "releasing a {status} task should fail, got {err:?}"
+            );
+
+            // The task itself must be untouched.
+            let tasks = store::load_all(tmp.path()).await.unwrap();
+            assert_eq!(tasks["aaa"].status, status);
+            assert_eq!(tasks["aaa"].assignee, "agent-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_unknown_task_is_an_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert!(release_task(tmp.path(), &tasks, "zzz").is_err());
+    }
+
+    // ── attempts ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_attempts_counts_each_start() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            tasks["aaa"].attempt_count(),
+            0,
+            "missing counter reads as 0"
+        );
+        assert_eq!(
+            tasks["aaa"].attempts, None,
+            "no counter is written up front"
+        );
+
+        let t = start_task(tmp.path(), &tasks, "aaa", Some("agent-1".into())).unwrap();
+        assert_eq!(t.attempt_count(), 1);
+
+        // Failed attempt handed back, then picked up by another worker.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = release_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(t.attempt_count(), 1, "release must not count as an attempt");
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = start_task(tmp.path(), &tasks, "aaa", Some("agent-2".into())).unwrap();
+        assert_eq!(t.attempt_count(), 2);
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks["aaa"].attempts, Some(2), "counter persists");
+    }
+
+    #[tokio::test]
+    async fn test_restarting_an_in_progress_task_is_the_same_attempt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        start_task(tmp.path(), &tasks, "aaa", Some("agent-1".into())).unwrap();
+
+        // Handing the in-progress task to another assignee is not a new attempt.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = start_task(tmp.path(), &tasks, "aaa", Some("agent-2".into())).unwrap();
+        assert_eq!(t.attempt_count(), 1);
+        assert_eq!(t.assignee, "agent-2");
+    }
+
+    #[tokio::test]
+    async fn test_attempts_counted_on_every_path_into_in_progress() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        // `set_status` (bea status / TUI) counts.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = set_status(tmp.path(), &tasks, "aaa", Status::InProgress).unwrap();
+        assert_eq!(t.attempt_count(), 1);
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, "aaa", Status::Open).unwrap();
+
+        // `update_task` with a status change counts too.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = update_task(
+            tmp.path(),
+            &tasks,
+            "aaa",
+            Some(Status::InProgress),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(t.attempt_count(), 2);
+
+        // A non-status update leaves the counter alone.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = update_task(
+            tmp.path(),
+            &tasks,
+            "aaa",
+            None,
+            Some(Priority::P0),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(t.attempt_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_other_status_changes_do_not_count_attempts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_task("aaa", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        set_status(tmp.path(), &tasks, "aaa", Status::Blocked).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let t = set_status(tmp.path(), &tasks, "aaa", Status::Done).unwrap();
+        assert_eq!(t.attempt_count(), 0);
+        assert_eq!(t.attempts, None);
     }
 }

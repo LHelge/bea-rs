@@ -161,15 +161,34 @@ impl BeaMcp {
         )
     }
 
-    #[tool(description = "Start a task (set status to in_progress)")]
+    #[tool(
+        description = "Start a task (set status to in_progress), optionally claiming it for an assignee"
+    )]
     async fn start_task(
+        &self,
+        Parameters(params): Parameters<StartTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let t = service::start_task(&self.base, &tasks, &params.id, params.assignee)?;
+                ok_json(serde_json::to_value(t.summary(None))?)
+            }
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Release an in-progress task back to the pool (status returns to open, assignee cleared)"
+    )]
+    async fn release_task(
         &self,
         Parameters(params): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
-                let t = service::set_status(&self.base, &tasks, &params.id, Status::InProgress)?;
+                let t = service::release_task(&self.base, &tasks, &params.id)?;
                 ok_json(serde_json::to_value(t.summary(None))?)
             }
             .await,
@@ -598,7 +617,10 @@ mod tests {
         let id = extract_json(&result)["id"].as_str().unwrap().to_string();
 
         let started = mcp
-            .start_task(Parameters(TaskIdParams { id: id.clone() }))
+            .start_task(Parameters(StartTaskParams {
+                id: id.clone(),
+                assignee: None,
+            }))
             .await
             .unwrap();
         assert_eq!(extract_json(&started)["status"], "in_progress");
@@ -608,6 +630,134 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(extract_json(&completed)["status"], "done");
+    }
+
+    #[tokio::test]
+    async fn test_tool_start_with_assignee_and_release() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Claimable".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        let started = mcp
+            .start_task(Parameters(StartTaskParams {
+                id: id.clone(),
+                assignee: Some("agent-1".into()),
+            }))
+            .await
+            .unwrap();
+        let started = extract_json(&started);
+        assert_eq!(started["status"], "in_progress");
+        assert_eq!(started["assignee"], "agent-1");
+
+        let released = mcp
+            .release_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        let released = extract_json(&released);
+        assert_eq!(released["status"], "open");
+        assert_eq!(
+            released["assignee"],
+            serde_json::Value::Null,
+            "cleared assignee should be omitted"
+        );
+
+        // The released task is ready for another worker to pick up.
+        let ready = mcp
+            .list_ready(Parameters(ListReadyParams {
+                limit: None,
+                tag: None,
+                epic: None,
+            }))
+            .await
+            .unwrap();
+        let ready = extract_json(&ready);
+        assert!(
+            ready.as_array().unwrap().iter().any(|t| t["id"] == id),
+            "released task should be ready again: {ready}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_attempts_visible_to_agents() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Retried".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+        assert!(
+            extract_json(&result).get("attempts").is_none(),
+            "a fresh task has no attempt counter"
+        );
+
+        let started = mcp
+            .start_task(Parameters(StartTaskParams {
+                id: id.clone(),
+                assignee: Some("agent-1".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&started)["attempts"], 1);
+
+        mcp.release_task(Parameters(TaskIdParams { id: id.clone() }))
+            .await
+            .unwrap();
+        let restarted = mcp
+            .start_task(Parameters(StartTaskParams {
+                id: id.clone(),
+                assignee: Some("agent-2".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&restarted)["attempts"], 2);
+
+        // The next worker can read the count before deciding how to proceed.
+        let detail = mcp.get_task(Parameters(TaskIdParams { id })).await.unwrap();
+        assert_eq!(extract_json(&detail)["attempts"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_tool_release_rejects_task_not_in_progress() {
+        let (_tmp, mcp) = setup();
+        let result = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: "Untouched".into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: None,
+                body: None,
+                task_type: None,
+            }))
+            .await
+            .unwrap();
+        let id = extract_json(&result)["id"].as_str().unwrap().to_string();
+
+        let released = mcp
+            .release_task(Parameters(TaskIdParams { id }))
+            .await
+            .unwrap();
+        assert_eq!(released.is_error, Some(true));
+        assert!(extract_text(&released).contains("not in progress"));
     }
 
     #[tokio::test]

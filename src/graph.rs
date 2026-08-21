@@ -547,6 +547,7 @@ mod tests {
             depends_on: deps.into_iter().map(String::from).collect(),
             parent: None,
             assignee: String::new(),
+            attempts: None,
             body: String::new(),
         }
     }

@@ -63,8 +63,12 @@ bea graph --json
 ## Status Changes
 
 ```bash
-# Start a task (set in_progress)
+# Start a task (set in_progress), optionally claiming it
 bea start <id> --json
+bea start <id> --assignee <name> --json
+
+# Release an in-progress task back to the pool (open, assignee cleared)
+bea release <id> --json
 
 # Complete a task (set done)
 bea done <id> --json

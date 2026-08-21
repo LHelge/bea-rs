@@ -163,13 +163,14 @@ updated: 2026-03-15T10:30:00Z
 tags: [backend, auth]
 depends_on: [f4c9, b7e3]
 parent: x9k2
-assignee: ""
+assignee: alice
+attempts: 2
 ---
 
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde_yml` for the YAML portion, keeping the rest as the body string.
+Parse frontmatter by splitting on `---` delimiters, using `serde_yml` for the YAML portion, keeping the rest as the body string. Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
 
 ### ID generation
 
@@ -178,6 +179,38 @@ Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`
 ### `ready` command
 
 The key command for agent workflows. Returns tasks where status is `open`, type is `task` (not `epic`), AND all `depends_on` tasks have status `done`. Sort by priority (P0 first), then creation date.
+
+### Attempts
+
+`attempts: Option<u32>` counts how many times work has been *started* on a task. Absent means zero —
+`Task::attempt_count()` is the accessor that normalises that, and the field is only written once a
+task has actually been started. It rides along in `TaskSummary`, but only when non-zero.
+
+`service::record_attempt` bumps the counter on every transition **into** `in_progress` — that covers
+`start_task`, `set_status`, and the `update_task` status path, so `bea start`, `bea status`,
+`bea update --status`, the TUI and every MCP equivalent all agree. Restarting a task that is already
+`in_progress` (e.g. handing it to another assignee) is the *same* attempt and does not count.
+
+Counting at claim time rather than at release time is deliberate: the counter is already durable if a
+worker dies without releasing, the worker can read "this is attempt 3" when it picks the task up, and
+a first-try success honestly reads `attempts: 1`. `release_task` and `complete_task` never touch it.
+
+### Assignee & task claiming
+
+`assignee` is a plain string on `Task` (empty = unassigned) that rides along in the frontmatter and
+in **`TaskSummary`** (skipped when empty), so every list/ready/start response tells an orchestrator
+who holds a task without a second lookup.
+
+| Operation | Effect on assignee |
+|-----------|--------------------|
+| `bea start <id> [-a NAME]` / `start_task { id, assignee? }` | `Some(name)` sets it, `Some("")` clears it, `None` (flag omitted) leaves it unchanged |
+| `bea release <id>` / `release_task { id }` | cleared, and status goes back to `open` (`attempts` untouched) |
+| `bea update <id> --assignee NAME` / `update_task` | set directly, independent of status |
+
+`service::release_task` is deliberately narrow: it **only** accepts tasks whose status is
+`in_progress`, returning `Error::NotInProgress` otherwise, so a released task can never silently
+undo a `done`/`cancelled` state. The motivating flow is a stuck or killed worker agent — the
+orchestrator releases the claim and the task reappears in `ready` for the next worker.
 
 ### Epic behavior
 
@@ -235,7 +268,8 @@ Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, 
 | `get_task` | `id` |
 | `create_task` | `title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?` |
 | `update_task` | `id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?` |
-| `start_task` | `id` |
+| `start_task` | `id`, `assignee?` |
+| `release_task` | `id` |
 | `complete_task` | `id` |
 | `cancel_task` | `id` |
 | `prune_tasks` | `include_done?` |
@@ -282,7 +316,7 @@ Keep the dependency tree small. Compilation should be fast.
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
-- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)

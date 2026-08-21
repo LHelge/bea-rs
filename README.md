@@ -59,6 +59,7 @@ bea list
 bea ready           # what can I work on right now?
 bea start <id>
 bea done <id>
+bea release <id>    # stuck? hand it back to the pool
 ```
 
 ---
@@ -79,10 +80,14 @@ updated: 2026-03-15T10:30:00Z
 tags: [backend, auth]
 depends_on: [f4c9]
 parent: x9k2
+assignee: alice
+attempts: 2
 ---
 
 Any Markdown body goes here.
 ```
+
+Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are omitted when empty — a missing `attempts` counts as `0`.
 
 **Statuses:** `open` · `in_progress` · `done` · `blocked` · `cancelled`
 
@@ -160,14 +165,30 @@ List all epics with progress (done/total children).
 bea epics
 ```
 
-### `bea start` / `bea done` / `bea cancel`
+### `bea start` / `bea done` / `bea cancel` / `bea release`
 Shortcuts for the most common status transitions:
 
 ```sh
-bea start <id>    # → in_progress
-bea done <id>     # → done
-bea cancel <id>   # → cancelled
+bea start <id>                    # → in_progress
+bea start <id> --assignee alice   # → in_progress, claimed by alice
+bea done <id>                     # → done
+bea cancel <id>                   # → cancelled
+bea release <id>                  # → open, assignee cleared
 ```
+
+`--assignee` / `-a` records who (or which agent) is working on the task; omitting it leaves any
+existing assignee untouched, and `--assignee ""` clears it.
+
+`attempts` counts how many times work has been started on a task. It increments on every transition
+into `in_progress` (`bea start`, `bea status <id> in_progress`, `bea update --status in_progress`,
+or the TUI) — re-running `bea start` on a task you already hold is the same attempt, so handing it to
+a different assignee does not inflate the count. Releasing or completing a task never changes it, so
+a task that succeeded on the third try reads `attempts: 3`.
+
+`bea release` hands a claimed task back to the pool — the status returns to `open` and the assignee
+is cleared, so the task shows up in `bea ready` again for another worker. It applies **only** to
+`in_progress` tasks: releasing anything else is an error, so finished work is never silently
+reopened. Use it when a worker gets stuck or is killed mid-task.
 
 When all children of an epic are completed, the epic is automatically marked as done.
 
@@ -295,7 +316,8 @@ bea mcp   # starts MCP server over stdio
 | `get_task` | Full task details (`id`); falls back to the archive, marking the result `archived: true` |
 | `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?`) |
 | `update_task` | Update fields (`id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?`) |
-| `start_task` | Set status to `in_progress` (`id`) |
+| `start_task` | Set status to `in_progress`, optionally claiming it (`id`, `assignee?`) |
+| `release_task` | Release an in-progress task: status → `open`, assignee cleared (`id`) |
 | `complete_task` | Set status to `done` (`id`) |
 | `cancel_task` | Set status to `cancelled` (`id`) |
 | `prune_tasks` | Permanently delete cancelled tasks (`include_done?`) |
