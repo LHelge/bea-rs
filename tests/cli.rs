@@ -2447,3 +2447,64 @@ fn test_proposals_are_hidden_until_accepted() {
     // `other` exists only to prove the backlog is not empty above.
     assert!(!other.is_empty());
 }
+
+/// `bea show | head` must not panic when the reader goes away.
+///
+/// Rust ignores SIGPIPE at startup, so `println!` to a closed pipe used to
+/// panic with "failed printing to stdout: Broken pipe".
+#[test]
+#[cfg(unix)]
+fn test_broken_pipe_exits_quietly() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as StdCommand, Stdio};
+
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let id = create(&tmp, "Big body");
+
+    // A body far larger than the 64K pipe buffer, so the child is still
+    // writing when the reader closes its end.
+    let file = std::fs::read_dir(tmp.path().join(".bears"))
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().is_some_and(|e| e == "md"))
+        .expect("task file");
+    let mut body = String::new();
+    for i in 0..20_000 {
+        body.push_str(&format!("line {i} of a very long body\n"));
+    }
+    let existing = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{existing}\n{body}")).unwrap();
+
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("bea"))
+        .current_dir(tmp.path())
+        .args(["show", &id])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Read one line, then close the read end — this is what `head -1` does.
+    {
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("Big body"), "unexpected first line: {line}");
+    }
+
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "broken pipe should not panic, got stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Broken pipe"),
+        "broken pipe should not be reported, got stderr: {stderr}"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(101),
+        "process should not exit with the panic status"
+    );
+}

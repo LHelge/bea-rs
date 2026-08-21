@@ -338,6 +338,7 @@ On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it
 - `tui-markdown` — markdown rendering inside the TUI
 - `notify`, `notify-debouncer-mini` — debounced `.bears/` filesystem watching for live TUI refresh
 - `shell-words` — parse the `$EDITOR` command for `bea edit`
+- `libc` (unix only, binary-only) — reset `SIGPIPE` to its default disposition for CLI output
 
 Keep the dependency tree small. Compilation should be fast.
 
@@ -348,6 +349,12 @@ Keep the dependency tree small. Compilation should be fast.
 - Cycle detected → reject with explanation
 - Invalid frontmatter → warn and skip (don't crash), report which file
 - Library code uses `Result` with `?`. CLI formats errors for humans. MCP returns `rmcp::ErrorData` from tool methods.
+- **Broken pipes.** Rust ignores `SIGPIPE` at startup, so `println!` to a closed pipe (`bea show | head`)
+  panics instead of exiting. `restore_sigpipe()` in `main.rs` puts the default disposition back before
+  the CLI runs — the process then dies from the signal like any other Unix filter. It is **not** applied
+  to `bea mcp` or `bea tui`, which own their transports. This is why the ~70 `println!` calls in
+  `cli/cmd.rs` can stay as they are; there is a regression test in `tests/cli.rs`
+  (`test_broken_pipe_exits_quietly`, unix-only). Windows has no `SIGPIPE` and is not covered.
 
 ## Testing
 
