@@ -382,6 +382,13 @@ pub fn cmd_show_archived(task: &Task, _plan: bool, json: bool) -> Result<()> {
                 task.assignee
             );
         }
+        if task.attempt_count() > 0 {
+            println!(
+                "{} {}",
+                "Attempts:".if_supports_color(Stdout, |t| t.bold()),
+                task.attempt_count()
+            );
+        }
         println!(
             "{} {}",
             "Created: ".if_supports_color(Stdout, |t| t.bold()),
@@ -470,6 +477,13 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool)
                 "{} {}",
                 "Assignee:".if_supports_color(Stdout, |t| t.bold()),
                 t.assignee
+            );
+        }
+        if t.attempt_count() > 0 {
+            println!(
+                "{} {}",
+                "Attempts:".if_supports_color(Stdout, |t| t.bold()),
+                t.attempt_count()
             );
         }
         println!(
@@ -574,6 +588,57 @@ pub fn cmd_status(
     } else {
         println!(
             "[{}] {} → {}",
+            color_id(&t.id),
+            t.title,
+            color_status(&t.status)
+        );
+    }
+    Ok(())
+}
+
+pub fn cmd_start(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: &str,
+    assignee: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let t = service::start_task(base, tasks, id, assignee)?;
+
+    if json {
+        output(&t.summary(None))?;
+    } else {
+        let mut notes: Vec<String> = Vec::new();
+        if !t.assignee.is_empty() {
+            notes.push(t.assignee.clone());
+        }
+        if t.attempt_count() > 1 {
+            notes.push(format!("attempt {}", t.attempt_count()));
+        }
+        let suffix = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", notes.join(", "))
+        };
+        println!(
+            "[{}] {} → {}{}",
+            color_id(&t.id),
+            t.title,
+            color_status(&t.status),
+            suffix
+        );
+    }
+    Ok(())
+}
+
+pub fn cmd_release(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
+    let t = service::release_task(base, tasks, id)?;
+
+    if json {
+        output(&t.summary(None))?;
+    } else {
+        println!(
+            "[{}] {} → {} (unassigned)",
             color_id(&t.id),
             t.title,
             color_status(&t.status)

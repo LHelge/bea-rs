@@ -37,6 +37,9 @@ fn hint_for(e: &Error) -> Option<&'static str> {
     match e {
         Error::NotInitialized => Some("run `bea init` to create a .bears/ directory"),
         Error::NotArchived(_) => Some("use `bea log` to list archived tasks"),
+        Error::NotInProgress { .. } => {
+            Some("to reopen a task that is not in progress, use `bea update <id> --status open`")
+        }
         Error::NotArchivable { .. } => {
             Some("archive or complete the blocking dependents first, or use `bea archive` to sweep")
         }

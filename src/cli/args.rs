@@ -198,6 +198,16 @@ pub enum Command {
     Start {
         /// Task ID
         id: String,
+
+        /// Claim the task for an assignee (use empty string "" to clear)
+        #[arg(long, short = 'a')]
+        assignee: Option<String>,
+    },
+
+    /// Release an in-progress task (back to open, assignee cleared)
+    Release {
+        /// Task ID
+        id: String,
     },
 
     /// Complete a task (set status to done)

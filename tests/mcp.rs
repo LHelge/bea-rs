@@ -82,6 +82,7 @@ async fn test_handshake_and_tool_list() {
         "create_task",
         "update_task",
         "start_task",
+        "release_task",
         "complete_task",
         "cancel_task",
         "prune_tasks",

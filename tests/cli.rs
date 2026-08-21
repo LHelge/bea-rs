@@ -2155,3 +2155,154 @@ fn test_template_source_files_exist_on_disk() {
         );
     }
 }
+
+#[test]
+fn test_start_with_assignee_and_release() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let output = bea(&tmp)
+        .args(["--json", "create", "Claimable task"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    bea(&tmp)
+        .args(["start", &id, "--assignee", "agent-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("in_progress"))
+        .stdout(predicate::str::contains("(agent-1)"));
+
+    bea(&tmp)
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent-1"));
+
+    bea(&tmp)
+        .args(["release", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("open"))
+        .stdout(predicate::str::contains("(unassigned)"));
+
+    let output = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(v["status"], "open");
+    assert!(
+        v.get("assignee").is_none(),
+        "assignee should be cleared: {v}"
+    );
+
+    // Released work is available to the next worker.
+    bea(&tmp)
+        .args(["ready"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Claimable task"));
+}
+
+#[test]
+fn test_start_without_assignee_keeps_existing_one() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let output = bea(&tmp)
+        .args(["--json", "create", "Sticky assignee"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    bea(&tmp)
+        .args(["start", &id, "-a", "agent-1"])
+        .assert()
+        .success();
+    bea(&tmp).args(["release", &id]).assert().success();
+    bea(&tmp)
+        .args(["update", &id, "--assignee", "agent-2"])
+        .assert()
+        .success();
+    bea(&tmp)
+        .args(["start", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent-2"));
+}
+
+#[test]
+fn test_release_requires_in_progress() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let output = bea(&tmp)
+        .args(["--json", "create", "Not started"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    bea(&tmp)
+        .args(["release", &id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in progress"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn test_attempts_counter() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let output = bea(&tmp)
+        .args(["--json", "create", "Flaky task"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+    assert!(
+        v.get("attempts").is_none(),
+        "fresh task has no counter: {v}"
+    );
+
+    bea(&tmp)
+        .args(["start", &id, "-a", "agent-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(agent-1)"));
+    bea(&tmp).args(["release", &id]).assert().success();
+
+    // Second attempt is announced as such.
+    bea(&tmp)
+        .args(["start", &id, "-a", "agent-2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(agent-2, attempt 2)"));
+
+    bea(&tmp)
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attempts: 2"));
+
+    let output = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(v["attempts"], 2);
+
+    // Completing does not disturb the count.
+    bea(&tmp).args(["done", &id]).assert().success();
+    let output = bea(&tmp).args(["--json", "show", &id]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(v["attempts"], 2);
+    assert_eq!(v["status"], "done");
+}

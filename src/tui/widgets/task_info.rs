@@ -82,6 +82,14 @@ impl<'a> TaskInfoWidget<'a> {
             ]));
         }
 
+        // Attempts (only once the task has been started at least once)
+        if self.task.attempt_count() > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("Attempts: ", label_style),
+                Span::raw(self.task.attempt_count().to_string()),
+            ]));
+        }
+
         // Parent
         if let Some(ref parent) = self.task.parent {
             lines.push(Line::from(vec![

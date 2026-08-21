@@ -131,6 +131,10 @@ pub struct Task {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub assignee: String,
+    /// How many attempts have been started on this task. A missing field means
+    /// zero — the counter only appears once a task has actually been started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
     #[serde(skip)]
     pub body: String,
 }
@@ -193,11 +197,17 @@ impl Task {
             depends_on: Vec::new(),
             parent: None,
             assignee: String::new(),
+            attempts: None,
             body: String::new(),
         }
     }
 
-    /// Compact projection: id, title, type, status, priority, tags, and optional effective priority.
+    /// Attempts started on this task, treating a missing counter as zero.
+    pub fn attempt_count(&self) -> u32 {
+        self.attempts.unwrap_or(0)
+    }
+
+    /// Compact projection: id, title, type, status, priority, tags, assignee, attempts, and optional effective priority.
     pub fn summary(&self, effective_priority: Option<&Priority>) -> TaskSummary {
         TaskSummary {
             id: self.id.clone(),
@@ -206,20 +216,21 @@ impl Task {
             status: self.status,
             priority: self.priority,
             tags: self.tags.clone(),
+            assignee: self.assignee.clone(),
+            attempts: self.attempts.filter(|n| *n > 0),
             effective_priority: effective_priority
                 .filter(|ep| *ep < &self.priority)
                 .copied(),
         }
     }
 
-    /// Full projection: all summary fields plus body, deps, parent, assignee, timestamps.
+    /// Full projection: all summary fields plus body, deps, parent, timestamps.
     pub fn detail(&self, effective_priority: Option<&Priority>) -> TaskDetail {
         TaskDetail {
             summary: self.summary(effective_priority),
             body: self.body.clone(),
             depends_on: self.depends_on.clone(),
             parent: self.parent.clone(),
-            assignee: self.assignee.clone(),
             created: self.created,
             updated: self.updated,
         }
@@ -251,6 +262,10 @@ pub struct TaskSummary {
     pub status: Status,
     pub priority: Priority,
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub assignee: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_priority: Option<Priority>,
 }
@@ -264,7 +279,6 @@ pub struct TaskDetail {
     pub depends_on: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    pub assignee: String,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -900,5 +914,39 @@ updated: 2026-03-15T10:30:00Z
             let de: TaskType = serde_json::from_value(json).unwrap();
             assert_eq!(&de, variant, "TaskType serde round-trip mismatch");
         }
+    }
+
+    #[test]
+    fn test_attempts_missing_reads_as_zero() {
+        let content = "---\nid: ab2\ntitle: No counter\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.attempts, None);
+        assert_eq!(task.attempt_count(), 0);
+
+        // An untouched task does not gain the field on write.
+        let rendered = render_task(&task);
+        assert!(!rendered.contains("attempts"), "{rendered}");
+    }
+
+    #[test]
+    fn test_attempts_roundtrip() {
+        let mut t = Task::new("ab2".into(), "Retried".into(), Priority::P2);
+        t.attempts = Some(3);
+        let rendered = render_task(&t);
+        assert!(rendered.contains("attempts: 3"), "{rendered}");
+
+        let parsed = parse_task(&rendered).unwrap();
+        assert_eq!(parsed.attempt_count(), 3);
+    }
+
+    #[test]
+    fn test_summary_hides_zero_attempts() {
+        let mut t = Task::new("ab2".into(), "Task".into(), Priority::P2);
+        let json = serde_json::to_value(t.summary(None)).unwrap();
+        assert!(json.get("attempts").is_none(), "{json}");
+
+        t.attempts = Some(2);
+        let json = serde_json::to_value(t.summary(None)).unwrap();
+        assert_eq!(json["attempts"], 2);
     }
 }

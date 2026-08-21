@@ -121,8 +121,12 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             let result = cmd::cmd_status(base, &tasks, &id, status, cli.json);
             augment_archived_error(base, result, &id).await
         }
-        Command::Start { id } => {
-            let result = cmd::cmd_status(base, &tasks, &id, Status::InProgress, cli.json);
+        Command::Start { id, assignee } => {
+            let result = cmd::cmd_start(base, &tasks, &id, assignee, cli.json);
+            augment_archived_error(base, result, &id).await
+        }
+        Command::Release { id } => {
+            let result = cmd::cmd_release(base, &tasks, &id, cli.json);
             augment_archived_error(base, result, &id).await
         }
         Command::Done { id } => {

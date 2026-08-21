@@ -75,6 +75,14 @@ pub struct UpdateTaskParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StartTaskParams {
+    /// Task ID
+    pub id: String,
+    /// Claim the task for this assignee (omit to leave the assignee unchanged)
+    pub assignee: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DepParams {
     /// Task that will depend on another
     pub id: String,
