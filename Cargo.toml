@@ -36,6 +36,7 @@ cli = [
     "dep:clap",
     "dep:clap_complete",
     "dep:crossterm",
+    "dep:libc",
     "dep:notify",
     "dep:notify-debouncer-mini",
     "dep:owo-colors",
@@ -48,6 +49,7 @@ cli = [
     "tokio/rt-multi-thread",
     "tokio/sync",
 ]
+libc = ["dep:libc"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -76,3 +78,6 @@ rmcp = { version = "3.1.4", features = ["client", "transport-child-process"] }
 tempfile = "3.27.0"
 # Unit tests use #[tokio::test]; keep them working under --no-default-features.
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+
+[target."cfg(unix)".dependencies]
+libc = { version = "0.2.189", optional = true }
