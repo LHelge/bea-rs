@@ -237,7 +237,7 @@ impl BeaMcp {
     }
 
     #[tool(
-        description = "Send a task under review back for changes (status returns to open, assignee kept)"
+        description = "Send a task under review back for changes (status returns to open, assignee cleared)"
     )]
     async fn reject_task(
         &self,
@@ -840,10 +840,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(extract_json(&rejected)["status"], "open");
-        assert_eq!(
-            extract_json(&rejected)["assignee"],
-            "agent-1",
-            "reject keeps the author"
+        assert!(
+            extract_json(&rejected)["assignee"].is_null(),
+            "reject hands the task back to the pool"
         );
         let ready = mcp
             .list_ready(Parameters(ListReadyParams {
