@@ -273,8 +273,8 @@ pub fn find_task_path(base: &Path, id: &str) -> Result<PathBuf> {
         .ok_or_else(|| Error::TaskNotFound(id.into()))
 }
 
-/// Load a single task by exact ID (used in tests and for file-level operations).
-#[cfg(test)]
+/// Load a single task by exact ID — a fresh read from disk, bypassing any
+/// snapshot (used for file-level operations and the assignee fence).
 pub fn load_one(base: &Path, id: &str) -> Result<Task> {
     let path = find_task_path(base, id)?;
     let content = fs::read_to_string(&path)?;
