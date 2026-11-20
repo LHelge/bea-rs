@@ -437,7 +437,7 @@ what a coding agent needs when a session starts: the first `ready_limit` tasks o
 `snapshot::build`. `Prime::summary(&eff) -> PrimeSummary` is the JSON shape. The default limit is
 `service::DEFAULT_PRIME_READY` = 10. `bea prime [--limit N]` (`cmd_prime` in `cli/cmd.rs`) prints
 the three sections with one ID width across them (in progress with assignee, or `unassigned`, and
-`attempt N`; review with assignee), then a fixed reminder of the workflow verbs (`PRIME_WORKFLOW`),
+`attempt N`; ready and review rows with `N earlier attempt(s)`, review also with the assignee), then a fixed reminder of the workflow verbs (`PRIME_WORKFLOW`),
 colourless when stdout is not a terminal; `--json` prints the `PrimeSummary` (no reminder). There is
 deliberately no MCP tool (an MCP client has `list_ready` / `list_all_tasks` / `list_review`). On a
 directory without `.bears/` it fails with `NotInitialized` like every other command; the documented
@@ -751,7 +751,8 @@ Keep the dependency tree small. Compilation should be fast.
   `tests/mcp.rs` (tool listed)
 - `bea prime`: `service.rs` (`prime` keeps the first ready tasks in `list_ready` order and counts the
   rest, a zero limit only counts, in-progress and review queues, the JSON shape with assignee and
-  attempts); `tests/cli.rs` (empty store, sections with assignee and attempts, the "not shown" note,
+  attempts); `tests/cli.rs` (empty store, sections with assignee and attempts — `attempt N` in
+  progress, earlier attempts on ready and review rows — one ID width across sections, the "not shown" note,
   no colour when piped, `--json`, not initialized and the documented hook command a no-op there,
   completions)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; delete/prune of an epic (`renamed` map, `{ pruned, renamed }`, the same object with empty members when nothing moved or nothing was pruned); derived parent and reparenting (`renamed` map, detach, refusal under its own subtree); archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)

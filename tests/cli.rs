@@ -273,8 +273,26 @@ fn test_prime_prints_the_session_context() {
         .args(["start", &wip, "-a", "worker-1"])
         .assert()
         .success();
-    let rev = create_task(&tmp, "Finished work");
-    bea(&tmp).args(["start", &rev]).assert().success();
+    // One earlier attempt on a ready task, released back to the pool.
+    bea(&tmp).args(["start", &ready[0]]).assert().success();
+    bea(&tmp).args(["release", &ready[0]]).assert().success();
+    // The reviewed task is a child, so its ID is longer than the others.
+    let epic = bea(&tmp)
+        .args(["--json", "create", "Epic", "--epic"])
+        .output()
+        .unwrap();
+    let epic: serde_json::Value = serde_json::from_slice(&epic.stdout).unwrap();
+    let epic = epic["id"].as_str().unwrap();
+    let out = bea(&tmp)
+        .args(["--json", "create", "Finished work", "--parent", epic])
+        .output()
+        .unwrap();
+    let rev: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rev = rev["id"].as_str().unwrap().to_string();
+    bea(&tmp)
+        .args(["start", &rev, "-a", "worker-2"])
+        .assert()
+        .success();
     bea(&tmp).args(["review", &rev]).assert().success();
 
     let out = bea(&tmp).args(["prime", "--limit", "2"]).output().unwrap();
@@ -296,8 +314,27 @@ fn test_prime_prints_the_session_context() {
         text.contains("Claimed work (worker-1, attempt 1)"),
         "{text}"
     );
+    assert!(text.contains("Ready 1 (1 earlier attempt)"), "{text}");
     assert!(text.contains("Awaiting review (1):"), "{text}");
-    assert!(text.contains("Finished work"), "{text}");
+    assert!(
+        text.contains("Finished work (worker-2, 1 earlier attempt)"),
+        "{text}"
+    );
+    // One ID width across the sections: the root IDs are padded to the
+    // child's, in the ready and in-progress sections alike.
+    let pad = " ".repeat(rev.len() - wip.len());
+    assert!(
+        text.contains(&format!("  [{wip}]{pad} P2 — Claimed work")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  [{}]{pad} P2 — Ready 2", ready[1])),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  [{rev}] P2 — Finished work")),
+        "{text}"
+    );
 
     // The default shows all three ready tasks without a "not shown" note.
     bea(&tmp)
@@ -320,6 +357,7 @@ fn test_prime_prints_the_session_context() {
     assert_eq!(v["in_progress"][0]["assignee"], "worker-1");
     assert_eq!(v["in_progress"][0]["attempts"], 1);
     assert_eq!(v["review"][0]["id"], rev.as_str());
+    assert_eq!(v["ready"][0]["attempts"], 1);
 }
 
 /// Without a store `bea prime` fails like every other command; the hook
