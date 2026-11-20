@@ -788,8 +788,16 @@ impl Planner<'_> {
 /// matches, and when all of them are one task and its descendants, that
 /// shallowest task is the answer: `8p` resolves to the epic `8ph` even though
 /// `8ph.c2` matches too, and `8ph.c` resolves to `8ph.c2` over `8ph.c2.d7`.
-/// Errors if nothing matches, or if the matches are genuinely different tasks.
+/// Errors if the prefix is empty (it would match every task), if nothing
+/// matches, or if the matches are genuinely different tasks.
 pub fn resolve_prefix(tasks: &HashMap<String, Task>, prefix: &str) -> Result<String> {
+    if prefix.trim().is_empty() {
+        return Err(Error::InvalidId {
+            id: prefix.into(),
+            reason: "an ID or prefix must not be empty".into(),
+        });
+    }
+
     // Exact match first
     if tasks.contains_key(prefix) {
         return Ok(prefix.to_string());
@@ -1249,6 +1257,24 @@ mod tests {
         let tasks = task_map(&["e1x", "e1x.ab", "e1x.ab.cd", "e1x.ef"]);
         assert_eq!(resolve_prefix(&tasks, "e1").unwrap(), "e1x");
         assert_eq!(resolve_prefix(&tasks, "e").unwrap(), "e1x");
+    }
+
+    /// An empty or blank prefix matches everything, so it is rejected rather
+    /// than resolved to a store's only task or only root.
+    #[test]
+    fn test_resolve_prefix_rejects_empty() {
+        for tasks in [
+            task_map(&["e1x"]),
+            task_map(&["e1x", "e1x.ab", "e1x.ab.cd"]),
+        ] {
+            for prefix in ["", " ", "\t"] {
+                let err = resolve_prefix(&tasks, prefix).unwrap_err();
+                assert!(
+                    matches!(err, Error::InvalidId { .. }),
+                    "{prefix:?}: {err:?}"
+                );
+            }
+        }
     }
 
     /// A prefix ending inside a child segment resolves to that child when the
