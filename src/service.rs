@@ -75,20 +75,21 @@ pub fn create_task(
 /// [`store::resolve_prefix`]).
 ///
 /// `tasks` are the active tasks, and they are tried first, exactly as `show`
-/// and the mutating commands resolve an ID: an archived task sharing the
-/// prefix does not make it ambiguous. Only when the active tasks name no
-/// task, or a task that is not an epic, is the value resolved again against
-/// active and archived IDs together, so an epic that lives only in the
-/// archive still filters its active children, and a prefix of such an epic
-/// names the epic rather than one of those children.
+/// and the mutating commands resolve an ID: an epic found there is used, and
+/// an archived task sharing the prefix does not make it ambiguous. When the
+/// active tasks name no task, several tasks, or a task that is not an epic,
+/// the value is resolved again against active and archived IDs together, so
+/// an epic that lives only in the archive still filters its active children
+/// (which, when there are several, are ambiguous among the active tasks
+/// alone), and a prefix of such an epic names the epic.
 ///
-/// Errors: [`Error::InvalidId`] for an empty value; [`Error::AmbiguousPrefix`]
-/// when it names several active tasks (the archive is not consulted then) or,
-/// on the second try, several tasks active and archived;
-/// [`Error::TaskNotFound`] when it names no task, or names a whole ID that
-/// exists only as the ancestor of a task (the missing epic of an orphan);
-/// and [`Error::NotAnEpic`] when the task it names is not an epic (only epics
-/// have tasks below them, so the filter could only ever be empty).
+/// Errors: [`Error::InvalidId`] for an empty value; [`Error::TaskNotFound`]
+/// when it names no task, active or archived, or names a whole ID that no
+/// task has while every task it matches lies below it (the missing epic of
+/// orphans); [`Error::AmbiguousPrefix`] when it names genuinely different
+/// tasks, active and archived together; and [`Error::NotAnEpic`] when the
+/// task it names is not an epic (only epics have tasks below them, so the
+/// filter could only ever be empty).
 ///
 /// The `list_*` functions and [`Graph::bounded_adjacency_list`] take the
 /// resolved ID; they match it exactly.
@@ -100,9 +101,6 @@ pub async fn resolve_epic_filter(
     let is_epic = |t: &Task| {
         if t.task_type.is_epic() {
             Ok(t.id.clone())
-        } else if task::is_descendant(&t.id, epic) {
-            // `epic` is a whole ID above the task, and no task has it.
-            Err(Error::TaskNotFound(epic.to_string()))
         } else {
             Err(Error::NotAnEpic(t.id.clone()))
         }
@@ -112,12 +110,21 @@ pub async fn resolve_epic_filter(
     }
     match store::resolve_prefix(tasks, epic) {
         Ok(id) if tasks[&id].task_type.is_epic() => return Ok(id),
-        Err(e @ (Error::AmbiguousPrefix { .. } | Error::InvalidId { .. })) => return Err(e),
-        // Nothing active, or a non-epic: the epic may be archived.
+        Err(e @ Error::InvalidId { .. }) => return Err(e),
+        // Nothing active, several active tasks, or a non-epic: the epic may
+        // be archived, with its active children below it.
         _ => {}
     }
     let mut all = store::load_archived(base).await?;
     all.extend(tasks.iter().map(|(id, t)| (id.clone(), t.clone())));
+    if !all.contains_key(epic) && task::is_valid_id(epic) {
+        // A whole ID that no task has, with tasks below it only: the epic of
+        // orphans, which does not exist.
+        let mut matches = all.keys().filter(|id| id.starts_with(epic)).peekable();
+        if matches.peek().is_some() && matches.all(|id| task::is_descendant(id, epic)) {
+            return Err(Error::TaskNotFound(epic.to_string()));
+        }
+    }
     let id = store::resolve_prefix(&all, epic)?;
     is_epic(&all[&id])
 }
@@ -2456,24 +2463,47 @@ mod tests {
     /// active and archived IDs together and names the epic.
     #[tokio::test]
     async fn test_resolve_epic_filter_finds_an_archived_epic() {
+        // With two active children the active tasks alone are ambiguous.
+        for children in [&["arc.ch"][..], &["arc.c1", "arc.c2"]] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let base = tmp.path();
+            store::init(base).unwrap();
+            let mut epic = make_epic("arc");
+            epic.status = Status::Done;
+            store::save(base, &epic).unwrap();
+            for child in children {
+                store::save(base, &make_task(child, Status::Open)).unwrap();
+            }
+            store::move_to_archive(base, "arc").unwrap();
+            let tasks = store::load_all(base).await.unwrap();
+
+            for value in ["arc", "ar"] {
+                let epic = resolve_epic_filter(base, &tasks, value).await.unwrap();
+                assert_eq!(epic, "arc", "{value} with {children:?}");
+                assert_eq!(ids(&list_ready(&tasks, None, None, Some(&epic))), children);
+            }
+        }
+    }
+
+    /// A whole ID that no task has, with only orphans below it, is not found,
+    /// however many orphans there are; a shorter prefix over them is still
+    /// ambiguous, since no task is their common ancestor.
+    #[tokio::test]
+    async fn test_resolve_epic_filter_missing_epic_of_several_orphans() {
         let tmp = tempfile::TempDir::new().unwrap();
         let base = tmp.path();
         store::init(base).unwrap();
-        let mut epic = make_epic("arc");
-        epic.status = Status::Done;
-        store::save(base, &epic).unwrap();
-        store::save(base, &make_child("ch", "arc", Status::Open)).unwrap();
-        store::move_to_archive(base, "arc").unwrap();
+        store::save(base, &make_child("a", "zz9", Status::Open)).unwrap();
+        store::save(base, &make_child("b", "zz9", Status::Open)).unwrap();
         let tasks = store::load_all(base).await.unwrap();
+        let resolve = async |v: &str| resolve_epic_filter(base, &tasks, v).await;
 
-        for value in ["arc", "ar"] {
-            let epic = resolve_epic_filter(base, &tasks, value).await.unwrap();
-            assert_eq!(epic, "arc", "{value}");
-            assert_eq!(
-                ids(&list_ready(&tasks, None, None, Some(&epic))),
-                ["arc.ch"]
-            );
-        }
+        assert!(matches!(resolve("zz9").await, Err(Error::TaskNotFound(id)) if id == "zz9"));
+        assert!(matches!(
+            resolve("zz").await,
+            Err(Error::AmbiguousPrefix { .. })
+        ));
+        assert!(matches!(resolve("zz9.a").await, Err(Error::NotAnEpic(id)) if id == "zz9.a"));
     }
 
     /// Progress counts direct children: the nested epic is one unit of work.
