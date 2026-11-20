@@ -277,6 +277,75 @@ pub fn list_stale(
     stale
 }
 
+/// How many ready tasks [`prime`] keeps when the caller gives no limit.
+pub const DEFAULT_PRIME_READY: usize = 10;
+
+/// The workflow context of `bea prime`: what a coding agent needs to know
+/// when a session starts. Built by [`prime`].
+#[derive(Debug, Clone)]
+pub struct Prime {
+    /// The first ready tasks, in the order of [`list_ready`].
+    pub ready: Vec<Task>,
+    /// How many tasks are ready in all, `ready` included.
+    pub ready_total: usize,
+    /// Every `in_progress` task, in canonical order.
+    pub in_progress: Vec<Task>,
+    /// Every task awaiting review, in the order of [`list_review`].
+    pub review: Vec<Task>,
+}
+
+/// The JSON shape of a [`Prime`]: the three queues as task summaries, plus
+/// the number of ready tasks in all.
+#[derive(Debug, Serialize)]
+pub struct PrimeSummary {
+    pub ready: Vec<task::TaskSummary>,
+    pub ready_total: usize,
+    pub in_progress: Vec<task::TaskSummary>,
+    pub review: Vec<task::TaskSummary>,
+}
+
+impl Prime {
+    /// How many ready tasks were left out of `ready`.
+    pub fn ready_more(&self) -> usize {
+        self.ready_total.saturating_sub(self.ready.len())
+    }
+
+    /// Summaries of every task, with the effective priorities `eff`.
+    pub fn summary(&self, eff: &HashMap<String, Priority>) -> PrimeSummary {
+        let summaries = |list: &[Task]| list.iter().map(|t| t.summary(eff.get(&t.id))).collect();
+        PrimeSummary {
+            ready: summaries(&self.ready),
+            ready_total: self.ready_total,
+            in_progress: summaries(&self.in_progress),
+            review: summaries(&self.review),
+        }
+    }
+}
+
+/// Gather the session-start context: the first `ready_limit` ready tasks
+/// (and how many are ready in all), the tasks in progress and the review
+/// queue — the same three listings as `bea ready`, `bea list --status
+/// in_progress` and `bea review`.
+pub fn prime(tasks: &HashMap<String, Task>, ready_limit: usize) -> Prime {
+    let mut ready = list_ready(tasks, None, None, None);
+    let ready_total = ready.len();
+    ready.truncate(ready_limit);
+    Prime {
+        ready,
+        ready_total,
+        in_progress: list_tasks(
+            tasks,
+            Some(Status::InProgress),
+            None,
+            None,
+            false,
+            false,
+            None,
+        ),
+        review: list_review(tasks, None, None, None),
+    }
+}
+
 /// Move a task along one edge of the review workflow.
 ///
 /// Each verb accepts exactly one starting status so that a shortcut can never
@@ -4791,6 +4860,56 @@ mod tests {
         assert_eq!(json["attempts"], 2);
         assert_eq!(json["updated"], "2026-11-18T12:00:00Z");
         assert_eq!(json["idle_hours"], 48);
+    }
+
+    /// `prime` gathers the same three queues as the listings, keeps the first
+    /// `ready_limit` ready tasks and counts the rest.
+    #[test]
+    fn test_prime_gathers_the_queues() {
+        let mut tasks = Vec::new();
+        for (id, priority) in [
+            ("r1", Priority::P2),
+            ("r2", Priority::P0),
+            ("r3", Priority::P1),
+        ] {
+            let mut t = make_task(id, Status::Open);
+            t.priority = priority;
+            tasks.push(t);
+        }
+        let mut wip = make_task("wip", Status::InProgress);
+        wip.assignee = "worker-1".into();
+        wip.attempts = Some(3);
+        tasks.push(wip);
+        tasks.push(make_task("rev", Status::Review));
+        tasks.push(make_task("prp", Status::Proposed));
+        tasks.push(make_task("dne", Status::Done));
+        let mut blocked = make_task("blk", Status::Open);
+        blocked.depends_on = vec!["wip".into()];
+        tasks.push(blocked);
+        let tasks = task_map(tasks);
+
+        let p = prime(&tasks, 2);
+        let ids = |list: &[Task]| list.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let all_ready = list_ready(&tasks, None, None, None);
+        assert_eq!(ids(&p.ready), ids(&all_ready[..2]));
+        assert_eq!(ids(&p.ready), ["r2", "r3"]);
+        assert_eq!(p.ready_total, 3);
+        assert_eq!(p.ready_more(), 1);
+        assert_eq!(ids(&p.in_progress), ["wip"]);
+        assert_eq!(ids(&p.review), ["rev"]);
+
+        // A limit past the queue keeps everything; zero keeps only the count.
+        assert_eq!(prime(&tasks, 50).ready_more(), 0);
+        let none = prime(&tasks, 0);
+        assert!(none.ready.is_empty());
+        assert_eq!(none.ready_more(), 3);
+
+        let json = serde_json::to_value(p.summary(&effective_priorities(&tasks))).unwrap();
+        assert_eq!(json["ready_total"], 3);
+        assert_eq!(json["ready"].as_array().unwrap().len(), 2);
+        assert_eq!(json["in_progress"][0]["assignee"], "worker-1");
+        assert_eq!(json["in_progress"][0]["attempts"], 3);
+        assert_eq!(json["review"][0]["id"], "rev");
     }
 
     #[tokio::test]

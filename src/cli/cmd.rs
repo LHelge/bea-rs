@@ -368,6 +368,108 @@ pub fn cmd_stale(tasks: &HashMap<String, Task>, hours: u32, json: bool) -> Resul
     Ok(())
 }
 
+/// The workflow reminder at the end of `bea prime`.
+const PRIME_WORKFLOW: &str = "\
+Workflow: `bea start <id> -a <name>` claims a ready task; `bea review <id>` submits finished work
+(`bea done <id>` closes it outright); `bea release <id>` hands a claim back; `bea reject <id>` sends
+reviewed work back for changes. `bea show <id>` has the details. A high attempt count means earlier
+workers failed: try another approach.";
+
+/// Print the session-start context for a coding agent (`bea prime`): the
+/// first `limit` ready tasks, the tasks in progress, the review queue and a
+/// reminder of the workflow verbs.
+pub fn cmd_prime(tasks: &HashMap<String, Task>, limit: usize, json: bool) -> Result<()> {
+    let prime = service::prime(tasks, limit);
+    let eff = service::effective_priorities(tasks);
+
+    if json {
+        return output(&prime.summary(&eff));
+    }
+
+    // One ID width for all three sections, so they line up with each other.
+    let w = id_width(
+        prime
+            .ready
+            .iter()
+            .chain(&prime.in_progress)
+            .chain(&prime.review)
+            .map(|t| t.id.as_str()),
+    );
+    let line = |t: &Task, extra: &[String]| {
+        let extra: Vec<&str> = extra
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let extra = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", extra.join(", "))
+        };
+        let tags = if t.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", color_tags(&t.tags))
+        };
+        println!(
+            "  {} {} — {}{}{}",
+            id_cell(&t.id, w),
+            format_priority(&t.priority, eff.get(&t.id)),
+            t.title,
+            extra,
+            tags
+        );
+    };
+    let attempts = |t: &Task| match t.attempt_count() {
+        0 => String::new(),
+        n => format!("attempt {n}"),
+    };
+
+    println!("# Bears task context");
+    println!();
+    if prime.ready_total == 0 {
+        println!("Ready: none.");
+    } else {
+        match prime.ready_more() {
+            0 => println!("Ready ({}):", prime.ready_total),
+            n => println!(
+                "Ready ({} of {}, {n} not shown; `bea ready` lists all):",
+                prime.ready.len(),
+                prime.ready_total
+            ),
+        }
+        for t in &prime.ready {
+            line(t, &[attempts(t)]);
+        }
+    }
+    println!();
+    if prime.in_progress.is_empty() {
+        println!("In progress: none.");
+    } else {
+        println!("In progress ({}):", prime.in_progress.len());
+        for t in &prime.in_progress {
+            let who = if t.assignee.is_empty() {
+                "unassigned".to_string()
+            } else {
+                t.assignee.clone()
+            };
+            line(t, &[who, attempts(t)]);
+        }
+    }
+    println!();
+    if prime.review.is_empty() {
+        println!("Awaiting review: none.");
+    } else {
+        println!("Awaiting review ({}):", prime.review.len());
+        for t in &prime.review {
+            line(t, std::slice::from_ref(&t.assignee));
+        }
+    }
+    println!();
+    println!("{PRIME_WORKFLOW}");
+    Ok(())
+}
+
 /// Submit an in-progress task for review (`bea review <id>`).
 pub fn cmd_review(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     let t = service::review_task(base, tasks, id)?;

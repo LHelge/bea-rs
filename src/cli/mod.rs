@@ -158,6 +158,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             augment_archived_error(base, result, &id).await
         }
         Command::Stale { hours } => cmd::cmd_stale(&tasks, hours, cli.json),
+        Command::Prime { limit } => cmd::cmd_prime(&tasks, limit, cli.json),
         Command::Review {
             id,
             tag,

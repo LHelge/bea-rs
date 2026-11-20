@@ -220,6 +220,13 @@ pub enum Command {
         hours: u32,
     },
 
+    /// Print the workflow context for a coding agent's session-start hook
+    Prime {
+        /// Show at most this many ready tasks
+        #[arg(long, default_value_t = bears::service::DEFAULT_PRIME_READY)]
+        limit: usize,
+    },
+
     /// Submit an in-progress task for review, or list the review queue
     Review {
         /// Task ID to submit. Omit to list every task awaiting review.

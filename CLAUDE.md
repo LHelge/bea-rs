@@ -161,7 +161,7 @@ cargo build                               # binary with all frontends
   output is a rendered artifact; it refuses `--json` with `InvalidUsage`).
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
 - Frontends never assume an ID's length: dotted IDs (`a1b.c2.d7`) vary, so CLI list output (`list`,
-  `ready`, `review`, `stale`, `epics`, `search`, `list --archived`, `log`) and the TUI task list pad each ID
+  `ready`, `review`, `stale`, `prime`, `epics`, `search`, `list --archived`, `log`) and the TUI task list pad each ID
   to the longest one shown (`id_width` / `id_cell` in `cli/mod.rs`) so the next column lines up.
   Lists sort by priority then creation date, with the ID only as the last tie-break
   (`task::canonical_order`; `Graph::ready` uses effective priority), so exact ties never follow
@@ -427,6 +427,23 @@ after `now` (clock skew) is never stale. `StaleTask::summary(eff)` is the JSON s
 `service::DEFAULT_STALE_HOURS` = 24. `bea stale [--hours N]` (`--json`) and the MCP `list_stale`
 tool (`hours?`) are the frontends. It only lists — nothing is released — and there is deliberately
 no heartbeat or lease: `updated` is the only signal, and any write to the task resets it.
+
+### Session-start context (`bea prime`)
+
+`service::prime(&tasks, ready_limit) -> Prime { ready, ready_total, in_progress, review }` gathers
+what a coding agent needs when a session starts: the first `ready_limit` tasks of `list_ready` (and
+`ready_total`, the whole queue's length; `Prime::ready_more()` is the difference), every
+`in_progress` task (`list_tasks(Some(InProgress))`) and `list_review` — the same three listings as
+`snapshot::build`. `Prime::summary(&eff) -> PrimeSummary` is the JSON shape. The default limit is
+`service::DEFAULT_PRIME_READY` = 10. `bea prime [--limit N]` (`cmd_prime` in `cli/cmd.rs`) prints
+the three sections with one ID width across them (in progress with assignee, or `unassigned`, and
+`attempt N`; review with assignee), then a fixed reminder of the workflow verbs (`PRIME_WORKFLOW`),
+colourless when stdout is not a terminal; `--json` prints the `PrimeSummary` (no reminder). There is
+deliberately no MCP tool (an MCP client has `list_ready` / `list_all_tasks` / `list_review`). On a
+directory without `.bears/` it fails with `NotInitialized` like every other command; the documented
+Claude Code `SessionStart` hook is written `test ! -d .bears || bea prime`, so a project without a
+store is no error. `bea init --claude` does not scaffold the hook (`.claude/settings.json` is not
+merged); it is documented in the README and the Claude instructions template.
 
 ### Epic behavior
 
@@ -732,6 +749,11 @@ Keep the dependency tree small. Compilation should be fast.
   (`list_stale` default and `hours`, nothing released); `tests/cli.rs` (`bea stale` empty message, human
   line with assignee and idle hours, `--json`, `--hours 0`, nothing written, a negative value refused);
   `tests/mcp.rs` (tool listed)
+- `bea prime`: `service.rs` (`prime` keeps the first ready tasks in `list_ready` order and counts the
+  rest, a zero limit only counts, in-progress and review queues, the JSON shape with assignee and
+  attempts); `tests/cli.rs` (empty store, sections with assignee and attempts, the "not shown" note,
+  no colour when piped, `--json`, not initialized and the documented hook command a no-op there,
+  completions)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; delete/prune of an epic (`renamed` map, `{ pruned, renamed }`, the same object with empty members when nothing moved or nothing was pruned); derived parent and reparenting (`renamed` map, detach, refusal under its own subtree); archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, `ready` breaking exact ties by ID, DAG dep-tree bounding, bounded adjacency (its `epic` filter spanning the subtree), the `ready` epic filter over nested epics, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, the planning skill and CLI fallback say the `epic` filter reaches nested epics, and none mentions a `parent:` key or a CLI spelling that does not exist
