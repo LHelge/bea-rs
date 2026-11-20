@@ -319,11 +319,14 @@ merges a Claude Code `SessionStart` hook running it into `.claude/settings.json`
 The hook's output is added to the agent's context at the start of every session (and after
 `/clear`, a resume or a compaction). The command changes to the project root (`$CLAUDE_PROJECT_DIR`,
 which Claude Code sets for hooks) because a hook runs in the session's current directory, and does
-nothing in a project without a store. The merge only touches the bears hook: other settings, hooks and
-`SessionStart` entries are kept, re-running it changes nothing, an older form of the bears hook (any
-handler whose command contains `bea prime`) is replaced, and a settings file that is not valid JSON or
-not of the expected shape is left untouched with a warning. `.claude/settings.local.json` is never
-written. To drop the hook, delete its entry; it comes back the next time the Claude scaffolding runs.
+nothing in a project without a store. The merge only touches the bears hook, a handler whose command
+is exactly one that bears has published (this one, or the earlier `test ! -d .bears || bea prime`): an
+earlier form gets the current command in place, keeping its group's `matcher` and its other keys, and
+copies of it collapse into one. Every other setting, hook and `SessionStart` entry is kept, including
+your own handlers that run `bea prime` (`bea prime --limit 3`, say), which are never changed; the bears
+hook is then added beside them. Re-running it changes nothing. A settings file that is not valid JSON,
+not of the expected shape, or not writable is left untouched with a warning (an empty one is filled).
+`.claude/settings.local.json` is never written. To drop the hook, delete its entry; it comes back the next time the Claude scaffolding runs.
 
 ### `bea review` / `bea reject`
 Review is the step between "I finished it" and "it's done":
