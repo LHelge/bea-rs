@@ -84,7 +84,7 @@ Expected fields:
 
 Frontmatter parsing approach:
 - Split on `---` delimiters
-- Parse YAML with `serde_yaml`
+- Parse YAML with `serde-saphyr`, always through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape
 - Preserve trailing markdown as body string
 
 ## Behavior Requirements
@@ -142,7 +142,7 @@ Keep these tools aligned with implementation and schemas:
 ## Dependencies
 
 Use and keep dependency scope minimal:
-- `clap`, `clap_complete`, `serde`, `serde_yaml`, `serde_json`, `chrono`, `rand`, `thiserror`, `tokio`, `rmcp`, `schemars`, `owo-colors`
+- `clap`, `clap_complete`, `serde`, `serde-saphyr`, `serde_json`, `chrono`, `rand`, `thiserror`, `tokio`, `rmcp`, `schemars`, `owo-colors`
 
 Prefer small, compile-fast changes and avoid introducing heavy dependencies without need.
 
