@@ -18,6 +18,6 @@ Bears is registered as an MCP server — use the MCP tools to manage tasks.
 Tasks carry an `attempts` count that increments each time work is started on them. A high count means
 previous workers failed — try a different approach or escalate instead of repeating theirs.
 
-Task IDs are hierarchical: a task under an epic has the epic's ID as its prefix (`a1b` → `a1b.c2`).
+Task IDs are hierarchical: a task under an epic has the epic's ID as its prefix (`a1b` → `a1b.c2`). If bears refuses to load the store because it predates hierarchical IDs, run `bea migrate` once (`bea migrate --dry-run` previews it).
 Moving a task (`update_task` with `parent`) or deleting an epic renames tasks; the result carries a
 `renamed` map of old ID → new ID. Use the new IDs and do not reuse ones you noted earlier.

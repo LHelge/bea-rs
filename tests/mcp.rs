@@ -307,6 +307,11 @@ async fn test_legacy_store_is_refused() {
             "{tool}: {}",
             extract_text(&result)
         );
+        assert!(
+            extract_text(&result).contains("must run `bea migrate` once"),
+            "{tool}: {}",
+            extract_text(&result)
+        );
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
 
