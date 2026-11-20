@@ -1,10 +1,10 @@
 ---
 id: 8ph.yg
 title: Migrate this repo's .bears and release 0.10.0
-status: open
+status: done
 priority: P2
 created: "2026-11-20T12:52:25.735575644Z"
-updated: "2026-11-20T14:54:06.530486587Z"
+updated: "2026-11-20T20:25:06.618767495Z"
 tags:
   - ids
   - release
