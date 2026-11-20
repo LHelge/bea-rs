@@ -27,6 +27,10 @@ pub enum Error {
     #[error("unknown dependency ID(s): {}", ids.join(", "))]
     UnknownDependency { ids: Vec<String> },
 
+    /// A string is not a well-formed task ID.
+    #[error("invalid task ID '{id}': {reason}")]
+    InvalidId { id: String, reason: String },
+
     #[error("invalid config: {reason}")]
     InvalidConfig { reason: String },
 

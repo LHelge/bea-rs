@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 
 /// Generate `Display` and `FromStr` for an enum whose serde string forms are
@@ -351,17 +352,163 @@ pub(crate) fn to_yaml<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_saphyr::to_string_with_options(value, yaml_options())?)
 }
 
+/// A random ID segment of `length` characters drawn from [`ID_CHARSET`].
+fn random_segment(rng: &mut impl rand::Rng, length: usize) -> String {
+    (0..length)
+        .map(|_| ID_CHARSET[rng.random_range(0..ID_CHARSET.len())] as char)
+        .collect()
+}
+
 /// Generate a short alphanumeric ID, retrying on collision or YAML-unsafe IDs.
 pub fn generate_id(existing: &HashSet<String>, length: usize) -> String {
     let mut rng = rand::rng();
     loop {
-        let id: String = (0..length)
-            .map(|_| ID_CHARSET[rng.random_range(0..ID_CHARSET.len())] as char)
-            .collect();
+        let id = random_segment(&mut rng, length);
         if !existing.contains(&id) && yaml_safe_id(&id) {
             return id;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchical IDs
+//
+// An ID encodes its parent chain: `a1b` is a root, `a1b.c2` its child and
+// `a1b.c2.d7` a grandchild. Every segment is lowercase alphanumeric. The ID
+// functions below work on plain `&str` so they apply equally to `Task::id`,
+// `depends_on` entries and IDs read from filenames.
+// ---------------------------------------------------------------------------
+
+/// Separator between the segments of a hierarchical ID.
+pub const ID_SEPARATOR: char = '.';
+
+/// Fraction of a parent's sibling space (at the current segment length) that
+/// may be used before new children get a segment one character longer.
+pub const CHILD_SPACE_FILL_LIMIT: f64 = 0.25;
+
+/// Check that `id` is a well-formed task ID: one or more non-empty segments
+/// of lowercase ASCII letters and digits, separated by [`ID_SEPARATOR`].
+///
+/// This accepts every ID earlier versions of bears generated or allowed
+/// (single-segment IDs), not only those drawn from the generator's charset.
+pub fn validate_id(id: &str) -> Result<()> {
+    let invalid = |reason: &str| Error::InvalidId {
+        id: id.into(),
+        reason: reason.into(),
+    };
+    if id.is_empty() {
+        return Err(invalid("it is empty"));
+    }
+    for segment in id.split(ID_SEPARATOR) {
+        if segment.is_empty() {
+            return Err(invalid("it has an empty segment"));
+        }
+        if !segment
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return Err(invalid(
+                "segments may only contain lowercase letters and digits",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` is a well-formed task ID; see [`validate_id`].
+pub fn is_valid_id(id: &str) -> bool {
+    validate_id(id).is_ok()
+}
+
+/// The segments of `id`, root first: `a1b.c2` yields `a1b`, `c2`.
+pub fn id_segments(id: &str) -> std::str::Split<'_, char> {
+    id.split(ID_SEPARATOR)
+}
+
+/// How many ancestors `id` has: 0 for a root ID, 1 for its child, and so on.
+pub fn id_depth(id: &str) -> usize {
+    id.matches(ID_SEPARATOR).count()
+}
+
+/// The ID of the parent `id` encodes, or `None` for a root ID.
+pub fn parent_of(id: &str) -> Option<&str> {
+    id.rsplit_once(ID_SEPARATOR).map(|(parent, _)| parent)
+}
+
+/// The root segment of `id`: `a1b` for `a1b.c2.d7`.
+pub fn root_of(id: &str) -> &str {
+    id.split_once(ID_SEPARATOR).map_or(id, |(root, _)| root)
+}
+
+/// The last segment of `id`: `d7` for `a1b.c2.d7`, the whole ID for a root.
+pub fn leaf_segment(id: &str) -> &str {
+    id.rsplit_once(ID_SEPARATOR).map_or(id, |(_, leaf)| leaf)
+}
+
+/// Whether `id` lies strictly below `ancestor` in the ID hierarchy.
+///
+/// `a1b.c2` and `a1b.c2.d7` are descendants of `a1b`; `a1b` itself is not,
+/// and neither is `a1bx.c2` (segments compare whole, not by prefix).
+pub fn is_descendant(id: &str, ancestor: &str) -> bool {
+    id.strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with(ID_SEPARATOR) && rest.len() > 1)
+}
+
+/// The IDs in `ids` whose parent is exactly `parent`.
+fn direct_children<'a>(
+    parent: &'a str,
+    ids: &'a HashSet<String>,
+) -> impl Iterator<Item = &'a String> + 'a {
+    ids.iter().filter(move |id| parent_of(id) == Some(parent))
+}
+
+/// The segment length a new child of `parent` gets.
+///
+/// Starts at `min_length` and grows by one while the children of `parent`
+/// whose last segment has the current length fill more than
+/// [`CHILD_SPACE_FILL_LIMIT`] of the space of segments of that length.
+/// Existing children keep their length, so a parent can have children of
+/// several lengths.
+pub fn child_segment_length(parent: &str, existing: &HashSet<String>, min_length: usize) -> usize {
+    let mut counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for id in direct_children(parent, existing) {
+        *counts.entry(leaf_segment(id).len()).or_default() += 1;
+    }
+    let mut length = min_length.max(1);
+    loop {
+        let space = (ID_CHARSET.len() as f64).powi(length as i32);
+        let used = counts.get(&length).copied().unwrap_or(0) as f64;
+        if used <= space * CHILD_SPACE_FILL_LIMIT {
+            return length;
+        }
+        length += 1;
+    }
+}
+
+/// Generate a new child ID under `parent`: `parent` plus a random segment.
+///
+/// `existing` is the collision pool, and should hold every known ID, active
+/// and archived; the siblings that decide the segment length (see
+/// [`child_segment_length`]) are read from it. The segment starts at the
+/// configured `child-id-length`.
+pub fn generate_child_id(parent: &str, existing: &HashSet<String>, config: &Config) -> String {
+    let length = child_segment_length(parent, existing, config.child_id_length as usize);
+    let mut rng = rand::rng();
+    loop {
+        let id = format!("{parent}{ID_SEPARATOR}{}", random_segment(&mut rng, length));
+        if !existing.contains(&id) && yaml_safe_id(&id) {
+            return id;
+        }
+    }
+}
+
+/// The task ID a task filename (`{id}-{slug}.md`) starts with.
+///
+/// Returns `None` when `name` is not a `.md` file. Dotted IDs are read
+/// whole, since `-` never occurs inside an ID.
+pub fn id_from_filename(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".md")?;
+    stem.split('-').next().filter(|id| !id.is_empty())
 }
 
 /// Convert a title to a URL-friendly slug.
@@ -514,6 +661,198 @@ mod tests {
         for _ in 0..100 {
             let id = generate_id(&existing, 6);
             assert!(!id.chars().any(|c| ambiguous.contains(&c)));
+        }
+    }
+
+    #[test]
+    fn test_validate_id_accepts_flat_and_dotted() {
+        for id in [
+            "a1b",
+            "ab12",
+            "dup1",
+            "8ph",
+            "a1b.c2",
+            "a1b.c2.d7",
+            "a1b.c23",
+        ] {
+            validate_id(id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert!(is_valid_id(id));
+        }
+    }
+
+    #[test]
+    fn test_validate_id_rejects_malformed() {
+        for id in [
+            "", ".", "a1b.", ".a1b", "a1b..c2", "A1b", "a1b.C2", "a-b", "a1b.c 2", "a1b/c2", "ä1b",
+        ] {
+            assert!(!is_valid_id(id), "{id:?} should be invalid");
+        }
+        let err = validate_id("a1b..c2").unwrap_err();
+        assert!(matches!(err, Error::InvalidId { .. }), "{err:?}");
+        assert!(err.to_string().contains("a1b..c2"), "{err}");
+    }
+
+    #[test]
+    fn test_id_segments_and_depth() {
+        assert_eq!(id_segments("a1b").collect::<Vec<_>>(), ["a1b"]);
+        assert_eq!(
+            id_segments("a1b.c2.d7").collect::<Vec<_>>(),
+            ["a1b", "c2", "d7"]
+        );
+        assert_eq!(id_depth("a1b"), 0);
+        assert_eq!(id_depth("a1b.c2"), 1);
+        assert_eq!(id_depth("a1b.c2.d7"), 2);
+    }
+
+    #[test]
+    fn test_parent_root_and_leaf() {
+        assert_eq!(parent_of("a1b"), None);
+        assert_eq!(parent_of("a1b.c2"), Some("a1b"));
+        assert_eq!(parent_of("a1b.c2.d7"), Some("a1b.c2"));
+        assert_eq!(root_of("a1b"), "a1b");
+        assert_eq!(root_of("a1b.c2.d7"), "a1b");
+        assert_eq!(leaf_segment("a1b"), "a1b");
+        assert_eq!(leaf_segment("a1b.c2.d7"), "d7");
+    }
+
+    #[test]
+    fn test_is_descendant() {
+        assert!(is_descendant("a1b.c2", "a1b"));
+        assert!(is_descendant("a1b.c2.d7", "a1b"));
+        assert!(is_descendant("a1b.c2.d7", "a1b.c2"));
+        assert!(!is_descendant("a1b", "a1b"), "not its own descendant");
+        assert!(
+            !is_descendant("a1b", "a1b.c2"),
+            "ancestor is not a descendant"
+        );
+        assert!(!is_descendant("a1bx.c2", "a1b"), "segments compare whole");
+        assert!(!is_descendant("a1b.", "a1b"));
+        assert!(!is_descendant("x9k.c2", "a1b"));
+    }
+
+    #[test]
+    fn test_id_from_filename() {
+        assert_eq!(id_from_filename("a1b-fix-login.md"), Some("a1b"));
+        assert_eq!(id_from_filename("a1b.c2-fix-login.md"), Some("a1b.c2"));
+        assert_eq!(id_from_filename("a1b.c2.d7-x.md"), Some("a1b.c2.d7"));
+        assert_eq!(id_from_filename("a1b.c2-x.txt"), None);
+        assert_eq!(id_from_filename("-x.md"), None);
+    }
+
+    fn child_config(child_id_length: u8) -> Config {
+        Config {
+            child_id_length,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn test_generate_child_id_shape() {
+        let existing: HashSet<String> = ["a1b".to_string()].into();
+        for _ in 0..100 {
+            let id = generate_child_id("a1b", &existing, &Config::default());
+            assert_eq!(parent_of(&id), Some("a1b"));
+            assert_eq!(leaf_segment(&id).len(), 2, "{id}");
+            assert!(is_valid_id(&id), "{id}");
+            assert!(yaml_safe_id(&id), "{id}");
+            let allowed = std::str::from_utf8(ID_CHARSET).unwrap();
+            assert!(leaf_segment(&id).chars().all(|c| allowed.contains(c)));
+        }
+        let grandchild = generate_child_id("a1b.c2", &existing, &Config::default());
+        assert_eq!(parent_of(&grandchild), Some("a1b.c2"));
+        assert_eq!(
+            leaf_segment(&grandchild).len(),
+            2,
+            "same length at every depth"
+        );
+    }
+
+    #[test]
+    fn test_generate_child_id_uses_configured_length() {
+        let existing = HashSet::new();
+        let id = generate_child_id("a1b", &existing, &child_config(4));
+        assert_eq!(leaf_segment(&id).len(), 4, "{id}");
+    }
+
+    /// Every two-char child of `parent`, in charset order.
+    fn all_two_char_children(parent: &str) -> Vec<String> {
+        let chars = std::str::from_utf8(ID_CHARSET).unwrap();
+        chars
+            .chars()
+            .flat_map(|a| chars.chars().map(move |b| format!("{parent}.{a}{b}")))
+            .collect()
+    }
+
+    #[test]
+    fn test_child_segment_growth_threshold() {
+        // 31^2 = 961 two-char segments; 25% of that is 240.25.
+        let children = all_two_char_children("a1b");
+        let mut existing: HashSet<String> = children[..240].iter().cloned().collect();
+        assert_eq!(child_segment_length("a1b", &existing, 2), 2, "at 25%");
+        existing.insert(children[240].clone());
+        assert_eq!(child_segment_length("a1b", &existing, 2), 3, "past 25%");
+        let id = generate_child_id("a1b", &existing, &Config::default());
+        assert_eq!(leaf_segment(&id).len(), 3, "{id}");
+    }
+
+    #[test]
+    fn test_child_segment_growth_counts_only_direct_children() {
+        let children = all_two_char_children("a1b");
+        let mut existing: HashSet<String> = children[..241].iter().cloned().collect();
+        // A full sibling space under a different parent does not matter...
+        assert_eq!(child_segment_length("x9k", &existing, 2), 2);
+        // ...nor do grandchildren, or children of a longer length.
+        let grandchildren: HashSet<String> = all_two_char_children("x9k.c2").into_iter().collect();
+        existing.extend(grandchildren);
+        assert_eq!(child_segment_length("x9k", &existing, 2), 2);
+        existing.insert("x9k.abc".into());
+        assert_eq!(child_segment_length("x9k", &existing, 2), 2);
+        // A prefix-sharing parent is a different parent.
+        assert_eq!(child_segment_length("a1", &existing, 2), 2);
+    }
+
+    #[test]
+    fn test_child_segment_growth_keeps_existing_lengths() {
+        // Once grown, new children stay at the longer length while the
+        // shorter space stays past the limit; existing ones are untouched.
+        let children = all_two_char_children("a1b");
+        let mut existing: HashSet<String> = children[..241].iter().cloned().collect();
+        let new = generate_child_id("a1b", &existing, &Config::default());
+        existing.insert(new.clone());
+        assert_eq!(child_segment_length("a1b", &existing, 2), 3);
+        assert!(children[..241].iter().all(|c| existing.contains(c)));
+    }
+
+    #[test]
+    fn test_generate_child_id_avoids_collisions() {
+        // Start with 100 of the 961 two-char slots taken and generate up to
+        // the growth limit: every new child is two chars and none collides.
+        let children = all_two_char_children("a1b");
+        let mut existing: HashSet<String> = children[..100].iter().cloned().collect();
+        while existing.len() < 240 {
+            let id = generate_child_id("a1b", &existing, &Config::default());
+            assert_eq!(leaf_segment(&id).len(), 2, "{id}");
+            assert!(existing.insert(id.clone()), "collided with {id}");
+        }
+    }
+
+    #[test]
+    fn test_dotted_id_task_roundtrips() {
+        let task = Task::new("a1b.c2".into(), "Child".into(), Priority::P2);
+        assert_eq!(filename(&task), "a1b.c2-child.md");
+        let parsed = parse_task(&render_task(&task)).unwrap();
+        assert_eq!(parsed.id, "a1b.c2");
+        let numeric = Task::new("23.45".into(), "Numeric".into(), Priority::P2);
+        assert_eq!(parse_task(&render_task(&numeric)).unwrap().id, "23.45");
+    }
+
+    #[test]
+    fn test_generate_child_id_skips_yaml_unsafe_ids() {
+        // A numeric root plus an all-digit child reads as a float ("23.45").
+        let existing = HashSet::new();
+        for _ in 0..200 {
+            let id = generate_child_id("23", &existing, &Config::default());
+            assert!(yaml_safe_id(&id), "generated YAML-unsafe id {id}");
         }
     }
 

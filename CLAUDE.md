@@ -190,6 +190,18 @@ Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the
 
 Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks; regenerate if needed.
 
+**Hierarchical IDs (model only, in progress under epic `8ph`).** An ID may encode its parent
+chain: `a1b` root, `a1b.c2` child, `a1b.c2.d7` grandchild — segments separated by `.`, each
+lowercase alphanumeric. `task.rs` holds the model as plain `&str` helpers: `validate_id` /
+`is_valid_id`, `id_segments`, `id_depth` (0 for a root), `parent_of`, `root_of`, `leaf_segment`,
+`is_descendant` (strict, whole segments), `id_from_filename` (`{id}-{slug}.md`; `-` never occurs in
+an ID), and `generate_child_id(parent, existing, &Config)`. Child segments start at
+`child-id-length` in `.bears.yml` (default 2, range 1–8, written only when not the default) and grow
+by one char for new children once more than 25% (`CHILD_SPACE_FILL_LIMIT`) of the parent's sibling
+space at the current length is used; existing IDs keep their length. `existing` is the collision
+pool (active + archived IDs), and siblings are counted from it. Nothing generates child IDs yet and
+the `parent` frontmatter field is still the source of truth for parents.
+
 ### `ready` command
 
 The key command for agent workflows. Returns tasks where status is `open`, type is `task` (not `epic`), AND all `depends_on` tasks have status `done`. Sort by priority (P0 first), then creation date. `proposed` and `review` tasks are excluded for free by the `status == Open` check — see the review workflow section.

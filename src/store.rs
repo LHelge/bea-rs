@@ -238,12 +238,7 @@ pub fn archived_id_set(base: &Path) -> HashSet<String> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name();
-            let name = name.to_string_lossy();
-            if !name.ends_with(".md") {
-                return None;
-            }
-            // filename format: {id}-{slug}.md — extract the id prefix
-            name.split('-').next().map(|id| id.to_string())
+            task::id_from_filename(&name.to_string_lossy()).map(str::to_string)
         })
         .collect()
 }
@@ -716,6 +711,59 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert!(tasks.contains_key("ac01"));
         assert!(!tasks.contains_key("ar01"));
+    }
+
+    #[test]
+    fn test_dotted_ids_find_and_load_by_exact_id() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let parent = Task::new("a1b".into(), "Parent".into(), Priority::P2);
+        let child = Task::new("a1b.c2".into(), "Child".into(), Priority::P2);
+        save(tmp.path(), &parent).unwrap();
+        save(tmp.path(), &child).unwrap();
+
+        let parent_path = find_task_path(tmp.path(), "a1b").unwrap();
+        assert!(parent_path.ends_with("a1b-parent.md"), "{parent_path:?}");
+        assert_eq!(load_one(tmp.path(), "a1b.c2").unwrap().title, "Child");
+        assert_eq!(load_one(tmp.path(), "a1b").unwrap().title, "Parent");
+
+        delete(tmp.path(), "a1b").unwrap();
+        assert!(find_task_path(tmp.path(), "a1b").is_err());
+        assert!(find_task_path(tmp.path(), "a1b.c2").is_ok());
+    }
+
+    #[test]
+    fn test_resolve_prefix_prefers_exact_dotted_parent() {
+        let mut tasks = HashMap::new();
+        for id in ["a1b", "a1b.c2"] {
+            tasks.insert(
+                id.to_string(),
+                Task::new(id.into(), id.into(), Priority::P2),
+            );
+        }
+        assert_eq!(resolve_prefix(&tasks, "a1b").unwrap(), "a1b");
+        assert_eq!(resolve_prefix(&tasks, "a1b.c").unwrap(), "a1b.c2");
+    }
+
+    #[test]
+    fn test_archived_id_set_reads_dotted_ids() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        for id in ["a1b", "a1b.c2", "a1b.c2.d7"] {
+            let t = Task::new(id.into(), "Some task".into(), Priority::P2);
+            fs::write(
+                archive_dir(tmp.path()).join(task::filename(&t)),
+                task::render_task(&t),
+            )
+            .unwrap();
+        }
+        fs::write(archive_dir(tmp.path()).join("notes.txt"), "x").unwrap();
+        let ids = archived_id_set(tmp.path());
+        let expected: HashSet<String> = ["a1b", "a1b.c2", "a1b.c2.d7"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(ids, expected);
     }
 
     #[test]
