@@ -4,7 +4,7 @@ title: Migrate this repo's .bears and release 0.10.0
 status: open
 priority: P2
 created: "2026-11-20T12:52:25.735575644Z"
-updated: "2026-11-20T12:52:25.735575644Z"
+updated: "2026-11-20T13:59:52.625266497Z"
 tags:
   - ids
   - release
@@ -12,6 +12,8 @@ depends_on:
   - upm
   - hcd
   - ftv
+  - "6an"
+  - cbt
 parent: "8ph"
 ---
 
