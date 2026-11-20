@@ -15,10 +15,14 @@
 //! so with the default [`MarkdownOptions`] the whole document stays within
 //! [`DEFAULT_MAX_DOCUMENT_CHARS`] bytes, however large the store. The header
 //! and the summary counts are always complete. The graph may use at most half
-//! of what is left, and the other sections share the rest in document order.
-//! A table that does not fit ends after its last whole row with
-//! "…and N more not shown", a section with no room at all is left out, and
-//! a note under the summary then says that the document was cut. Nothing is
+//! of what is left, and the other sections share the rest fairly: in document
+//! order, each gets all it needs when that is no more than an equal share of
+//! what is still left for it and the sections after it, and an equal share
+//! otherwise, so one long table cannot crowd out the others (the board's
+//! columns share its room the same way). A table that does not fit ends after
+//! its last whole row with "…and N more not shown", a section with no room at
+//! all is left out, a graph part with no room left becomes a note, and a note
+//! under the summary then says that the document was cut. Nothing is
 //! ever cut inside a table row, a `<details>` block or a Mermaid fence.
 //! Titles are cut to [`MAX_CELL_CHARS`] in tables and headings.
 //!
@@ -27,9 +31,10 @@
 //! anyway. When the whole graph is larger than [`MarkdownOptions`] allows (in
 //! tasks, dependencies or text), it is drawn as one diagram per top-level epic
 //! (plus one for the tasks in no epic), leaving out the dependencies between
-//! them, and a note says which bound it exceeded; a part that is still too
-//! large, or that no longer fits the text budget, is replaced by a note giving
-//! its size.
+//! them, and a note says which bound it exceeded. An epic still over the node
+//! or edge bounds is drawn per nested epic in its place (plus one for its own
+//! tasks), and so on down. A part that is still too large, or that no longer
+//! fits the text budget, is replaced by a note giving its size.
 //!
 //! **Titles are untrusted.** Every title, tag, assignee and ID is escaped for
 //! its context: in tables, Markdown and HTML syntax is neutralised (pipes,
@@ -42,7 +47,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 
-use super::{EpicEntry, GraphEdge, GraphNode, STATUS_ORDER, Snapshot, SnapshotTask};
+use super::{BoardColumn, EpicEntry, GraphEdge, GraphNode, STATUS_ORDER, Snapshot, SnapshotTask};
 use crate::task::{self, Status};
 
 /// The most tasks drawn in one Mermaid diagram by default.
@@ -138,8 +143,8 @@ pub fn render_with(snapshot: &Snapshot, options: &MarkdownOptions) -> String {
         section("Dependency graph", avail / 2, |l| graph(s, options, l)),
         &mut avail,
     );
-    let mut body = String::new();
-    body += &take(section("Epics", avail, |l| epics(s, l)), &mut avail);
+
+    // The other sections, in document order; the graph goes after the board.
     let queue_cols = [
         Col::Id,
         Col::Title,
@@ -148,27 +153,40 @@ pub fn render_with(snapshot: &Snapshot, options: &MarkdownOptions) -> String {
         Col::Attempts,
     ];
     let ready_cols = [Col::Id, Col::Title, Col::Priority, Col::Epic, Col::Tags];
+    let archive_cols = [Col::Id, Col::Title, Col::Status, Col::Updated];
+    type Render<'r> = Box<dyn Fn(usize) -> Body + 'r>;
+    let mut sections: Vec<(&str, Render)> = vec![("Epics", Box::new(|l| epics(s, l)))];
     for (title, tasks, cols) in [
         ("Ready", &s.ready, &ready_cols),
         ("In progress", &s.in_progress, &queue_cols),
         ("Review", &s.review, &queue_cols),
     ] {
-        body += &take(
-            section(title, avail, |l| task_table(tasks, cols, l)),
-            &mut avail,
-        );
+        sections.push((title, Box::new(move |l| task_table(tasks, cols, l))));
     }
-    body += &take(section("Board", avail, |l| board(s, l)), &mut avail);
-    body += &graph;
+    const BOARD: usize = 4;
+    sections.push(("Board", Box::new(|l| board(s, l))));
+    debug_assert_eq!(sections[BOARD].0, "Board");
     if s.include_all {
-        let cols = [Col::Id, Col::Title, Col::Status, Col::Updated];
-        body += &take(
-            section("Recently archived", avail, |l| {
-                task_table(&s.archive, &cols, l)
-            }),
-            &mut avail,
-        );
+        sections.push((
+            "Recently archived",
+            Box::new(|l| task_table(&s.archive, &archive_cols, l)),
+        ));
     }
+
+    // Each section gets a fair share of what is left (see `fair_share`), so
+    // that a long table cannot crowd out the ones after it; what a section
+    // leaves of its share goes to the sections after it.
+    let wanted: Vec<usize> = sections
+        .iter()
+        .map(|(title, render)| section(title, usize::MAX, render).0.len())
+        .collect();
+    let mut texts = Vec::new();
+    for (i, (title, render)) in sections.iter().enumerate() {
+        let share = fair_share(&wanted[i..], avail);
+        texts.push(take(section(title, share, render), &mut avail));
+    }
+    let after_board = texts.split_off(BOARD + 1);
+    let body = texts.concat() + &graph + &after_board.concat();
 
     let mut out = head;
     if cut {
@@ -201,6 +219,28 @@ fn section(title: &str, limit: usize, body: impl FnOnce(usize) -> Body) -> (Stri
         Some((text, cut)) => (head + &text, cut),
         None => (String::new(), true),
     }
+}
+
+/// The share of `avail` bytes for the first of sections that want `wanted`
+/// bytes each, when `avail` is divided max-min fairly: a section wanting no
+/// more than an equal share gets all it wants, and the others split what is
+/// left equally. The shares never add up to more than `avail`.
+fn fair_share(wanted: &[usize], avail: usize) -> usize {
+    let Some(&first) = wanted.first() else {
+        return 0;
+    };
+    let mut sorted = wanted.to_vec();
+    sorted.sort_unstable();
+    let mut left = avail;
+    for (i, &w) in sorted.iter().enumerate() {
+        let equal = left / (sorted.len() - i);
+        if w > equal {
+            // Every section from here on wants more than an equal share.
+            return first.min(equal);
+        }
+        left -= w;
+    }
+    first
 }
 
 /// `text` when it fits in `limit` bytes.
@@ -266,6 +306,28 @@ fn board(s: &Snapshot, limit: usize) -> Body {
         Col::Epic,
         Col::DependsOn,
     ];
+    let open = |column: &BoardColumn| {
+        format!(
+            "<details><summary>{} ({})</summary>\n\n",
+            column.status,
+            column.tasks.len()
+        )
+    };
+    let close = "</details>\n\n";
+    // Each column whole; all of them when they fit, so that the board fits
+    // in exactly its own size.
+    let blocks: Vec<String> = shown
+        .iter()
+        .map(|column| {
+            let table =
+                task_table(&column.tasks, &cols, usize::MAX).map_or_else(String::new, |t| t.0);
+            open(column) + &table + close
+        })
+        .collect();
+    if blocks.iter().map(String::len).sum::<usize>() <= limit {
+        return Some((blocks.concat(), false));
+    }
+    let wanted: Vec<usize> = blocks.iter().map(String::len).collect();
     let more = |k: usize| more_note(k, shown.len(), "column");
     let reserve = more_reserve(shown.len(), "column");
     if reserve > limit {
@@ -274,13 +336,10 @@ fn board(s: &Snapshot, limit: usize) -> Body {
     let mut out = String::new();
     let mut cut = false;
     for (i, column) in shown.iter().enumerate() {
-        let open = format!(
-            "<details><summary>{} ({})</summary>\n\n",
-            column.status,
-            column.tasks.len()
-        );
-        let close = "</details>\n\n";
-        let room = limit - out.len() - reserve;
+        let open = open(column);
+        // A fair share of the room, as between sections, so that a long
+        // column cannot crowd out the ones after it.
+        let room = fair_share(&wanted[i..], limit - out.len() - reserve);
         let table = room
             .checked_sub(open.len() + close.len())
             .and_then(|inner| task_table(&column.tasks, &cols, inner))
@@ -533,18 +592,26 @@ fn graph(s: &Snapshot, options: &MarkdownOptions, limit: usize) -> Body {
         Err(reason) => reason,
     };
 
-    // Too large for one diagram: one per top-level epic, then the rest.
-    let mut groups: BTreeMap<Option<usize>, Vec<&GraphNode>> = BTreeMap::new();
-    for n in &all_nodes {
-        groups.entry(ctx.top_epic(n)).or_default().push(n);
-    }
-    let group_of: HashMap<&str, Option<usize>> = all_nodes
+    // Too large for one diagram: one per top-level epic, then the rest, and
+    // an epic still over the bounds per nested epic in turn.
+    let mut parts = Vec::new();
+    let mut nested = false;
+    ctx.split(
+        None,
+        all_nodes.clone(),
+        &all_edges,
+        options,
+        &mut parts,
+        &mut nested,
+    );
+    let part_of: HashMap<&str, usize> = parts
         .iter()
-        .map(|n| (n.task.id.as_str(), ctx.top_epic(n)))
+        .enumerate()
+        .flat_map(|(i, p)| p.nodes.iter().map(move |n| (n.task.id.as_str(), i)))
         .collect();
     let crossing = all_edges
         .iter()
-        .filter(|e| group_of[e.from.as_str()] != group_of[e.to.as_str()])
+        .filter(|e| part_of[e.from.as_str()] != part_of[e.to.as_str()])
         .count();
     let mut intro = match reason {
         TooLarge::Bounds => format!(
@@ -561,6 +628,9 @@ fn graph(s: &Snapshot, options: &MarkdownOptions, limit: usize) -> Body {
             all_nodes.len()
         ),
     };
+    if nested {
+        intro.push_str("An epic still too large for one diagram is drawn per nested epic.\n");
+    }
     if crossing > 0 {
         let _ = writeln!(
             intro,
@@ -569,37 +639,35 @@ fn graph(s: &Snapshot, options: &MarkdownOptions, limit: usize) -> Body {
     }
     intro.push('\n');
 
-    let more = |k: usize| more_note(k, groups.len(), "part");
-    let reserve = more_reserve(groups.len(), "part");
+    let more = |k: usize| more_note(k, parts.len(), "part");
+    let reserve = more_reserve(parts.len(), "part");
     if out.len() + intro.len() + reserve > limit {
         return None;
     }
     out += &intro;
 
-    // Epics first, in the order of `Snapshot::epics`; tasks in no epic last.
-    let ordered = groups
-        .iter()
-        .filter(|(k, _)| k.is_some())
-        .chain(groups.iter().filter(|(k, _)| k.is_none()));
     let mut cut_off = false;
-    for (i, (key, nodes)) in ordered.enumerate() {
-        let heading = match key {
-            Some(e) => {
-                let e = &s.epics[*e];
+    for (i, p) in parts.iter().enumerate() {
+        let heading = match p.key {
+            PartKey::Epic(e) => {
+                let e = &s.epics[e];
                 format!("### {} {}\n\n", code(&e.id), title_cell(&e.title))
             }
-            None => "### Not in an epic\n\n".to_string(),
+            PartKey::Directly(e) => {
+                let e = &s.epics[e];
+                format!(
+                    "### {} {}, not in a nested epic\n\n",
+                    code(&e.id),
+                    title_cell(&e.title)
+                )
+            }
+            PartKey::NoEpic => "### Not in an epic\n\n".to_string(),
         };
-        let ids: HashSet<&str> = nodes.iter().map(|n| n.task.id.as_str()).collect();
-        let edges: Vec<&GraphEdge> = all_edges
-            .iter()
-            .copied()
-            .filter(|e| ids.contains(e.from.as_str()) && ids.contains(e.to.as_str()))
-            .collect();
-        let note = cycle_note(nodes);
+        let edges = inner_edges(&p.nodes, &all_edges);
+        let note = cycle_note(&p.nodes);
         let room = limit - out.len() - reserve;
         let space = room.saturating_sub(heading.len() + note.len());
-        let part = match ctx.diagram(nodes, &edges, options, budget.min(space)) {
+        let part = match ctx.diagram(&p.nodes, &edges, options, budget.min(space)) {
             Ok(text) => {
                 budget -= text.len();
                 format!("{heading}{text}{note}")
@@ -607,23 +675,57 @@ fn graph(s: &Snapshot, options: &MarkdownOptions, limit: usize) -> Body {
             Err(reason) => {
                 let why = match reason {
                     TooLarge::Bounds => "too large to draw here",
-                    TooLarge::Text { .. } => "no room left to draw them here",
+                    TooLarge::Text { len, .. } => {
+                        // Left out for the document's size limit, not the
+                        // graph's own text bound: say so under the summary,
+                        // as for a cut table.
+                        cut_off |= len <= budget;
+                        "no room left to draw them here"
+                    }
                 };
                 format!(
                     "{heading}_{} tasks and {} dependencies: {why}._\n\n",
-                    nodes.len(),
+                    p.nodes.len(),
                     edges.len()
                 )
             }
         };
         if part.len() > room {
-            out += &more(groups.len() - i);
+            out += &more(parts.len() - i);
             cut_off = true;
             break;
         }
         out += &part;
     }
     Some((out, cut_off))
+}
+
+/// What one part of a split graph holds.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PartKey {
+    /// An epic's whole subtree (index into `Snapshot::epics`).
+    Epic(usize),
+    /// What an epic split per nested epic holds outside them: the epic's own
+    /// tasks, and the epic itself when it is a node.
+    Directly(usize),
+    /// The tasks in no epic.
+    NoEpic,
+}
+
+/// One diagram of a graph too large for one.
+struct Part<'a> {
+    key: PartKey,
+    nodes: Vec<&'a GraphNode>,
+}
+
+/// The edges of `edges` between two of `nodes`.
+fn inner_edges<'a>(nodes: &[&GraphNode], edges: &[&'a GraphEdge]) -> Vec<&'a GraphEdge> {
+    let ids: HashSet<&str> = nodes.iter().map(|n| n.task.id.as_str()).collect();
+    edges
+        .iter()
+        .copied()
+        .filter(|e| ids.contains(e.from.as_str()) && ids.contains(e.to.as_str()))
+        .collect()
 }
 
 fn cycle_note(nodes: &[&GraphNode]) -> String {
@@ -681,18 +783,77 @@ impl<'a> Diagram<'a> {
             .and_then(|p| self.epic_index.get(p).copied())
     }
 
-    /// The top-level epic whose part a node belongs to; an epic that is a
-    /// node belongs to its own part.
-    fn top_epic(&self, n: &GraphNode) -> Option<usize> {
-        let mut cur = self
-            .epic_index
+    /// Where a node sits in the epic tree: an epic that is a node at itself,
+    /// any other node at its innermost shown epic.
+    fn anchor(&self, n: &GraphNode) -> Option<usize> {
+        self.epic_index
             .get(n.task.id.as_str())
             .copied()
-            .or_else(|| self.container(n))?;
-        while let Some(p) = self.parent_of(cur) {
-            cur = p;
+            .or_else(|| self.container(n))
+    }
+
+    /// The epic directly below `under` (`None`: the top) on the way down to
+    /// `anchor`, or `None` when `anchor` is `under` itself (or no epic).
+    fn branch(&self, anchor: Option<usize>, under: Option<usize>) -> Option<usize> {
+        let mut cur = anchor?;
+        if Some(cur) == under {
+            return None;
         }
-        Some(cur)
+        loop {
+            let parent = self.parent_of(cur);
+            if parent == under {
+                return Some(cur);
+            }
+            cur = parent?;
+        }
+    }
+
+    /// Split `nodes`, all below `under` (`None`: the whole graph), into
+    /// parts: one per epic directly below `under`, in the order of
+    /// `Snapshot::epics`, then one for the rest. An epic over the node or
+    /// edge bounds that has nested epics holding nodes is split the same way
+    /// in its place, and `nested` is set.
+    fn split<'n>(
+        &self,
+        under: Option<usize>,
+        nodes: Vec<&'n GraphNode>,
+        edges: &[&GraphEdge],
+        options: &MarkdownOptions,
+        parts: &mut Vec<Part<'n>>,
+        nested: &mut bool,
+    ) {
+        let mut groups: BTreeMap<Option<usize>, Vec<&'n GraphNode>> = BTreeMap::new();
+        for n in nodes {
+            groups
+                .entry(self.branch(self.anchor(n), under))
+                .or_default()
+                .push(n);
+        }
+        let rest = groups.remove(&None);
+        for (key, group) in groups {
+            let Some(e) = key else { continue };
+            let too_large = group.len() > options.max_graph_nodes
+                || inner_edges(&group, edges).len() > options.max_graph_edges;
+            let splittable = group
+                .iter()
+                .any(|n| self.branch(self.anchor(n), Some(e)).is_some());
+            if too_large && splittable {
+                *nested = true;
+                self.split(Some(e), group, edges, options, parts, nested);
+            } else {
+                parts.push(Part {
+                    key: PartKey::Epic(e),
+                    nodes: group,
+                });
+            }
+        }
+        if let Some(group) = rest {
+            let key = match under {
+                Some(e) => PartKey::Directly(e),
+                None => PartKey::NoEpic,
+            };
+            parts.push(Part { key, nodes: group });
+        }
     }
 
     /// The diagram of `nodes` and `edges` when it is within the bounds and

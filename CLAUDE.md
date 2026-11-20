@@ -485,18 +485,29 @@ log only with `include_all`.
   max_document_chars }`. With the defaults `render` never returns more than
   `DEFAULT_MAX_DOCUMENT_CHARS` = 60 000 bytes, under the 65 536 characters of a PR comment, whatever the
   store's size (a job-summary caller can raise it; 1 MiB there). The header and summary counts are
-  always complete; the graph section gets at most half of what is left, and the tables then share the
-  rest in document order. A table that does not fit ends after its last whole row with
-  `_…and N more not shown._`, board columns and graph parts that no longer fit become
-  `_…and N more columns/parts not shown._`, a section with no room is left out, and a `**Shortened.**`
-  note under the summary says so. Nothing is ever cut inside a row, a `<details>` block or a fence.
+  always complete; the graph section gets at most half of what is left, and the other sections then
+  share the rest fairly (`fair_share`, max-min): in document order each gets all it needs when that is
+  no more than an equal share of what is still left for it and the sections after it, an equal share
+  otherwise, and what it leaves of its share passes on; the board's columns share its room the same
+  way. So a long ready table cannot crowd out the board. A section's need is its length rendered
+  unbounded, and a section or board rendered at exactly that length comes out whole. A table that does
+  not fit ends after its last whole row with `_…and N more not shown._`, board columns and graph parts
+  that no longer fit become `_…and N more columns/parts not shown._`, a section with no room is left
+  out, and a `**Shortened.**` note under the summary says so — also when a graph part became a
+  "no room left" note for the document's room (not when the graph's own `max_graph_chars` was the
+  reason, which the graph's notes already state). Nothing is ever cut inside a row, a `<details>`
+  block or a fence.
   Titles are cut to `MAX_CELL_CHARS` (200) in tables and headings, `MAX_LABEL_CHARS` (40) in nodes.
 - **Bounded graph.** Defaults `DEFAULT_MAX_GRAPH_NODES` = 100, `DEFAULT_MAX_GRAPH_EDGES` = 200 (Mermaid's
   own cap is 500) and `DEFAULT_MAX_GRAPH_CHARS` = 30 000 bytes of Mermaid text for the whole document
   (Mermaid refuses 50 000 per diagram), never more than the graph section's share. A graph over the
   node/edge bounds, or whose one diagram would be over the text budget, is drawn per top-level epic
   plus "Not in an epic", with a note naming the bound it exceeded and counting the dependencies
-  between parts that are not drawn; a part still over the node/edge bounds ("too large to draw here")
+  between parts that are not drawn (counted over the final parts). A top-level epic still over the
+  node/edge bounds that has nested epics holding nodes is split again in its place (`Diagram::split`):
+  one part per nested epic, in `epics` order, then "`<id>` Title, not in a nested epic" for its own
+  tasks (and itself as a node), recursively, and the intro says so; all part headings stay `###`, the
+  hierarchical IDs show the nesting. A part still over the node/edge bounds ("too large to draw here")
   or the remaining text budget ("no room left") becomes a note with its size.
 - **Untrusted text.** Titles, tags, assignees and IDs go to one line (control characters and line
   breaks become spaces). In Markdown, backslash, backtick and `* _ [ ] ~ | $ # !` are backslash-escaped, `< > &` become
@@ -744,8 +755,12 @@ Keep the dependency tree small. Compilation should be fast.
   from its subgraph, status classes, cycles, hostile titles/tags/assignees/IDs that cannot break a table
   row, start a mention or code block, or end a Mermaid label or add a statement, label truncation, and
   the graph bounds (one diagram within them, per-epic parts over them with node IDs kept, a part over
-  the bounds and an exhausted text budget as notes, a graph over only the text budget saying so, the
-  defaults within GitHub's limits), and the document budget (a 1 500-task store with hostile titles
+  the bounds and an exhausted text budget as notes, a graph over only the text budget saying so, an
+  epic over the bounds split per nested epic with the parts' headings, sizes and crossing count, an
+  epic without nested epics left a note, the defaults within GitHub's limits), and the document budget
+  (a part left out for the document's room setting the Shortened note while the graph's own text bound
+  does not, `fair_share`, a long ready table sharing the room with the board instead of crowding it
+  out, a 1 500-task store with hostile titles
   within 60 000 bytes and well-formed with the counts complete, a raised budget showing everything, a
   zero budget leaving the summary and the note, a sweep of budgets never exceeded nor breaking a row,
   `<details>` block or fence, a cut table ending on a whole row with its count, titles cut in tables)
