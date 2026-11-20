@@ -245,6 +245,13 @@ pool is `store::reserved_ids(base, &tasks)`: active and archived IDs plus every 
 (`task::with_ancestors` / `task::ancestors`). Ancestors count even when their task is gone, so a new
 task can never take the ID of a deleted epic and silently adopt its orphaned children.
 
+**Prefix resolution.** `store::resolve_prefix` (used for active and archived lookups alike, so CLI,
+MCP and TUI agree) takes an exact ID first. Otherwise every ID starting with the prefix matches, and
+when all matches are one task and its descendants it resolves to that shallowest task: `8p` is the
+epic `8ph` even with `8ph.c2` present, and `8ph.c` (ending inside a child segment) is `8ph.c2` even
+with `8ph.c2.d7` present. Matches that are genuinely different tasks — siblings, separate roots, or
+the orphaned children of a deleted parent — are still `AmbiguousPrefix`.
+
 **Renaming.** `store::rename_ids(base, &BTreeMap<old, new>)` is the one primitive that changes IDs on
 disk. Each key's task is rewritten under its new ID in the directory it lives in (active or archive),
 and every `depends_on` naming a key is rewritten in every task, active and archived; `updated` is not

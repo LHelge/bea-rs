@@ -915,6 +915,56 @@ fn test_create_child_gets_hierarchical_id() {
         .stdout(predicate::str::contains("Parent:"));
 }
 
+/// A short prefix of an epic is not ambiguous with the epic's own children,
+/// in the active store and in the archive alike.
+#[test]
+fn test_prefix_of_epic_resolves_past_its_children() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "Prefix epic");
+    let prefix = &epic_id[..2];
+    let out = bea(&tmp)
+        .args(["--json", "create", "--epic", "--parent", prefix, "Sub-epic"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let child = v["id"].as_str().unwrap().to_string();
+    assert!(child.starts_with(&format!("{epic_id}.")), "{child}");
+    let grandchild = create_child_task(&tmp, "Grandchild", &child);
+    let leaf = child.rsplit_once('.').unwrap().1;
+    let inside_child = format!("{epic_id}.{}", &leaf[..1]);
+
+    let show = |id: &str| -> serde_json::Value {
+        let out = bea(&tmp).args(["--json", "show", id]).output().unwrap();
+        assert!(out.status.success(), "{id}: {out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert_eq!(show(prefix)["id"], epic_id.as_str());
+    assert_eq!(show(&inside_child)["id"], child.as_str());
+
+    // Archive the finished tree, then restore it by the epic's prefix.
+    bea(&tmp).args(["done", &grandchild]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "done");
+    bea(&tmp).arg("archive").assert().success();
+    bea(&tmp).args(["restore", prefix]).assert().success();
+    assert_eq!(get_task_status(&tmp, &epic_id), "done");
+    bea(&tmp)
+        .args(["restore", &inside_child])
+        .assert()
+        .success();
+    assert_eq!(get_task_status(&tmp, &child), "done");
+
+    // Two different tasks under one prefix are still ambiguous.
+    create_child_task(&tmp, "Second child", &epic_id);
+    bea(&tmp)
+        .args(["show", &format!("{epic_id}.")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous"));
+}
+
 /// `update --parent` moves a task: it and its subtree are renamed, references
 /// to them are rewritten (in the archive too), and the renames are reported.
 #[test]
