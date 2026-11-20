@@ -919,22 +919,26 @@ pub fn scan_task_files(base: &Path) -> Result<Vec<TaskFile>> {
     Ok(files)
 }
 
-/// Write `t` under its own filename (`{id}-{slug}.md`) in the directory of
-/// the file at `path`, then remove `path` if that is a different file.
-/// Returns the path written.
+/// Replace the file at `path` with `t`, then rename it to `t`'s own
+/// filename (`{id}-{slug}.md`) in the same directory. Returns the new path.
 ///
 /// This addresses a file by path rather than a task by ID, so it can repair
 /// one of two files that carry the same ID, or a file whose name does not
 /// match its ID. Refuses with [`Error::IdTaken`] when another file already
 /// sits at the new path, rather than overwrite it.
+///
+/// The content is rewritten in place first (atomically) and the file renamed
+/// second, so at every point there is exactly one file for the task: an
+/// interruption leaves at worst a correctly written file under its old,
+/// mismatched name, never a second copy.
 pub fn rewrite_task_file(path: &Path, t: &Task) -> Result<PathBuf> {
     let new_path = path.with_file_name(task::filename(t));
     if new_path != path && new_path.exists() {
         return Err(Error::IdTaken(t.id.clone()));
     }
-    write_task_file(&new_path, t)?;
+    write_task_file(path, t)?;
     if new_path != path {
-        fs::remove_file(path)?;
+        fs::rename(path, &new_path)?;
     }
     Ok(new_path)
 }
