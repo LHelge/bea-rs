@@ -522,9 +522,21 @@ those of the Markdown header.
   `include_all` — the recent archive log ("The archive is empty." when there is none).
 - **Graph.** An inline `<svg>` drawn from `SnapshotGraph`: one column per layer, nodes at
   `(layer, position)`, edges as curves from the dependency's right side to the dependent's left side
-  with an arrowhead; cyclic edges (same layer) loop out to the right and are dashed, cyclic nodes and
-  epics are outlined differently. Titles in nodes are cut to `NODE_TITLE_CHARS` characters; the full
-  text is in each node's `<title>` tooltip.
+  with an arrowhead. An edge that skips layers (`edge_path`) crosses each layer in between
+  horizontally along the gap between two of its nodes nearest to the straight line (`lane_y`; below
+  the layer's last node the line is free), with curves only in the space between layers, so it never
+  passes behind a node box. Cyclic edges (same layer) loop out to the right and are dashed; between
+  two different nodes a loop leaves above the middle of the dependency's side and arrives below the
+  middle of the dependent's, and an upward loop bulges half as far as a downward one, so two nodes
+  that depend on each other get two distinct curves. Cyclic nodes and epics are outlined
+  differently. Titles in nodes are cut to `NODE_TITLE_CHARS` characters, and the
+  `id · priority · status` line to `NODE_ID_LINE_CHARS` (30, which fits the box in 11px monospace) by
+  shortening a long ID from the front by whole segments (`….d7.e4`, `short_id`); the full text is in
+  each node's `<title>` tooltip.
+- **Size.** The SVG is drawn whole and grows with the number of layers and the largest layer; the
+  graph panel scrolls in both directions within `max-height: 85vh` (template CSS), so the sections
+  after it stay reachable. This is deliberate: unlike Markdown there is no size limit to keep, and a
+  bound would hide tasks with nowhere else to see them.
 - **Self-contained and safe.** Inline CSS only, no JavaScript, no fonts, images, scripts or URLs
   (the only `url(` references are `url(#arrow)` and `url(#arrow-cyclic)`, the SVG arrowhead
   markers; inline SVG needs no `xmlns`), light/dark via `prefers-color-scheme`. Every piece of task
@@ -742,7 +754,10 @@ Keep the dependency tree small. Compilation should be fast.
   handler, only in-document `url(#…)`), hostile titles/tags/assignees/IDs escaped in text, attributes
   and the SVG, sections (archive only with `include_all`, empty archive), header counts, epic progress
   bar widths, queues, board columns and cards, graph nodes placed at their layer and position with
-  every edge drawn (cyclic ones marked), epic nodes, title truncation by character
+  every edge drawn (cyclic ones marked), two nodes depending on each other drawn as two distinct
+  loops, edges that skip layers crossing them only along gaps between nodes (curves only between
+  layers), lane choice, epic nodes, title truncation by character, deep IDs shortened from the front
+  so the id line fits the box (full ID in the tooltip), the graph panel's bounded scrolling
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
