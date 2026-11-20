@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use owo_colors::OwoColorize;
 use owo_colors::Stream::Stdout;
 use owo_colors::Style;
@@ -1193,7 +1193,7 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     }
 
     // Save with updated timestamp (and handle slug rename if title changed)
-    edited.updated = Utc::now();
+    edited.updated = Timestamp::now();
     store::save(base, &edited)?;
 
     if json {
@@ -1229,7 +1229,7 @@ pub async fn cmd_snapshot(
 
     let options = snapshot::SnapshotOptions {
         include_all: all,
-        generated_at: Some(Utc::now()),
+        generated_at: Some(Timestamp::now()),
         ..Default::default()
     };
     let snap = snapshot::load(base, &options).await?;

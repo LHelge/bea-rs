@@ -619,7 +619,7 @@ impl DepNodeJson {
 mod tests {
     use super::*;
     use crate::task::TaskType;
-    use chrono::Utc;
+    use jiff::Timestamp;
 
     fn make_task(id: &str, status: Status, priority: Priority, deps: Vec<&str>) -> Task {
         Task {
@@ -628,8 +628,8 @@ mod tests {
             task_type: TaskType::default(),
             status,
             priority,
-            created: Utc::now(),
-            updated: Utc::now(),
+            created: Timestamp::now(),
+            updated: Timestamp::now(),
             tags: Vec::new(),
             depends_on: deps.into_iter().map(String::from).collect(),
             assignee: String::new(),

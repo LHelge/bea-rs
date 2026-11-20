@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{TimeZone, Utc};
+use crate::task::timestamp::utc;
 
 use super::*;
 use crate::snapshot::{SnapshotOptions, build};
@@ -9,7 +9,7 @@ use crate::task::{Priority, Status, Task, TaskType};
 fn make(id: &str, status: Status, minute: u32, deps: &[&str]) -> Task {
     let mut t = Task::new(id.to_string(), format!("Task {id}"), Priority::P2);
     t.status = status;
-    t.created = Utc.with_ymd_and_hms(2026, 1, 1, 0, minute, 0).unwrap();
+    t.created = utc(2026, 1, 1, 0, minute, 0);
     t.updated = t.created;
     t.depends_on = deps.iter().map(|d| d.to_string()).collect();
     t
@@ -130,7 +130,7 @@ fn empty_store_has_every_section_and_no_diagram() {
 #[test]
 fn generated_at_is_shown_when_given() {
     let options = SnapshotOptions {
-        generated_at: Some(Utc.with_ymd_and_hms(2026, 11, 20, 12, 5, 0).unwrap()),
+        generated_at: Some(utc(2026, 11, 20, 12, 5, 0)),
         ..SnapshotOptions::default()
     };
     let s = build(&HashMap::new(), &HashMap::new(), &options);
@@ -243,7 +243,7 @@ fn board_collapses_columns_and_settled_work_needs_include_all() {
         ])
     };
     let mut archived = make("z", Status::Done, 3, &[]);
-    archived.updated = Utc.with_ymd_and_hms(2026, 3, 4, 0, 0, 0).unwrap();
+    archived.updated = utc(2026, 3, 4, 0, 0, 0);
     let archive = map(vec![archived]);
 
     let md = render(&build(&tasks(), &archive, &SnapshotOptions::default()));

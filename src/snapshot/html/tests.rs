@@ -1,13 +1,13 @@
 use super::*;
 use crate::snapshot::{SnapshotOptions, build};
+use crate::task::timestamp::utc;
 use crate::task::{Priority, Task};
-use chrono::{TimeZone, Utc};
 use std::collections::HashMap;
 
 fn make(id: &str, status: Status, minute: u32, deps: &[&str]) -> Task {
     let mut t = Task::new(id.to_string(), format!("Task {id}"), Priority::P2);
     t.status = status;
-    t.created = Utc.with_ymd_and_hms(2026, 1, 1, 0, minute, 0).unwrap();
+    t.created = utc(2026, 1, 1, 0, minute, 0);
     t.updated = t.created;
     t.depends_on = deps.iter().map(|d| d.to_string()).collect();
     t
@@ -51,7 +51,7 @@ fn archived() -> HashMap<String, Task> {
 fn options(include_all: bool) -> SnapshotOptions {
     SnapshotOptions {
         include_all,
-        generated_at: Some(Utc.with_ymd_and_hms(2026, 11, 20, 12, 0, 0).unwrap()),
+        generated_at: Some(utc(2026, 11, 20, 12, 0, 0)),
         ..SnapshotOptions::default()
     }
 }

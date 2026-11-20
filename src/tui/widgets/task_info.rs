@@ -101,11 +101,11 @@ impl<'a> TaskInfoWidget<'a> {
         // Timestamps
         lines.push(Line::from(vec![
             Span::styled("Created:  ", label_style),
-            Span::raw(self.task.created.format("%Y-%m-%d %H:%M").to_string()),
+            Span::raw(self.task.created.strftime("%Y-%m-%d %H:%M").to_string()),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Updated:  ", label_style),
-            Span::raw(self.task.updated.format("%Y-%m-%d %H:%M").to_string()),
+            Span::raw(self.task.updated.strftime("%Y-%m-%d %H:%M").to_string()),
         ]));
 
         lines

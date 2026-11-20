@@ -1,12 +1,12 @@
 use super::*;
-use chrono::TimeZone;
+use crate::task::timestamp::utc;
 
 /// A task created `minute` minutes after a fixed instant, so that orderings
 /// by creation date are deterministic.
 fn make(id: &str, status: Status, priority: Priority, minute: u32, deps: &[&str]) -> Task {
     let mut t = Task::new(id.to_string(), format!("Task {id}"), priority);
     t.status = status;
-    t.created = Utc.with_ymd_and_hms(2026, 1, 1, 0, minute, 0).unwrap();
+    t.created = utc(2026, 1, 1, 0, minute, 0);
     t.updated = t.created;
     t.depends_on = deps.iter().map(|d| d.to_string()).collect();
     t
@@ -196,7 +196,7 @@ fn snapshot_is_deterministic_and_takes_its_time_from_the_caller() {
     );
     assert!(!serde_json::to_string(&a).unwrap().contains("generated_at"));
 
-    let at = Utc.with_ymd_and_hms(2026, 11, 20, 12, 0, 0).unwrap();
+    let at = utc(2026, 11, 20, 12, 0, 0);
     let timed = build(
         &active,
         &archived,
@@ -448,7 +448,7 @@ fn archive_log_only_with_include_all_newest_first_and_limited() {
     let mut archived = Vec::new();
     for i in 0..5 {
         let mut t = task(&format!("z{i}"), Status::Done, i, &[]);
-        t.updated = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, i).unwrap();
+        t.updated = utc(2026, 2, 1, 0, 0, i);
         archived.push(t);
     }
     let archived = map(archived);

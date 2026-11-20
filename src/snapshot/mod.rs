@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::error::Result;
@@ -64,7 +64,7 @@ pub struct SnapshotOptions {
     /// When the snapshot was taken, copied into [`Snapshot::generated_at`].
     /// The snapshot never reads the clock itself, so that it stays
     /// deterministic; `None` leaves the time out.
-    pub generated_at: Option<DateTime<Utc>>,
+    pub generated_at: Option<Timestamp>,
 }
 
 impl Default for SnapshotOptions {
@@ -81,8 +81,11 @@ impl Default for SnapshotOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     /// [`SnapshotOptions::generated_at`], when given.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generated_at: Option<DateTime<Utc>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::task::timestamp::option::serialize"
+    )]
+    pub generated_at: Option<Timestamp>,
     /// [`SnapshotOptions::include_all`]: whether settled work is in the detail.
     pub include_all: bool,
     /// How many tasks, epics and archived tasks the store holds.
@@ -171,8 +174,10 @@ pub struct SnapshotTask {
     pub depends_on: Vec<String>,
     /// Whether the task is ready to work on (`graph::is_task_ready`).
     pub ready: bool,
-    pub created: DateTime<Utc>,
-    pub updated: DateTime<Utc>,
+    #[serde(serialize_with = "crate::task::timestamp::serialize")]
+    pub created: Timestamp,
+    #[serde(serialize_with = "crate::task::timestamp::serialize")]
+    pub updated: Timestamp,
 }
 
 /// One epic with its progress.
