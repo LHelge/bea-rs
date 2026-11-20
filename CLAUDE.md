@@ -85,6 +85,8 @@ src/
     tests.rs       # Unit tests for the data model
     markdown.rs    # GitHub-flavored Markdown renderer with a Mermaid dependency graph
     markdown/tests.rs  # Unit tests for the Markdown renderer
+    html.rs        # Self-contained HTML page with an SVG dependency graph (render)
+    html/tests.rs  # Unit tests for the HTML renderer
   store.rs         # Core: parse .bears/ dir, read/write task files, archive layer
   task.rs          # Task struct, frontmatter serde, enums, ID generation
   graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
@@ -92,7 +94,8 @@ src/
   config.rs        # .bears.yml configuration loading
   editor.rs        # $EDITOR integration for `bea edit` (binary-only)
   error.rs         # thiserror error types
-templates/         # Embedded harness templates (via include_str!) for init scaffolding
+templates/         # Embedded templates (via include_str!): harness files for init scaffolding,
+                   # and snapshot/snapshot.html, the page of `bea snapshot --format html`
 ```
 
 ### Library/binary split
@@ -443,6 +446,31 @@ log only with `include_all`.
   letters, digits, space and `.,-_:/'!?+=*@$^~` becomes an entity code (`#35;`), so no quote, bracket,
   `;`, `%%`, backtick or fence can end a label or add a statement.
 
+### Snapshot HTML renderer
+
+`snapshot::html::render(&Snapshot) -> String` turns a snapshot into one self-contained HTML page. It is
+pure and deterministic (no store, no clock; the time shown is `generated_at`) and builds without the
+`cli` feature.
+
+- **Template.** `templates/snapshot/snapshot.html` (embedded as `snapshot::html::TEMPLATE`) holds the
+  document and all CSS; `render` fills its `{{generated}}` and `{{sections}}` placeholders in one pass,
+  so text inside a value is never treated as a placeholder. The file is in the `cargo package`
+  guard in `tests/cli.rs`.
+- **Sections.** Header stats (totals, queue sizes, a stacked bar per status and per outstanding
+  priority), epic progress bars (tree order, indented by depth, coloured by children's status), the
+  ready / in-progress / review queues, the status board, the dependency graph, and — only with
+  `include_all` — the recent archive log ("The archive is empty." when there is none).
+- **Graph.** An inline `<svg>` drawn from `SnapshotGraph`: one column per layer, nodes at
+  `(layer, position)`, edges as curves from the dependency's right side to the dependent's left side
+  with an arrowhead; cyclic edges (same layer) loop out to the right and are dashed, cyclic nodes and
+  epics are outlined differently. Titles in nodes are cut to `NODE_TITLE_CHARS` characters; the full
+  text is in each node's `<title>` tooltip.
+- **Self-contained and safe.** Inline CSS only, no JavaScript, no fonts, images, scripts or URLs
+  (the only `url(` references are `url(#arrow)` and `url(#arrow-cyclic)`, the SVG arrowhead
+  markers; inline SVG needs no `xmlns`), light/dark via `prefers-color-scheme`. Every piece of task
+  content is escaped with `snapshot::html::escape` (`& < > " '`), in text, attributes and inside the
+  SVG.
+
 ### Cycle detection
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
@@ -621,6 +649,12 @@ Keep the dependency tree small. Compilation should be fast.
   within 60 000 bytes and well-formed with the counts complete, a raised budget showing everything, a
   zero budget leaving the summary and the note, a sweep of budgets never exceeded nor breaking a row,
   `<details>` block or fence, a cut table ending on a whole row with its count, titles cut in tables)
+- Unit tests in `snapshot/html/tests.rs`: escaping, one-pass template filling, deterministic output,
+  generated time, light/dark CSS, no external references (no URL, `src`/`href`, script, link, event
+  handler, only in-document `url(#…)`), hostile titles/tags/assignees/IDs escaped in text, attributes
+  and the SVG, sections (archive only with `include_all`, empty archive), header counts, epic progress
+  bar widths, queues, board columns and cards, graph nodes placed at their layer and position with
+  every edge drawn (cyclic ones marked), epic nodes, title truncation by character
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
