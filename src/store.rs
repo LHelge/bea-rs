@@ -1101,9 +1101,10 @@ mod tests {
                 // Should contain the YAML parser's error details, not just "failed to parse"
                 assert!(!reason.contains("failed to parse frontmatter"), "{reason}");
                 assert!(!reason.is_empty());
-                // One line with a position, so it fits in a warning.
+                // One line with a position, so it fits in a warning; the
+                // line is the file's (`: :` follows the opening `---`).
                 assert!(!reason.contains('\n'), "{reason}");
-                assert!(reason.contains("line 1"), "{reason}");
+                assert!(reason.contains("line 2,"), "{reason}");
             }
             other => panic!("expected InvalidFrontmatter, got {other:?}"),
         }
