@@ -3138,12 +3138,21 @@ fn test_migrate_dry_run_then_migrate() {
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["legacy_files"], 2);
     assert_eq!(bears_snapshot(&tmp), before);
+    let preview = v["renamed"].clone();
+    // The human preview names the same IDs.
+    let child_preview = preview["ch"].as_str().unwrap();
+    assert!(
+        stdout.contains(&format!("renamed ch → {child_preview}")),
+        "{stdout}"
+    );
 
     let out = bea(&tmp).args(["--json", "migrate"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["dry_run"], false);
     assert_eq!(v["orphaned"], serde_json::json!([]));
+    // The dry run showed exactly the IDs the real run assigned.
+    assert_eq!(v["renamed"], preview);
     let child = v["renamed"]["ch"].as_str().unwrap().to_string();
     let archived = v["renamed"]["ac"].as_str().unwrap().to_string();
     assert!(child.starts_with("ep."), "{child}");
@@ -3174,6 +3183,32 @@ fn test_migrate_dry_run_then_migrate() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["renamed"], serde_json::json!({}));
     assert_eq!(bears_snapshot(&tmp), after);
+}
+
+/// Two copies of one legacy store, migrated separately (say on two branches),
+/// end up with the same IDs and the same files.
+#[test]
+fn test_migrate_gives_two_copies_the_same_ids() {
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    for dir in [&a, &b] {
+        legacy_cli_store(dir);
+        write_legacy_task(dir, "ne", "epic", "ep", false);
+        write_legacy_task(dir, "gc", "task", "ne", false);
+    }
+    let run = |dir: &TempDir| {
+        let out = bea(dir).args(["--json", "migrate"]).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["renamed"].clone()
+    };
+    assert_eq!(run(&a), run(&b));
+    let strip = |dir: &TempDir| {
+        bears_snapshot(dir)
+            .into_iter()
+            .map(|(p, c)| (p.strip_prefix(dir.path()).unwrap().to_path_buf(), c))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(&a), strip(&b));
 }
 
 /// A `parent:` that cannot become part of an ID is dropped and reported; the

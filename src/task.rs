@@ -543,14 +543,77 @@ pub fn child_segment_length(parent: &str, existing: &HashSet<String>, min_length
 /// [`child_segment_length`]) are read from it. The segment starts at the
 /// configured `child-id-length`.
 pub fn generate_child_id(parent: &str, existing: &HashSet<String>, config: &Config) -> String {
-    let length = child_segment_length(parent, existing, config.child_id_length as usize);
     let mut rng = rand::rng();
-    loop {
-        let id = format!("{parent}{ID_SEPARATOR}{}", random_segment(&mut rng, length));
-        if !existing.contains(&id) && yaml_safe_id(&id) {
-            return id;
-        }
-    }
+    first_free_child(parent, existing, config, |_, length| {
+        random_segment(&mut rng, length)
+    })
+}
+
+/// Derive a child ID under `parent` from `seed`, deterministically.
+///
+/// The same `parent`, `seed`, `existing` pool and `child-id-length` always
+/// give the same ID, on any machine and with any version of `rand`; apart
+/// from that it obeys everything [`generate_child_id`] does: the segment
+/// length follows [`child_segment_length`], and the ID is valid, YAML-safe
+/// and not in `existing`. Candidates are taken in a fixed sequence (attempt
+/// 0, 1, 2, … of a hash of `seed`) until one is free, so a collision moves
+/// the ID to the next candidate rather than to a random one.
+///
+/// [`crate::store::migrate`] uses this, with a task's old ID as the seed, so
+/// that a dry run previews the IDs the real run assigns and the same legacy
+/// store always migrates to the same IDs.
+pub fn derive_child_id(
+    parent: &str,
+    seed: &str,
+    existing: &HashSet<String>,
+    config: &Config,
+) -> String {
+    first_free_child(parent, existing, config, |attempt, length| {
+        derived_segment(seed, attempt, length)
+    })
+}
+
+/// The first ID `parent.<segment>` that is free in `existing` and YAML-safe,
+/// asking `segment(attempt, length)` for candidates, attempt 0 first.
+fn first_free_child(
+    parent: &str,
+    existing: &HashSet<String>,
+    config: &Config,
+    mut segment: impl FnMut(u64, usize) -> String,
+) -> String {
+    let length = child_segment_length(parent, existing, config.child_id_length as usize);
+    (0u64..)
+        .map(|attempt| format!("{parent}{ID_SEPARATOR}{}", segment(attempt, length)))
+        .find(|id| !existing.contains(id) && yaml_safe_id(id))
+        .expect("the sibling space is never full")
+}
+
+/// Candidate `attempt` of a `length`-char segment derived from `seed`.
+///
+/// FNV-1a over the seed and the attempt number, stretched with SplitMix64 so
+/// every character gets fresh bits. Both are fixed here (not `std`'s hasher
+/// or a `rand` generator, which may change between releases), because the
+/// IDs a migration assigns must not depend on the build.
+fn derived_segment(seed: &str, attempt: u64, length: usize) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut state = seed
+        .bytes()
+        .chain([0xff])
+        .chain(attempt.to_le_bytes())
+        .fold(FNV_OFFSET, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+        });
+    (0..length)
+        .map(|_| {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            ID_CHARSET[(z % ID_CHARSET.len() as u64) as usize] as char
+        })
+        .collect()
 }
 
 /// The task ID a task filename (`{id}-{slug}.md`) starts with.
@@ -938,6 +1001,76 @@ mod tests {
             let id = generate_child_id("a1b", &existing, &Config::default());
             assert_eq!(leaf_segment(&id).len(), 2, "{id}");
             assert!(existing.insert(id.clone()), "collided with {id}");
+        }
+    }
+
+    #[test]
+    fn test_derive_child_id_is_deterministic() {
+        let existing: HashSet<String> = ["ep".to_string(), "ch".into()].into();
+        let id = derive_child_id("ep", "ch", &existing, &Config::default());
+        assert_eq!(
+            derive_child_id("ep", "ch", &existing.clone(), &Config::default()),
+            id
+        );
+        // Pinned: a change here changes what every legacy store migrates to.
+        assert_eq!(id, "ep.mv");
+        // Different seeds spread over the sibling space.
+        let ids: HashSet<String> = (0..50)
+            .map(|n| derive_child_id("ep", &format!("t{n}"), &existing, &Config::default()))
+            .collect();
+        assert!(ids.len() > 40, "{ids:?}");
+    }
+
+    #[test]
+    fn test_derive_child_id_shape_and_length() {
+        let existing: HashSet<String> = ["a1b".to_string()].into();
+        let allowed = std::str::from_utf8(ID_CHARSET).unwrap();
+        for n in 0..100 {
+            let id = derive_child_id("a1b", &format!("s{n}"), &existing, &Config::default());
+            assert_eq!(parent_of(&id), Some("a1b"));
+            assert_eq!(leaf_segment(&id).len(), 2, "{id}");
+            assert!(is_valid_id(&id) && yaml_safe_id(&id), "{id}");
+            assert!(leaf_segment(&id).chars().all(|c| allowed.contains(c)));
+        }
+        let id = derive_child_id("a1b", "s", &existing, &child_config(4));
+        assert_eq!(leaf_segment(&id).len(), 4, "{id}");
+        // Past the growth limit the segment grows, as for random IDs.
+        let full: HashSet<String> = all_two_char_children("a1b")[..241]
+            .iter()
+            .cloned()
+            .collect();
+        let id = derive_child_id("a1b", "s", &full, &Config::default());
+        assert_eq!(leaf_segment(&id).len(), 3, "{id}");
+    }
+
+    #[test]
+    fn test_derive_child_id_moves_on_after_a_collision() {
+        // The same seed against a growing pool never collides, and taking
+        // the first candidate makes the next one deterministic too.
+        let mut existing: HashSet<String> = HashSet::new();
+        let mut first = Vec::new();
+        while existing.len() < 240 {
+            let id = derive_child_id("a1b", "same", &existing, &Config::default());
+            assert_eq!(leaf_segment(&id).len(), 2, "{id}");
+            assert!(existing.insert(id.clone()), "collided with {id}");
+            first.push(id);
+        }
+        let mut again = HashSet::new();
+        for id in &first {
+            assert_eq!(
+                &derive_child_id("a1b", "same", &again, &Config::default()),
+                id
+            );
+            again.insert(id.clone());
+        }
+    }
+
+    #[test]
+    fn test_derive_child_id_skips_yaml_unsafe_ids() {
+        let existing = HashSet::new();
+        for n in 0..500 {
+            let id = derive_child_id("23", &format!("s{n}"), &existing, &Config::default());
+            assert!(yaml_safe_id(&id), "derived YAML-unsafe id {id}");
         }
     }
 

@@ -49,7 +49,7 @@ The binary is named `bea`.
 
 > **Upgrading to 0.10?** Task IDs are now hierarchical and the `parent:` frontmatter key is gone.
 > `bea` refuses to load a store written by an earlier version until you run `bea migrate` once
-> (`bea migrate --dry-run` previews the renames). Commit or back up `.bears/` first. See
+> (`bea migrate --dry-run` previews the renames and the new IDs). Commit or back up `.bears/` first. See
 > [Task IDs](#task-ids) and [`bea migrate`](#bea-migrate).
 
 ---
@@ -346,7 +346,8 @@ bea migrate
 ```
 
 Each rename is printed as `  renamed ch1 → ep1.f6`; `--json` returns the mapping. The new child IDs are
-drawn at random, so a dry run shows which tasks would be renamed, not the exact IDs a real run picks.
+derived from the old ones, so a dry run shows exactly the IDs the real run assigns, and the same store
+always migrates to the same IDs (two branches migrating their own copy get identical files).
 Migration is idempotent (on a converted store it reports nothing to migrate) and resumable: if it is
 interrupted, run it again. Until a store is migrated, every other command, the MCP server and the TUI
 refuse to load it.

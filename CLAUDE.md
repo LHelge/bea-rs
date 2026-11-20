@@ -224,16 +224,25 @@ remediation (run `bea migrate` once from a shell) to the tool error in `mcp/mod.
   the task keeps its ID and is not lost.
 - All `depends_on` are rewritten in active and archived tasks, `updated` is kept, files with nothing
   to change are not touched, and afterwards no file has a `parent:` key.
-- `--dry-run` writes nothing and shows which tasks get renamed and under which parent, but not
-  their final IDs: the new segments are drawn at random on each run, so the real run picks
-  different ones (task `u6v` tracks making them equal). On a store without `parent:` keys it is a
-  no-op ("Nothing to migrate", exit 0), so it is idempotent.
+- **Deterministic IDs.** Unlike `create` and reparenting, the migration does not draw segments at
+  random: `task::derive_child_id(parent, seed, existing, &Config)` takes candidate `0, 1, 2, …` of a
+  fixed hash of the task's old ID (FNV-1a + SplitMix64, written out in `task.rs` so neither `std`'s
+  hasher nor `rand` can change it) and keeps the first that is free and YAML-safe, with the same
+  `child-id-length` / growth rule as `generate_child_id`. Tasks are placed in order of their old
+  IDs (parents first) against a collision pool built from the files' IDs, so the result depends on
+  nothing but the store's contents and `.bears.yml` — not the time, `updated` or directory order.
+  The same legacy store therefore always migrates to the same IDs: two copies migrated on two
+  branches get identical files, and a pinned test in `task.rs` guards the hash.
+- `--dry-run` writes nothing and shows exactly the renames, final IDs included, that the real run
+  then makes. On a store without `parent:` keys it is a no-op ("Nothing to migrate", exit 0), so it
+  is idempotent.
 - **Interruption safety.** The renames are written to `.bears/.migrate.json` (`MIGRATION_JOURNAL`)
   before any task file; then new files, then rewritten files, then the old files are removed, and the
   journal last. While unfinished, old files and their `parent:` keys remain, so the store still
   refuses to load, and a re-run reuses the journal's IDs (recognising files already written under a
   new ID as copies, and an already-removed epic's new ID through the journal) to finish the job
-  without duplicating or losing a task. It does not use `rename_ids`, which refuses a half-applied
+  without duplicating or losing a task. The journal wins over recomputation: an ID it records is
+  kept even where `derive_child_id` would now pick another. It does not use `rename_ids`, which refuses a half-applied
   rename (`IdTaken`) and cannot resume.
 
 CLI output: one `  renamed <old> → <new>` line per rename (as `bea update` prints), one
@@ -255,7 +264,8 @@ lowercase alphanumeric. `task.rs` holds the model as plain `&str` helpers: `vali
 an ID), and `generate_child_id(parent, existing, &Config)`. Child segments start at
 `child-id-length` in `.bears.yml` (default 2, range 1–8, written only when not the default) and grow
 by one char for new children once more than 25% (`CHILD_SPACE_FILL_LIMIT`) of the parent's sibling
-space at the current length is used; existing IDs keep their length. `existing` is the collision
+space at the current length is used; existing IDs keep their length. `derive_child_id(parent, seed, existing, &Config)` is the deterministic
+counterpart (same rules, segments derived from `seed`), used only by `bea migrate`. `existing` is the collision
 pool (active + archived IDs), and siblings are counted from it. `service::create_task` with a parent
 resolves it (it must exist and be an epic, else `TaskNotFound` / `ParentNotEpic`) and generates the
 new ID with `generate_child_id`; without one it uses `generate_id` with `id-length`. The collision
@@ -518,7 +528,7 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `archived_id_set`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `archived_id_set`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing and shows the real run's map, two copies of a store migrated to identical files, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
@@ -528,7 +538,7 @@ Keep the dependency tree small. Compilation should be fast.
   exit status 0/1, `--fix` and `--json` output, `needs_review` true only after a fix that left
   references to review, problems remaining after `--fix`, legacy store with
   migrate hint, not initialized); `tests/mcp.rs` (tool listed)
-- Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
+- Unit tests in `task.rs`/`store.rs` for hierarchical IDs: `derive_child_id` (deterministic with a pinned value, shape, growth, collisions, YAML-safe), validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)
 - Unit tests in `task.rs`: parent derived from the ID, no `parent:` key written, legacy `parent:` key read into `legacy_parent` but never written or used as the parent
 - Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade); child creation (hierarchical ID under the resolved parent, nested epics, `child-id-length`, archived-ID avoidance, ancestors of orphans reserved at root and child level); reparenting (subtree moved with archived descendants and active/archived dependants rewritten, detach to a fresh root ID, root task moved under an epic, auto-close at the new parent, self/descendant/non-epic/unknown parents refused before any write), unchanged parent accepted; delete/prune (dangling `depends_on` scrubbed, an epic's active and archived children detached to fresh roots with subtrees and references, prune detaching only survivors incl. a pruned task inside a detached subtree); start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
@@ -536,7 +546,7 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, and none mentions a `parent:` key or a CLI spelling that does not exist
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, task-list titles aligned across ID lengths, subtask tree expanding nested epics once, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map equal to the dry run's, two copies migrated identically, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
   list/schemas, tool calls, protocol- vs tool-level error semantics, and a legacy store refused as a
