@@ -1,0 +1,61 @@
+name: Snapshot
+
+# Dogfoods `bea snapshot` on this repository's own task store: the Markdown
+# snapshot goes to the job summary, the HTML page (settled work included) is
+# kept as a build artifact. Separate from the quality checks on purpose, so a
+# snapshot problem never blocks the quality gate or a release.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.bears/**'
+      - '.github/workflows/snapshot.yml'
+  # `pull_request`, never `pull_request_target`: runs from forks get a
+  # read-only token and no secrets, and this workflow needs neither.
+  pull_request:
+    paths:
+      - '.bears/**'
+      - 'src/snapshot/**'
+      - 'src/cli/**'
+      - '.github/workflows/snapshot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    name: Publish task snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The released `bea` may predate `bea snapshot` or this branch's
+      # renderers, so build the binary from the checkout.
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build bea
+        run: cargo build --bin bea
+
+      - name: Write Markdown snapshot to the job summary
+        run: ./target/debug/bea snapshot --format md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render HTML snapshot
+        run: ./target/debug/bea snapshot --all --format html -o snapshot.html
+
+      - name: Upload HTML snapshot
+        uses: actions/upload-artifact@v6
+        with:
+          name: bears-snapshot
+          path: snapshot.html
+          if-no-files-found: error
