@@ -2873,6 +2873,10 @@ fn test_doctor_fix_renumbers_a_duplicate() {
     let renamed = v["renamed"].as_array().unwrap();
     assert_eq!(renamed.len(), 1);
     assert_eq!(renamed[0]["from"], id.as_str());
+    assert_eq!(renamed[0]["title"], "Copy");
+    assert_eq!(renamed[0]["kept_title"], "Original");
+    assert_eq!(renamed[0]["dependents"], serde_json::json!([dependent]));
+    assert_eq!(renamed[0]["descendants"], serde_json::json!([]));
     let new_id = renamed[0]["to"].as_str().unwrap();
     assert!(!copy_path.exists());
 
@@ -2881,6 +2885,64 @@ fn test_doctor_fix_renumbers_a_duplicate() {
     let (_, shown) = doctor_json(&tmp, &["show", &dependent]);
     assert_eq!(shown["depends_on"], serde_json::json!([id]));
     bea(&tmp).arg("doctor").assert().success();
+}
+
+/// When the duplicated ID is an epic, its children stay with the copy that
+/// keeps the ID, which may not be the epic they were created under; the
+/// output must say so rather than read as "nothing to look at".
+#[test]
+fn test_doctor_fix_names_the_tasks_left_with_the_kept_copy() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let out = bea(&tmp)
+        .args(["--json", "create", "Épique ünïcode", "--epic"])
+        .output()
+        .unwrap();
+    let epic: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let epic = epic["id"].as_str().unwrap().to_string();
+    let out = bea(&tmp)
+        .args(["--json", "create", "Child", "--parent", &epic])
+        .output()
+        .unwrap();
+    let child: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let child = child["id"].as_str().unwrap().to_string();
+    let original = std::fs::read_dir(tmp.path().join(".bears"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{epic}-"))
+        })
+        .unwrap();
+    let copy = std::fs::read_to_string(&original)
+        .unwrap()
+        .replace("Épique ünïcode", "Other branch");
+    // `-other` sorts before `-pique-n-code`, so the copy keeps the ID.
+    std::fs::write(tmp.path().join(format!(".bears/{epic}-other.md")), copy).unwrap();
+
+    bea(&tmp)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"Other branch\""))
+        .stdout(predicate::str::contains(format!("below it: {child}")));
+
+    bea(&tmp)
+        .args(["doctor", "--fix"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "{epic} stays with .bears/{epic}-other.md (\"Other branch\")"
+        )))
+        .stdout(predicate::str::contains(
+            "check these still belong to that copy",
+        ))
+        .stdout(predicate::str::contains(format!("below it: {child}")))
+        .stdout(predicate::str::contains("review the tasks listed above"))
+        .stdout(predicate::str::contains("no problems found").not());
 }
 
 #[test]
