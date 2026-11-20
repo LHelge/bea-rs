@@ -80,6 +80,9 @@ src/
     watcher.rs     # Debounced .bears/ file watcher (notify) for live refresh
     widgets/       # task list/detail/info, dep tree, modals, body, bottom bar
   service.rs       # Business logic: create, update, epic progress, auto-close, archive
+  snapshot/        # `bea snapshot` data model: deterministic, serialisable store picture
+    mod.rs         # Snapshot, SnapshotOptions, build/load, layered dependency graph
+    tests.rs       # Unit tests for the data model
   store.rs         # Core: parse .bears/ dir, read/write task files, archive layer
   task.rs          # Task struct, frontmatter serde, enums, ID generation
   graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
@@ -92,7 +95,7 @@ templates/         # Embedded harness templates (via include_str!) for init scaf
 
 ### Library/binary split
 
-`src/lib.rs` exposes `config`, `error`, `graph`, `scaffold`, `service`, `store`, `task`, plus the
+`src/lib.rs` exposes `config`, `error`, `graph`, `scaffold`, `service`, `snapshot`, `store`, `task`, plus the
 `Error`/`Result`/`Task`/`Status`/`Priority`/`TaskType` re-exports. `cli`, `mcp`, `tui`, and `editor`
 are declared in `main.rs` and are **not** part of the library.
 
@@ -382,6 +385,27 @@ orchestrator releases the claim and the task reappears in `ready` for the next w
 
 Epics group child tasks by ID: a task's parent is the epic its ID is under (`Task::parent()`, `Task::is_child_of()`), set when the task is created with a parent. Changing it later with `update --parent <id|"">` / `update_task`'s `parent` *moves* the task: it gets a fresh ID (a root ID with `id-length` for `""`, a child ID of the new epic otherwise), every task below it — archived ones included, in the archive — keeps its own segments under the new prefix, and every `depends_on` naming one of them is rewritten (`store::rename_ids`). The new parent must be an existing epic (`TaskNotFound` / `ParentNotEpic`) outside the task's own subtree (`ParentInSubtree`), checked before anything is written; naming the current parent is a no-op. `service::update_task` returns `UpdatedTask { task, renamed }`, `renamed` being the old → new map (empty when nothing moved); the CLI prints it and adds it to `--json` as `renamed`, and the MCP tool adds the same `renamed` key. The field edits are saved under the old ID before the rename (if the rename then fails, they stay saved). A move by itself never opens or closes an epic: auto-close stays tied to status changes, so neither the old nor the new parent is re-checked unless the same update changes the status, in which case the check runs at the new parent. Children counts, auto-close and the archive cascade use direct children only: a nested epic is one unit of work for its parent (auto-close cascades up on its own). The `epic` filters — `bea list`/`ready`/`review --epic` and the MCP `epic` parameter of `list_ready`, `list_all_tasks`, `list_review` and `get_graph` — match the epic's whole subtree instead (`task::in_epic`, built on `is_descendant`, whole segments), so work under a nested epic is found from the outer one; the epic itself is not in a list result (`get_graph` keeps it as a node). Deleting or pruning an epic first *detaches* its surviving direct children, active and archived: each gets a fresh root ID and its subtree moves with it, `depends_on` rewritten everywhere, exactly like `update --parent ""` (this restores the pre-0.10 behaviour, where delete/prune cleared the children's `parent`). The renames run first and the tasks are deleted last, deepest first, so an interruption never leaves a child under a parent that is gone; a task pruned inside a detached subtree is moved with it and then deleted under its new ID, and only survivors appear in the map. Detaching never opens or closes an epic. `service::delete_task` returns `DeletedTask { task, renamed }` and `service::prune_tasks` returns `PrunedTasks { tasks, renamed }` (deleted tasks under their original IDs; `renamed` holds survivors only, empty when nothing moved). The CLI prints `  renamed <old> → <new>` lines; `bea delete --json` / MCP `delete_task` add a `renamed` key to the summary, and `bea prune --json` / MCP `prune_tasks` always return `{ "pruned": [summaries], "renamed": {old: new} }`, `renamed` an empty object when nothing moved and `pruned` an empty array when nothing was pruned. `bea epics` / `list_epics` shows epics with progress (done / total non-cancelled children). An epic auto-closes when every child is *resolved* — i.e. `done` **or** `cancelled` (cancelled children are non-blocking and excluded from the total). Auto-close runs on both the `set_status` and `update_task` status paths and cascades up through nested epics. Epics are excluded from `ready` results.
 
+### Snapshot data model
+
+`snapshot::build(&active, &archived, &SnapshotOptions) -> Snapshot` (and `snapshot::load(base, &options)`,
+which reads both maps first) is the data behind `bea snapshot`: pure, `Serialize`, no rendering. The
+renderers (`snapshot/markdown.rs`, `snapshot/html.rs`) consume a `Snapshot` and never reload the store.
+
+- **Agrees with the CLI.** `ready`, `review` and `in_progress` come from `service::list_ready`,
+  `list_review` and `list_tasks(Some(InProgress))`; epic `progress` from `service::epic_progress`;
+  `archive` from `service::archive_log` (the order of `bea log`).
+- **Deterministic.** Every list has a fixed order with ties broken by ID, and the only time in it is
+  `SnapshotOptions::generated_at`, passed in by the caller (`None` leaves it out).
+- **`include_all`** (default off) adds settled detail: the `done`/`cancelled` board columns and graph
+  nodes, done/cancelled epics, and the archive log (`archive_limit` entries, default 10). The counts
+  (`totals`, `by_status`, `outstanding_by_priority`) always cover the whole store and never count epics.
+- `epics` are in tree order with `parent`/`depth` (the nearest *shown* enclosing epic); every
+  `SnapshotTask::epic` names the innermost shown epic, for subgraphs/groups.
+- `graph`: nodes are the board's tasks plus shown epics that are an end of a dependency; edges run
+  `from` dependency `to` dependent, only between nodes. Layers are longest-path over the DAG;
+  dependency cycles (`Graph::cycles`) are condensed into one layer and marked `cyclic`. Each layer is
+  ordered by the mean position of its dependencies, then epic, priority, creation date, ID.
+
 ### Cycle detection
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
@@ -542,6 +566,13 @@ Keep the dependency tree small. Compilation should be fast.
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `archived_id_set`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing and shows the real run's map, two copies of a store migrated to identical files, second run a no-op, resume from every interruption point incl. an already-removed epic); and this repository's own `.bears/`, already migrated, checked as a copy: it loads, has no `parent:` key, `migrate` is a no-op on it, every derived parent is an existing epic and every `depends_on` names a task
+- Unit tests in `snapshot/tests.rs`: counts (every status and priority, epics not counted, independent of
+  `include_all`), queues equal to the `service` listings, ties broken by ID whatever the map order,
+  determinism and caller-supplied `generated_at`, board columns with and without `include_all`, epics in
+  tree order with progress and the nearest shown epic, longest-path layering, ordering by dependency
+  position, settled/missing dependencies left out, cycles in one layer, epics as nodes only in an edge,
+  effective priority, the archive log, the JSON shape, `load` (incl. not initialized), and a snapshot of
+  this repository's own store
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in

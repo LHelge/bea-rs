@@ -12,6 +12,8 @@
 //! - [`graph`] computes the dependency graph, readiness, and effective priority.
 //! - [`service`] is the business logic layer — create, update, reparent, archive,
 //!   epic progress and auto-close. Most callers want this.
+//! - [`snapshot`] gathers a deterministic, serialisable picture of a store
+//!   (counts, queues, epic progress, a layered dependency graph) for renderers.
 //! - [`scaffold`] writes coding-agent integration files (`CLAUDE.md`, skills, MCP config).
 //!
 //! There is no cache and no daemon: [`store::load_all`] re-reads the whole
@@ -38,6 +40,7 @@ pub mod error;
 pub mod graph;
 pub mod scaffold;
 pub mod service;
+pub mod snapshot;
 pub mod store;
 pub mod task;
 
