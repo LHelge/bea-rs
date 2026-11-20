@@ -79,7 +79,7 @@ src/
     style.rs       # Theme and colors
     watcher.rs     # Debounced .bears/ file watcher (notify) for live refresh
     widgets/       # task list/detail/info, dep tree, modals, body, bottom bar
-  service.rs       # Business logic: create, update, reparent, epic progress, auto-close
+  service.rs       # Business logic: create, update, epic progress, auto-close, archive
   store.rs         # Core: parse .bears/ dir, read/write task files, archive layer
   task.rs          # Task struct, frontmatter serde, enums, ID generation
   graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
@@ -167,7 +167,7 @@ Tasks are stored as `.bears/{id}-{slug}.md` with YAML frontmatter:
 
 ```markdown
 ---
-id: a1b2
+id: x9k.a1
 title: Implement OAuth flow
 status: open          # proposed | open | in_progress | review | done | blocked | cancelled
 priority: P1          # P0 (critical) through P3
@@ -176,7 +176,6 @@ created: 2026-03-15T10:30:00Z
 updated: 2026-03-15T10:30:00Z
 tags: [backend, auth]
 depends_on: [f4c9, b7e3]
-parent: x9k2
 assignee: alice
 attempts: 2
 ---
@@ -184,13 +183,15 @@ attempts: 2
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
+Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
+
+There is no `parent` field: a task's parent is derived from its ID (`Task::parent()`; `x9k.a1` above is a child of epic `x9k`). Files written before hierarchical IDs carry a `parent:` key. It still parses, into `Task::legacy_parent`, which is never written back and has no effect on the parent; it exists so that legacy stores can be detected and migrated. Any write of such a task drops the key.
 
 ### ID generation
 
 Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks; regenerate if needed.
 
-**Hierarchical IDs (model only, in progress under epic `8ph`).** An ID may encode its parent
+**Hierarchical IDs.** An ID encodes its parent
 chain: `a1b` root, `a1b.c2` child, `a1b.c2.d7` grandchild — segments separated by `.`, each
 lowercase alphanumeric. `task.rs` holds the model as plain `&str` helpers: `validate_id` /
 `is_valid_id`, `id_segments`, `id_depth` (0 for a root), `parent_of`, `root_of`, `leaf_segment`,
@@ -199,8 +200,9 @@ an ID), and `generate_child_id(parent, existing, &Config)`. Child segments start
 `child-id-length` in `.bears.yml` (default 2, range 1–8, written only when not the default) and grow
 by one char for new children once more than 25% (`CHILD_SPACE_FILL_LIMIT`) of the parent's sibling
 space at the current length is used; existing IDs keep their length. `existing` is the collision
-pool (active + archived IDs), and siblings are counted from it. Nothing generates child IDs yet and
-the `parent` frontmatter field is still the source of truth for parents.
+pool (active + archived IDs), and siblings are counted from it. `service::create_task` with a parent
+resolves it (it must exist and be an epic, else `TaskNotFound` / `ParentNotEpic`) and generates the
+new ID with `generate_child_id`; without one it uses `generate_id` with `id-length`.
 
 ### `ready` command
 
@@ -272,7 +274,7 @@ orchestrator releases the claim and the task reappears in `ready` for the next w
 
 ### Epic behavior
 
-Epics group child tasks via the `parent` field (set at create time, or changed later via `update --parent <id|"">` / the `parent` field on `update_task`). `bea epics` / `list_epics` shows epics with progress (done / total non-cancelled children). An epic auto-closes when every child is *resolved* — i.e. `done` **or** `cancelled` (cancelled children are non-blocking and excluded from the total). Auto-close runs on both the `set_status` and `update_task` status paths and cascades up through nested epics. Epics are excluded from `ready` results.
+Epics group child tasks by ID: a task's parent is the epic its ID is under (`Task::parent()`, `Task::is_child_of()`), fixed when the task is created with a parent. Changing it later means renaming the task and its subtree, which is not implemented yet: `update --parent` / `update_task`'s `parent` accept only the current parent (`""` for a root task) and return `Error::ReparentUnsupported` otherwise, before anything is written. Children counts, `epic` filters and auto-close use direct children only. Deleting or pruning an epic leaves its children's IDs, and so their parent, as they are. `bea epics` / `list_epics` shows epics with progress (done / total non-cancelled children). An epic auto-closes when every child is *resolved* — i.e. `done` **or** `cancelled` (cancelled children are non-blocking and excluded from the total). Auto-close runs on both the `set_status` and `update_task` status paths and cascades up through nested epics. Epics are excluded from `ready` results.
 
 ### Cycle detection
 
@@ -346,7 +348,7 @@ Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, 
 | `restore_task` | `id` |
 | `list_archived` | `limit?` |
 
-On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it leaves the parent unchanged. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks. `get_task` resolves active tasks first and **falls back to the archive** when the id isn't active, marking the returned detail with `"archived": true` (read-only — restore before mutating).
+On `update_task`, `parent` must name the current parent (`""` for none); any other value is refused because reparenting is not supported yet. `get_task`'s `parent` is derived from the ID. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks. `get_task` resolves active tasks first and **falls back to the archive** when the id isn't active, marking the returned detail with `"archived": true` (read-only — restore before mutating).
 
 ## Dependencies
 
@@ -385,15 +387,16 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/`; archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
 - Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)
-- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
-- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
+- Unit tests in `task.rs`: parent derived from the ID, no `parent:` key written, legacy `parent:` key read into `legacy_parent` but never written or used as the parent
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade); child creation (hierarchical ID under the resolved parent, nested epics, `child-id-length`, archived-ID avoidance); parent changes refused with `ReparentUnsupported` before any write, unchanged parent accepted; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
+- Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; derived parent and refused reparenting; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and refused `update --parent`; archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
   list/schemas, tool calls, and protocol- vs tool-level error semantics
