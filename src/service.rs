@@ -206,6 +206,77 @@ pub fn list_review(
     queue
 }
 
+/// How long an in-progress task may go without an update before
+/// [`list_stale`] reports it, unless the caller says otherwise: 24 hours.
+pub const DEFAULT_STALE_HOURS: u32 = 24;
+
+/// An in-progress task that has not been updated for a while, from
+/// [`list_stale`].
+#[derive(Debug, Clone)]
+pub struct StaleTask {
+    pub task: Task,
+    /// Time from the task's `updated` to the `now` given to [`list_stale`].
+    pub idle: jiff::SignedDuration,
+}
+
+/// The JSON shape of a [`StaleTask`]: the task's summary, plus when it was
+/// last updated and for how many whole hours it has been idle since.
+#[derive(Debug, Serialize)]
+pub struct StaleSummary {
+    #[serde(flatten)]
+    pub summary: task::TaskSummary,
+    #[serde(with = "task::timestamp")]
+    pub updated: Timestamp,
+    pub idle_hours: i64,
+}
+
+impl StaleTask {
+    /// Whole hours idle, rounded down.
+    pub fn idle_hours(&self) -> i64 {
+        self.idle.as_secs() / 3600
+    }
+
+    /// The summary, `updated` and idle hours, for JSON output.
+    pub fn summary(&self, effective: Option<&Priority>) -> StaleSummary {
+        StaleSummary {
+            summary: self.task.summary(effective),
+            updated: self.task.updated,
+            idle_hours: self.idle_hours(),
+        }
+    }
+}
+
+/// Return the in-progress tasks that have not been updated for at least
+/// `older_than` before `now`, in canonical order.
+///
+/// These are the claims a dead or stuck worker may have left behind; an
+/// orchestrator can look at them and [`release_task`] the ones it gives up
+/// on. This only lists: nothing is released, and there is no heartbeat or
+/// lease, so a live worker on a long task shows up too once it has been
+/// quiet for long enough. `updated` changes on every write to the task, so
+/// any edit (a status change, a new note in the body) restarts the clock.
+/// A task whose `updated` lies after `now` (clock skew) is never stale.
+///
+/// `now` is a parameter so that the result depends on nothing but its
+/// arguments; the frontends pass the current time.
+pub fn list_stale(
+    tasks: &HashMap<String, Task>,
+    now: Timestamp,
+    older_than: jiff::SignedDuration,
+) -> Vec<StaleTask> {
+    let mut stale: Vec<StaleTask> = tasks
+        .values()
+        .filter(|t| t.status == Status::InProgress)
+        .map(|t| StaleTask {
+            task: t.clone(),
+            idle: now.duration_since(t.updated),
+        })
+        .filter(|s| !s.idle.is_negative() && s.idle >= older_than)
+        .collect();
+    stale.sort_by(|a, b| task::canonical_order(&a.task, &b.task));
+    stale
+}
+
 /// Move a task along one edge of the review workflow.
 ///
 /// Each verb accepts exactly one starting status so that a shortcut can never
@@ -4639,6 +4710,87 @@ mod tests {
         assert_eq!(tagged[0].id, "aaa");
 
         assert_eq!(list_review(&tasks, None, Some(1), None).len(), 1);
+    }
+
+    /// A task with `status`, last updated `hours_ago` hours before `now`.
+    fn idle_task(id: &str, status: Status, now: Timestamp, hours_ago: i64) -> Task {
+        let mut t = make_task(id, status);
+        t.updated = now - jiff::SignedDuration::from_hours(hours_ago);
+        t.created = t.updated;
+        t
+    }
+
+    #[test]
+    fn test_list_stale_only_in_progress_past_the_threshold() {
+        let now = task::timestamp::utc(2026, 11, 20, 12, 0, 0);
+        let tasks = task_map(vec![
+            idle_task("old", Status::InProgress, now, 30),
+            idle_task("new", Status::InProgress, now, 2),
+            idle_task("edge", Status::InProgress, now, 24),
+            idle_task("opn", Status::Open, now, 100),
+            idle_task("rev", Status::Review, now, 100),
+            idle_task("blk", Status::Blocked, now, 100),
+            idle_task("dne", Status::Done, now, 100),
+        ]);
+        let day = jiff::SignedDuration::from_hours(24);
+        let stale = list_stale(&tasks, now, day);
+        let mut ids: Vec<&str> = stale.iter().map(|s| s.task.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["edge", "old"], "exactly the threshold counts");
+
+        let old = stale.iter().find(|s| s.task.id == "old").unwrap();
+        assert_eq!(old.idle, jiff::SignedDuration::from_hours(30));
+        assert_eq!(old.idle_hours(), 30);
+
+        // A lower threshold catches the recent one too; zero is every claim.
+        let two = jiff::SignedDuration::from_hours(2);
+        assert_eq!(list_stale(&tasks, now, two).len(), 3);
+        assert_eq!(list_stale(&tasks, now, jiff::SignedDuration::ZERO).len(), 3);
+    }
+
+    #[test]
+    fn test_list_stale_ignores_future_updates_and_rounds_hours_down() {
+        let now = task::timestamp::utc(2026, 11, 20, 12, 0, 0);
+        let mut ahead = make_task("fut", Status::InProgress);
+        ahead.updated = now + jiff::SignedDuration::from_hours(1);
+        let mut partial = make_task("prt", Status::InProgress);
+        partial.updated = now - jiff::SignedDuration::from_mins(25 * 60 + 59);
+        let tasks = task_map(vec![ahead, partial]);
+
+        let stale = list_stale(&tasks, now, jiff::SignedDuration::ZERO);
+        assert_eq!(stale.len(), 1, "an update after `now` is never stale");
+        assert_eq!(stale[0].task.id, "prt");
+        assert_eq!(stale[0].idle_hours(), 25);
+    }
+
+    #[test]
+    fn test_list_stale_canonical_order_and_summary() {
+        let now = task::timestamp::utc(2026, 11, 20, 12, 0, 0);
+        let created = task::timestamp::utc(2026, 11, 1, 0, 0, 0);
+        let mut tasks = Vec::new();
+        for (id, priority) in [
+            ("ccc", Priority::P2),
+            ("aaa", Priority::P2),
+            ("bbb", Priority::P0),
+        ] {
+            let mut t = idle_task(id, Status::InProgress, now, 48);
+            t.created = created;
+            t.priority = priority;
+            t.assignee = "worker-1".into();
+            t.attempts = Some(2);
+            tasks.push(t);
+        }
+        let tasks = task_map(tasks);
+        let stale = list_stale(&tasks, now, jiff::SignedDuration::from_hours(24));
+        let ids: Vec<&str> = stale.iter().map(|s| s.task.id.as_str()).collect();
+        assert_eq!(ids, vec!["bbb", "aaa", "ccc"], "priority, then ID on a tie");
+
+        let json = serde_json::to_value(stale[0].summary(None)).unwrap();
+        assert_eq!(json["id"], "bbb");
+        assert_eq!(json["assignee"], "worker-1");
+        assert_eq!(json["attempts"], 2);
+        assert_eq!(json["updated"], "2026-11-18T12:00:00Z");
+        assert_eq!(json["idle_hours"], 48);
     }
 
     #[tokio::test]
