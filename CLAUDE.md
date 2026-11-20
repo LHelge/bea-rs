@@ -189,7 +189,7 @@ There is no `parent` field: a task's parent is derived from its ID (`Task::paren
 
 ### ID generation
 
-Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks; regenerate if needed.
+Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks and their ancestors; regenerate if needed.
 
 **Hierarchical IDs.** An ID encodes its parent
 chain: `a1b` root, `a1b.c2` child, `a1b.c2.d7` grandchild — segments separated by `.`, each
@@ -202,7 +202,10 @@ by one char for new children once more than 25% (`CHILD_SPACE_FILL_LIMIT`) of th
 space at the current length is used; existing IDs keep their length. `existing` is the collision
 pool (active + archived IDs), and siblings are counted from it. `service::create_task` with a parent
 resolves it (it must exist and be an epic, else `TaskNotFound` / `ParentNotEpic`) and generates the
-new ID with `generate_child_id`; without one it uses `generate_id` with `id-length`.
+new ID with `generate_child_id`; without one it uses `generate_id` with `id-length`. The collision
+pool is `store::reserved_ids(base, &tasks)`: active and archived IDs plus every ancestor of each
+(`task::with_ancestors` / `task::ancestors`). Ancestors count even when their task is gone, so a new
+task can never take the ID of a deleted epic and silently adopt its orphaned children.
 
 ### `ready` command
 
@@ -391,7 +394,7 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)
 - Unit tests in `task.rs`: parent derived from the ID, no `parent:` key written, legacy `parent:` key read into `legacy_parent` but never written or used as the parent
-- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade); child creation (hierarchical ID under the resolved parent, nested epics, `child-id-length`, archived-ID avoidance); parent changes refused with `ReparentUnsupported` before any write, unchanged parent accepted; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
+- Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade); child creation (hierarchical ID under the resolved parent, nested epics, `child-id-length`, archived-ID avoidance, ancestors of orphans reserved at root and child level); parent changes refused with `ReparentUnsupported` before any write, unchanged parent accepted; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; derived parent and refused reparenting; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)
