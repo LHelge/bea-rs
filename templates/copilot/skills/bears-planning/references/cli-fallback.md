@@ -49,6 +49,10 @@ bea list --epic <epic-id> --json
 bea ready --json
 bea ready --epic <epic-id> --limit 5 --json
 
+# Session-start context: ready (top 10, or --limit N), in-progress and review queues
+bea prime --json
+bea prime --limit 3 --json
+
 # List epics with progress
 bea epics --json
 
