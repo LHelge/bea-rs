@@ -159,7 +159,7 @@ Keep these tools aligned with implementation and schemas:
 ## Dependencies
 
 Use and keep dependency scope minimal:
-- `clap`, `clap_complete`, `serde`, `serde-saphyr`, `serde_json`, `chrono`, `rand`, `thiserror`, `tokio`, `rmcp`, `schemars`, `owo-colors`
+- `clap`, `clap_complete`, `serde`, `serde-saphyr`, `serde_json`, `jiff`, `rand`, `thiserror`, `tokio`, `rmcp`, `schemars`, `owo-colors`
 
 Prefer small, compile-fast changes and avoid introducing heavy dependencies without need.
 

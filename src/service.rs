@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::config;
@@ -263,7 +263,7 @@ pub fn reject_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &st
     let mut t = t.clone();
     t.status = Status::Open;
     t.assignee = String::new();
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
     on_status_changed(base, tasks, &t)?;
     Ok(t)
@@ -383,7 +383,7 @@ pub fn update_task(
     if let Some(title) = title {
         t.title = title;
     }
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
 
     // The field changes are saved under the old ID first, then the subtree
     // is renamed, so an interruption leaves either the old or the new state.
@@ -479,7 +479,7 @@ pub fn set_status(
     let previous = t.status;
     t.status = status;
     record_attempt(&mut t, previous);
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
 
     on_status_changed(base, tasks, &t)?;
@@ -506,7 +506,7 @@ pub fn start_task(
     if let Some(a) = assignee {
         t.assignee = a;
     }
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
 
     on_status_changed(base, tasks, &t)?;
@@ -536,7 +536,7 @@ pub fn release_task(
     }
     t.status = Status::Open;
     t.assignee = String::new();
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
 
     on_status_changed(base, tasks, &t)?;
@@ -615,7 +615,7 @@ pub fn claim_task(
     t.status = Status::InProgress;
     record_attempt(&mut t, previous);
     t.assignee = assignee.to_string();
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
     on_status_changed(base, tasks, &t)?;
     Ok(t)
@@ -652,7 +652,7 @@ pub fn assign_task(
         });
     }
     t.assignee = assignee.to_string();
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
     Ok(t)
 }
@@ -828,7 +828,7 @@ fn maybe_close_parent_epic(
     if has_children && all_resolved {
         let mut closed_parent = parent.clone();
         closed_parent.status = Status::Done;
-        closed_parent.updated = Utc::now();
+        closed_parent.updated = Timestamp::now();
         store::save(base, &closed_parent)?;
         overrides.insert(parent_id.to_string(), Status::Done);
 
@@ -860,7 +860,7 @@ pub fn add_dependency(
     let mut t = tasks[&id].clone();
     if !t.depends_on.contains(&depends_on) {
         t.depends_on.push(depends_on);
-        t.updated = Utc::now();
+        t.updated = Timestamp::now();
         store::save(base, &t)?;
     }
 
@@ -878,7 +878,7 @@ pub fn remove_dependency(
     let depends_on = store::resolve_prefix(tasks, dep_or_prefix)?;
     let mut t = tasks[&id].clone();
     t.depends_on.retain(|d| d != &depends_on);
-    t.updated = Utc::now();
+    t.updated = Timestamp::now();
     store::save(base, &t)?;
     Ok(t)
 }
@@ -1075,7 +1075,7 @@ fn scrub_references(
         if t.depends_on.iter().any(|d| deleted.contains(d)) {
             let mut t = t.clone();
             t.depends_on.retain(|d| !deleted.contains(d));
-            t.updated = Utc::now();
+            t.updated = Timestamp::now();
             store::save(base, &t)?;
         }
     }

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,69 @@ impl_str_enum!(
     Priority::P3 => "P3",
 );
 
+/// The text form of a timestamp, on disk and in JSON, and its serde glue
+/// (`#[serde(with = "timestamp")]`).
+///
+/// The form is RFC 3339 in UTC with a `Z` suffix and no, 3, 6 or 9 fractional
+/// digits, whichever is the shortest that loses nothing:
+/// `2026-03-15T10:30:00Z`, `2026-03-15T10:30:00.123456789Z`. It is spelled out
+/// here, not left to the date library's default, because it is what every
+/// version of bears has written: a file must not change when it is rewritten.
+pub mod timestamp {
+    use jiff::Timestamp;
+    use jiff::fmt::temporal::DateTimePrinter;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Format `t` as described on the module.
+    pub fn format(t: &Timestamp) -> String {
+        let nanos = t.subsec_nanosecond();
+        let precision = if nanos == 0 {
+            0
+        } else if nanos % 1_000_000 == 0 {
+            3
+        } else if nanos % 1_000 == 0 {
+            6
+        } else {
+            9
+        };
+        DateTimePrinter::new()
+            .precision(Some(precision))
+            .timestamp_to_string(t)
+    }
+
+    pub fn serialize<S: Serializer>(t: &Timestamp, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format(t))
+    }
+
+    /// Reads any RFC 3339 timestamp, whatever its offset or precision.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Timestamp, D::Error> {
+        let text = String::deserialize(d)?;
+        text.trim()
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format_args!("invalid timestamp `{text}`")))
+    }
+
+    /// The same form for an optional timestamp (serialisation only).
+    pub mod option {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(t: &Option<Timestamp>, s: S) -> Result<S::Ok, S::Error> {
+            match t {
+                Some(t) => s.serialize_some(&super::format(t)),
+                None => s.serialize_none(),
+            }
+        }
+    }
+
+    /// A UTC timestamp from its calendar fields, for tests.
+    #[cfg(test)]
+    pub(crate) fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Timestamp {
+        std::format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+            .parse()
+            .unwrap()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     #[serde(deserialize_with = "lenient_string")]
@@ -130,8 +193,10 @@ pub struct Task {
     pub task_type: TaskType,
     pub status: Status,
     pub priority: Priority,
-    pub created: DateTime<Utc>,
-    pub updated: DateTime<Utc>,
+    #[serde(with = "timestamp")]
+    pub created: Timestamp,
+    #[serde(with = "timestamp")]
+    pub updated: Timestamp,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -201,7 +266,7 @@ fn is_default_task_type(t: &TaskType) -> bool {
 
 impl Task {
     pub fn new(id: String, title: String, priority: Priority) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Task {
             id,
             title,
@@ -307,8 +372,10 @@ pub struct TaskDetail {
     pub depends_on: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    pub created: DateTime<Utc>,
-    pub updated: DateTime<Utc>,
+    #[serde(with = "timestamp")]
+    pub created: Timestamp,
+    #[serde(with = "timestamp")]
+    pub updated: Timestamp,
 }
 
 // ── Shared filtering & sorting helpers ──────────────────────────────
@@ -746,6 +813,69 @@ pub fn render_task(task: &Task) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_timestamp_format_matches_what_bears_always_wrote() {
+        // No fraction, or 3, 6 or 9 digits: the shortest group that is exact.
+        for text in [
+            "2026-03-15T10:30:00Z",
+            "2026-03-15T10:30:00.500Z",
+            "2026-03-17T09:32:08.887318Z",
+            "2026-03-17T09:32:08.887300Z",
+            "2026-03-16T21:49:49.049228511Z",
+            "2026-03-16T21:49:49.049228500Z",
+            "1969-12-31T23:59:59.250Z",
+        ] {
+            let t: Timestamp = text.parse().unwrap();
+            assert_eq!(timestamp::format(&t), text);
+        }
+    }
+
+    #[test]
+    fn test_timestamp_serde() {
+        #[derive(Serialize, Deserialize)]
+        struct T(#[serde(with = "timestamp")] Timestamp);
+
+        let read = |text: &str| serde_json::from_value::<T>(serde_json::json!(text)).map(|t| t.0);
+        let expected: Timestamp = "2026-03-15T10:30:00Z".parse().unwrap();
+        // Any offset, precision or separator reads as the same instant.
+        for text in [
+            "2026-03-15T10:30:00Z",
+            "2026-03-15T10:30:00+00:00",
+            "2026-03-15T12:30:00+02:00",
+            "2026-03-15T10:30:00.000000000Z",
+            "2026-03-15 10:30:00Z",
+            " 2026-03-15T10:30:00Z ",
+        ] {
+            assert_eq!(read(text).unwrap(), expected, "{text}");
+        }
+        // Always written in UTC, in the fixed form.
+        let json = serde_json::to_value(T(read("2026-03-15T12:30:00.5+02:00").unwrap())).unwrap();
+        assert_eq!(json, serde_json::json!("2026-03-15T10:30:00.500Z"));
+
+        for text in [
+            "",
+            "yesterday",
+            "2026-03-15",
+            "2026-03-15T10:30:00",
+            "2026-13-01T00:00:00Z",
+        ] {
+            let err = read(text)
+                .err()
+                .unwrap_or_else(|| panic!("{text:?} was read"));
+            assert!(err.to_string().contains("invalid timestamp"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_timestamps_in_json_keep_their_form() {
+        let mut task = Task::new("ab2".into(), "T".into(), Priority::P2);
+        task.created = "2026-03-15T10:30:00Z".parse().unwrap();
+        task.updated = "2026-03-15T10:30:00.120Z".parse().unwrap();
+        let json = serde_json::to_value(task.detail(None)).unwrap();
+        assert_eq!(json["created"], "2026-03-15T10:30:00Z");
+        assert_eq!(json["updated"], "2026-03-15T10:30:00.120Z");
+    }
 
     #[test]
     fn test_slugify_basic() {
@@ -1381,17 +1511,11 @@ updated: 2026-03-15T10:30:00Z
     #[test]
     fn test_sort_by_priority_owned() {
         let mut t1 = Task::new("a1".into(), "Low".into(), Priority::P3);
-        t1.created = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        t1.created = "2026-01-01T00:00:00Z".parse().unwrap();
         let mut t2 = Task::new("b2".into(), "High".into(), Priority::P0);
-        t2.created = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        t2.created = "2026-01-02T00:00:00Z".parse().unwrap();
         let mut t3 = Task::new("c3".into(), "Also low, older".into(), Priority::P3);
-        t3.created = chrono::DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        t3.created = "2025-06-01T00:00:00Z".parse().unwrap();
 
         let mut tasks = vec![t1, t3, t2];
         sort_by_priority_owned(&mut tasks);
@@ -1774,8 +1898,7 @@ Body.
         assert_eq!(task.tags, vec!["feature", "tui"]);
         assert_eq!(task.depends_on, vec!["zdq"]);
         assert_eq!(
-            task.updated
-                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            timestamp::format(&task.updated),
             "2026-03-17T09:32:08.887318Z"
         );
         let reparsed = parse_task(&render_task(&task)).unwrap();

@@ -52,7 +52,7 @@ macro_rules! w {
 pub fn render(snapshot: &Snapshot) -> String {
     let generated = match snapshot.generated_at {
         // Worded and formatted as in the Markdown header.
-        Some(at) => format!("Generated {}.", at.format("%Y-%m-%d %H:%M UTC")),
+        Some(at) => format!("Generated {}.", at.strftime("%Y-%m-%d %H:%M UTC")),
         None => String::from("A point-in-time picture of the task store."),
     };
 
@@ -512,7 +512,7 @@ fn archive(out: &mut String, tasks: &[SnapshotTask]) {
             "<table>\n<thead><tr><th>Updated</th><th>Task</th><th>Status</th></tr></thead>\n<tbody>\n",
         );
         for t in tasks {
-            w!(out, "<tr><td>{}</td><td>", t.updated.format("%Y-%m-%d"));
+            w!(out, "<tr><td>{}</td><td>", t.updated.strftime("%Y-%m-%d"));
             task_line(out, t);
             tags(out, &t.tags);
             w!(out, "</td><td>{}</td></tr>\n", status_badge(t.status));

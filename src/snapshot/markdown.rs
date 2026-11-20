@@ -113,7 +113,7 @@ pub fn render_with(snapshot: &Snapshot, options: &MarkdownOptions) -> String {
     let mut head = String::new();
     head.push_str("# Bears snapshot\n\n");
     if let Some(at) = s.generated_at {
-        let _ = writeln!(head, "Generated {}.", at.format("%Y-%m-%d %H:%M UTC"));
+        let _ = writeln!(head, "Generated {}.", at.strftime("%Y-%m-%d %H:%M UTC"));
     }
     if s.include_all {
         head.push_str("Includes done and cancelled work.\n");
@@ -360,7 +360,7 @@ impl Col {
                 .map(|d| code(d))
                 .collect::<Vec<_>>()
                 .join(", "),
-            Col::Updated => t.updated.format("%Y-%m-%d").to_string(),
+            Col::Updated => t.updated.strftime("%Y-%m-%d").to_string(),
         }
     }
 }

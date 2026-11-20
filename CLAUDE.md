@@ -214,7 +214,7 @@ attempts: 2
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read; so is `type` when it is `task`.
+Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted in the form of `task::timestamp` (RFC 3339, UTC with `Z`, and no, 3, 6 or 9 fractional digits, whichever is the shortest exact one — what `chrono` wrote, kept so that rewriting a file never changes its timestamps; any offset or precision is read), strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read; so is `type` when it is `task`.
 
 There is no `parent` field: a task's parent is derived from its ID (`Task::parent()`; `x9k.a1` above is a child of epic `x9k`). Files written before hierarchical IDs carry a `parent:` key. It still parses, into `Task::legacy_parent`, which is never written back and has no effect on the parent; it exists so that legacy stores can be detected and migrated. Any write of such a task drops the key — which is why a legacy store is refused outright (next section).
 
@@ -626,7 +626,7 @@ On `update_task`, a `parent` other than the current one (`""` for none) moves th
 - `clap` (derive) — CLI parsing
 - `clap_complete` — shell completion generation
 - `serde`, `serde-saphyr`, `serde_json` — serialization (`serde-saphyr` is pure safe Rust; it replaced `serde_yml`, which is unsound and unmaintained per RUSTSEC-2025-0068)
-- `chrono` — timestamps
+- `jiff` (`std` only, no time-zone database) — timestamps (it replaced `chrono`, unmaintained per RUSTSEC-2026-0543). `chrono` is still in `Cargo.lock`, through `rmcp` (an unconditional dependency, and its `schemars/chrono04` feature), so the advisory stays ignored by id in `.cargo/audit.toml` until `rmcp` drops it; the library built without default features has no `chrono`
 - `rand` — ID generation
 - `thiserror` — error types
 - `tokio` — async runtime used for MCP server, parallel file loading in `store::load_all`
