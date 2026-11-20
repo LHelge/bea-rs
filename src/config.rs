@@ -206,7 +206,7 @@ mod tests {
             ),
             (
                 "id-length: three\n",
-                "expected a whole number of 0 or more at line 1, column 12",
+                "expected a whole number from 0 to 255 at line 1, column 12",
             ),
         ] {
             fs::write(config_path(tmp.path()), content).unwrap();
