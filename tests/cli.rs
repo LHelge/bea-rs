@@ -2577,6 +2577,129 @@ fn test_init_claude_on_already_initialized_dir_is_idempotent() {
     );
 }
 
+/// The bears `SessionStart` handlers of a Claude settings file.
+fn prime_hook_commands(settings: &std::path::Path) -> Vec<String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
+    doc["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+        .filter_map(|h| h["command"].as_str())
+        .filter(|c| c.contains("bea prime"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `bea init --claude` merges the `bea prime` hook into `.claude/settings.json`,
+/// keeping what was there, and a re-run neither duplicates nor changes it.
+#[test]
+fn test_init_claude_merges_session_start_hook() {
+    let tmp = TempDir::new().unwrap();
+    let settings = tmp.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo mine"}]}]}}"#,
+    )
+    .unwrap();
+    let local = tmp.path().join(".claude/settings.local.json");
+    std::fs::write(&local, "{}").unwrap();
+
+    bea(&tmp)
+        .args(["init", "--claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("settings.json"));
+    assert_eq!(
+        prime_hook_commands(&settings),
+        [bears::scaffold::PRIME_HOOK_COMMAND]
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(doc["permissions"]["allow"][0], "Bash(ls)");
+    assert_eq!(doc["hooks"]["SessionStart"][0]["matcher"], "startup");
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "{}");
+
+    let first = std::fs::read_to_string(&settings).unwrap();
+    bea(&tmp)
+        .args(["init", "--claude", "--force"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), first);
+}
+
+/// The scaffolded hook primes a session in an initialized project and is
+/// silent and successful in one without a store.
+#[cfg(unix)]
+#[test]
+fn test_scaffolded_session_hook_command_runs() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).args(["init", "--claude"]).assert().success();
+    bea(&tmp).args(["create", "Hooked task"]).assert().success();
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_bea"));
+    let path = format!(
+        "{}:{}",
+        bin.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let elsewhere = TempDir::new().unwrap();
+    let run = |project: &std::path::Path| {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(bears::scaffold::PRIME_HOOK_COMMAND)
+            .current_dir(elsewhere.path())
+            .env("PATH", &path)
+            .env("CLAUDE_PROJECT_DIR", project)
+            .output()
+            .unwrap()
+    };
+    let out = run(tmp.path());
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Hooked task"));
+
+    let out = run(elsewhere.path());
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+}
+
+/// `bea agent skills --claude` merges the hook, `bea agent instructions
+/// --claude`, `--copilot` and `--codex` do not; an invalid settings file is
+/// left as it was with a warning.
+#[test]
+fn test_agent_session_start_hook_scope() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["agent", "instructions", "--claude"])
+        .assert()
+        .success();
+    bea(&tmp)
+        .args(["init", "--copilot", "--codex"])
+        .assert()
+        .success();
+    assert!(!tmp.path().join(".claude").exists());
+
+    bea(&tmp)
+        .args(["agent", "skills", "--claude"])
+        .assert()
+        .success();
+    let settings = tmp.path().join(".claude/settings.json");
+    assert_eq!(
+        prime_hook_commands(&settings),
+        [bears::scaffold::PRIME_HOOK_COMMAND]
+    );
+
+    std::fs::write(&settings, "{ not json").unwrap();
+    bea(&tmp)
+        .args(["agent", "all", "--claude", "--force"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("warning: leaving"))
+        .stderr(predicate::str::contains("not valid JSON"));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{ not json");
+}
+
 /// Re-running `bea init --claude` non-interactively (no TTY) preserves an edited
 /// instruction file instead of clobbering it — and does not block on stdin.
 #[test]

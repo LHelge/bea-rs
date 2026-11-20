@@ -175,14 +175,14 @@ cargo build                               # binary with all frontends
 
 | Flag | Files scaffolded | MCP registration |
 |------|-----------------|-----------------|
-| `--claude` | `CLAUDE.md`, `.claude/skills/bears-planning/SKILL.md`, `.claude/skills/bears-planning/references/cli-fallback.md`, `.claude/agents/planner.md` | `.mcp.json` (merged, preserves existing servers) |
+| `--claude` | `CLAUDE.md`, `.claude/skills/bears-planning/SKILL.md`, `.claude/skills/bears-planning/references/cli-fallback.md`, `.claude/agents/planner.md` | `.mcp.json` (merged, preserves existing servers); also the `bea prime` `SessionStart` hook merged into `.claude/settings.json` |
 | `--copilot` | `.github/copilot-instructions.md`, `.github/skills/bears-planning/SKILL.md`, `.github/skills/bears-planning/references/cli-fallback.md`, `.github/agents/planner.agent.md` | `.github/mcp.json` (merged) |
 | `--codex` | `AGENTS.md` | none (Codex discovers servers another way) |
 
 `bea init` also accepts `--force` to overwrite existing files without prompting.
 
 **Overwrite guard.** If any target file already exists, `bea init` asks once —
-*"This directory already contains agent instructions and/or skills. Overwrite them? (y/N)"* — defaulting to **No**. On No, existing files are left untouched but any missing files are still created and `.mcp.json` still merges. When stdin is not a terminal (CI, pipes), it never prompts and behaves as No (skip existing). `--force` overwrites unconditionally. The `.mcp.json` merge always runs regardless (it's safe — only the `bears` key is touched).
+*"This directory already contains agent instructions and/or skills. Overwrite them? (y/N)"* — defaulting to **No**. On No, existing files are left untouched but any missing files are still created and `.mcp.json` still merges. When stdin is not a terminal (CI, pipes), it never prompts and behaves as No (skip existing). `--force` overwrites unconditionally. The `.mcp.json` merge and the `.claude/settings.json` hook merge always run regardless (they're safe — only the bears entry is touched).
 
 ### `bea agent <category>` — fine-grained scaffolding
 
@@ -191,7 +191,7 @@ cargo build                               # binary with all frontends
 | Category | Files |
 |----------|-------|
 | `instructions` | the top-level instruction file only (`CLAUDE.md` / `AGENTS.md` / `copilot-instructions.md`) |
-| `skills` | skill + references + planner-agent files, plus the `.mcp.json` merge |
+| `skills` | skill + references + planner-agent files, plus the `.mcp.json` merge (and, for `--claude`, the `.claude/settings.json` hook merge) |
 | `all` | everything (same as `bea init`'s scaffolding) |
 
 - `--force` overwrites existing files without prompting.
@@ -202,6 +202,22 @@ Key invariants:
 - Scaffolding is **idempotent**: re-running with `--force` (or via the back-compat `scaffold()` wrapper) re-writes the same files with the same content; the default path preserves existing files.
 - MCP merge **preserves unrelated servers**: only the `bears` key is inserted/replaced; all other entries in the server map are left intact.
 - Generated `.mcp.json` / `.github/mcp.json` always uses `{ "command": "bea", "args": ["mcp"] }` — never `cargo run`.
+- **Session-start hook** (`--claude` only, with the MCP merge: `init`, `agent skills|all`; not
+  `instructions`; Copilot and Codex get none). `scaffold::merge_session_hook(path) -> HookMerge
+  { Written | Unchanged | Skipped(reason) }` merges into `.claude/settings.json`
+  (`Harness::session_hook`) one `SessionStart` group without a matcher (every session start) holding
+  `{ "type": "command", "command": PRIME_HOOK_COMMAND }`. `scaffold::PRIME_HOOK_COMMAND` is
+  `cd "${CLAUDE_PROJECT_DIR:-.}" && { test ! -d .bears || bea prime; }`: Claude Code runs hooks in the
+  session's *current* directory and sets `CLAUDE_PROJECT_DIR` to the project root, and a project without
+  a store is no error. It is independent of the overwrite guard, `--force` and `--append`. Every
+  handler whose command contains `bea prime` is the bears hook (current or older form): all are
+  removed, groups emptied by that dropped, and the current group put where the first one was, so an
+  old form is replaced, never duplicated, and a re-run writes nothing (`Unchanged`). Every other key,
+  event and entry is kept (keys re-serialised in `serde_json` order, as the `.mcp.json` merge does). A
+  file that is not valid JSON, not an object, or whose `hooks` / `hooks.SessionStart` is not an
+  object / array is left untouched with a `warning:` on stderr and not reported as written.
+  `.claude/settings.local.json` is never touched. The README and `templates/claude/CLAUDE.md` show
+  the same command (pinned by a test).
 - Template files live in `templates/` under the crate root and are embedded via `include_str!` in `scaffold.rs`. They must be present in the source tree for `cargo package` to include them.
 
 ### Storage format
@@ -441,9 +457,10 @@ the three sections with one ID width across them (in progress with assignee, or 
 colourless when stdout is not a terminal; `--json` prints the `PrimeSummary` (no reminder). There is
 deliberately no MCP tool (an MCP client has `list_ready` / `list_all_tasks` / `list_review`). On a
 directory without `.bears/` it fails with `NotInitialized` like every other command; the documented
-Claude Code `SessionStart` hook is written `test ! -d .bears || bea prime`, so a project without a
-store is no error. `bea init --claude` does not scaffold the hook (`.claude/settings.json` is not
-merged); it is documented in the README and the Claude instructions template.
+Claude Code `SessionStart` hook (`scaffold::PRIME_HOOK_COMMAND`) tests for `.bears/` first, so a
+project without a store is no error. `bea init --claude` / `bea agent skills|all --claude` merge it
+into `.claude/settings.json` (see the harness-flag invariants); the README and the Claude
+instructions template show it.
 
 ### Epic behavior
 
@@ -822,9 +839,9 @@ Keep the dependency tree small. Compilation should be fast.
   completions)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; `plan_epic` with a nested epic (one step, `type` and `progress`, its tasks not steps); delete/prune of an epic (`renamed` map, `{ pruned, renamed }`, the same object with empty members when nothing moved or nothing was pruned); derived parent and reparenting (`renamed` map, detach, refusal under its own subtree); archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, `ready` breaking exact ties by ID, DAG dep-tree bounding, bounded adjacency (its `epic` filter spanning the subtree), the `ready` epic filter over nested epics, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
-- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, the planning skill and CLI fallback say the `epic` filter reaches nested epics, and none mentions a `parent:` key or a CLI spelling that does not exist
+- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh); `SessionStart` hook merge (fresh, other settings/hooks/entries preserved, idempotent with nothing rewritten, old form and duplicates replaced in place, invalid JSON and wrong shapes left byte for byte, `skills`/`all` under every policy but not `instructions`, not for Copilot/Codex, `settings.local.json` untouched, README and template showing the command) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, the planning skill and CLI fallback say the `epic` filter reaches nested epics, and none mentions a `parent:` key or a CLI spelling that does not exist
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, task-list titles aligned across ID lengths, subtask tree expanding nested epics once, the renames modal (deleting an epic lists every detached child's old and new ID, nothing shown when nothing moved, scrolling bounded so every row is reachable, closed only by Esc/Enter/q), watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; an unparsable frontmatter's load warning and `bea doctor` finding carrying the reworded message; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map equal to the dry run's, two copies migrated identically, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths; exact priority/creation ties in `ready`/`list`/`search` (and a `--limit` cut) ordered by ID; `list`/`ready`/`review --epic` over a nested epic, by prefix, unknown or non-epic values refused, and an archived-only epic with two active children; `bea show --plan` with a nested epic (one step with its progress line and `--json` `progress`, its tasks not listed); `bea snapshot` (Markdown by default and `--format md`, HTML, `--all` adding done and archived work which the default leaves out, `-o` writing what stdout prints and printing nothing, an existing file overwritten, a missing directory refused, a path inside `.bears/` refused however it is spelled (relative, absolute, `..`, a symlinked directory; unix-only for symlinks) while names that only mention `.bears` are written, no temporary file left after success or a failed rename, concurrent writes to one target leaving one whole snapshot, permissions kept and a symlink target replaced (unix), an unknown format and `--json` refused, not initialized and legacy store failing with their hints and no file written, a hostile title escaped in both formats, the command in shell completions); tests that compare two snapshot runs drop the "Generated" line, the only time-dependent one
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; an unparsable frontmatter's load warning and `bea doctor` finding carrying the reworded message; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map equal to the dry run's, two copies migrated identically, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard; the `SessionStart` hook merged by `init`/`agent skills --claude` and not by `instructions`/Copilot/Codex, other settings and `settings.local.json` kept, an invalid file left with a warning, and the scaffolded command run from another directory priming the project and silent without a store); list output aligned across dotted-ID lengths; exact priority/creation ties in `ready`/`list`/`search` (and a `--limit` cut) ordered by ID; `list`/`ready`/`review --epic` over a nested epic, by prefix, unknown or non-epic values refused, and an archived-only epic with two active children; `bea show --plan` with a nested epic (one step with its progress line and `--json` `progress`, its tasks not listed); `bea snapshot` (Markdown by default and `--format md`, HTML, `--all` adding done and archived work which the default leaves out, `-o` writing what stdout prints and printing nothing, an existing file overwritten, a missing directory refused, a path inside `.bears/` refused however it is spelled (relative, absolute, `..`, a symlinked directory; unix-only for symlinks) while names that only mention `.bears` are written, no temporary file left after success or a failed rename, concurrent writes to one target leaving one whole snapshot, permissions kept and a symlink target replaced (unix), an unknown format and `--json` refused, not initialized and legacy store failing with their hints and no file written, a hostile title escaped in both formats, the command in shell completions); tests that compare two snapshot runs drop the "Generated" line, the only time-dependent one
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
   list/schemas, tool calls, the `epic` parameter of `list_ready`/`list_all_tasks`/`list_review`/
