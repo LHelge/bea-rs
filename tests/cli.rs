@@ -3388,3 +3388,243 @@ fn test_list_aligns_dotted_ids() {
         );
     }
 }
+
+// -- `bea snapshot` ------------------------------------------------------------
+
+/// A store with an open task depending on a done one, and an archived task.
+/// Returns (open title, done title, archived title).
+fn snapshot_store(dir: &TempDir) -> (&'static str, &'static str, &'static str) {
+    bea(dir).arg("init").assert().success();
+    let done = create_task(dir, "Finished groundwork");
+    let open = create_task(dir, "Open follow-up");
+    bea(dir)
+        .args(["dep", "add", &open, &done])
+        .assert()
+        .success();
+    bea(dir).args(["done", &done]).assert().success();
+    let old = create_task(dir, "Long archived chore");
+    bea(dir).args(["done", &old]).assert().success();
+    bea(dir).args(["archive", &old]).assert().success();
+    (
+        "Open follow-up",
+        "Finished groundwork",
+        "Long archived chore",
+    )
+}
+
+fn stdout_of(cmd: &mut Command) -> String {
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// The output without its "Generated …" line, the only part that depends on
+/// the time, so that two runs can be compared.
+fn without_time(s: &str) -> String {
+    s.lines()
+        .filter(|l| !l.contains("Generated "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn test_snapshot_markdown_is_the_default_format() {
+    let tmp = TempDir::new().unwrap();
+    let (open, done, archived) = snapshot_store(&tmp);
+
+    let md = stdout_of(bea(&tmp).arg("snapshot"));
+    assert!(md.starts_with("# Bears snapshot\n"), "{md}");
+    assert!(md.contains("Generated "), "the CLI stamps the time: {md}");
+    assert!(md.contains(open));
+    assert!(md.contains("```mermaid"));
+    // Settled detail is counted, not listed.
+    assert!(!md.contains(done), "{md}");
+    assert!(!md.contains(archived), "{md}");
+
+    let explicit = stdout_of(bea(&tmp).args(["snapshot", "--format", "md"]));
+    assert_eq!(without_time(&explicit), without_time(&md));
+}
+
+#[test]
+fn test_snapshot_html() {
+    let tmp = TempDir::new().unwrap();
+    let (open, done, archived) = snapshot_store(&tmp);
+
+    let html = stdout_of(bea(&tmp).args(["snapshot", "--format", "html"]));
+    assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
+    assert!(html.trim_end().ends_with("</html>"));
+    assert!(html.contains("Generated "));
+    assert!(html.contains(open));
+    assert!(html.contains("<svg"));
+    assert!(!html.contains("<script"), "the page is script-free");
+    assert!(!html.contains(done));
+    assert!(!html.contains(archived));
+}
+
+#[test]
+fn test_snapshot_all_includes_settled_and_archived_work() {
+    let tmp = TempDir::new().unwrap();
+    let (open, done, archived) = snapshot_store(&tmp);
+
+    for format in ["md", "html"] {
+        let out = stdout_of(bea(&tmp).args(["snapshot", "--all", "--format", format]));
+        assert!(out.contains(open), "{format}: {out}");
+        assert!(out.contains(done), "{format}: done task missing: {out}");
+        assert!(
+            out.contains(archived),
+            "{format}: archive log missing: {out}"
+        );
+    }
+}
+
+#[test]
+fn test_snapshot_output_file_matches_stdout() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+
+    for format in ["md", "html"] {
+        let file = tmp.path().join(format!("snapshot.{format}"));
+        // An existing file is overwritten: the snapshot is a generated artifact.
+        std::fs::write(&file, "stale").unwrap();
+        bea(&tmp)
+            .args(["snapshot", "--format", format, "-o"])
+            .arg(&file)
+            .assert()
+            .success()
+            .stdout("");
+        let written = std::fs::read_to_string(&file).unwrap();
+        let printed = stdout_of(bea(&tmp).args(["snapshot", "--format", format]));
+        assert_eq!(without_time(&written), without_time(&printed), "{format}");
+        assert!(written.ends_with('\n'), "{format}");
+    }
+
+    // The long flag and a relative path work too.
+    bea(&tmp)
+        .args(["snapshot", "--output", "relative.md"])
+        .assert()
+        .success()
+        .stdout("");
+    assert!(
+        std::fs::read_to_string(tmp.path().join("relative.md"))
+            .unwrap()
+            .starts_with("# Bears snapshot")
+    );
+}
+
+#[test]
+fn test_snapshot_missing_output_directory_is_an_error() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    bea(&tmp)
+        .args(["snapshot", "-o", "no/such/dir/snapshot.md"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no/such/dir/snapshot.md"));
+    assert!(!tmp.path().join("no").exists(), "directory was created");
+}
+
+#[test]
+fn test_snapshot_rejects_an_unknown_format() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    bea(&tmp)
+        .args(["snapshot", "--format", "pdf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value 'pdf'"))
+        .stderr(predicate::str::contains("html"))
+        .stderr(predicate::str::contains("md"));
+}
+
+#[test]
+fn test_snapshot_has_no_json_output() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    bea(&tmp)
+        .args(["--json", "snapshot", "-o", "out.md"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("no JSON output"));
+    assert!(!tmp.path().join("out.md").exists());
+}
+
+#[test]
+fn test_snapshot_not_initialized() {
+    let tmp = TempDir::new().unwrap();
+    for format in ["md", "html"] {
+        bea(&tmp)
+            .args(["snapshot", "--format", format, "-o", "out"])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicate::str::contains("not initialized"))
+            .stderr(predicate::str::contains("hint: run `bea init`"));
+        assert!(!tmp.path().join("out").exists(), "{format}: file written");
+    }
+}
+
+#[test]
+fn test_snapshot_refuses_a_legacy_store() {
+    let tmp = TempDir::new().unwrap();
+    legacy_cli_store(&tmp);
+    let before = bears_snapshot(&tmp);
+    for format in ["md", "html"] {
+        bea(&tmp)
+            .args(["snapshot", "--all", "--format", format, "-o", "out"])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicate::str::contains("predates hierarchical IDs"))
+            .stderr(predicate::str::contains("hint: run `bea migrate`"));
+        assert!(!tmp.path().join("out").exists(), "{format}: file written");
+    }
+    assert_eq!(bears_snapshot(&tmp), before, "a refused snapshot wrote");
+}
+
+#[test]
+fn test_snapshot_escapes_a_hostile_title() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let hostile = "<script>alert(1)</script> | @octocat `x` \"q\" 'a'";
+    create_task(&tmp, hostile);
+
+    let html = stdout_of(bea(&tmp).args(["snapshot", "--format", "html"]));
+    assert!(!html.contains("<script"), "{html}");
+    assert!(
+        html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{html}"
+    );
+    assert!(!html.contains("\"q\""), "quotes escaped: {html}");
+
+    let md = stdout_of(bea(&tmp).args(["snapshot", "--format", "md"]));
+    assert!(!md.contains("<script"), "{md}");
+    assert!(md.contains("&lt;script&gt;"), "{md}");
+    assert!(!md.contains(" | @"), "pipe escaped: {md}");
+    // Outside the Mermaid fence (where GitHub makes no mentions), `@` is
+    // followed by a word joiner, so the title mentions no one.
+    let mut in_fence = false;
+    for line in md.lines() {
+        if line.starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            assert!(!line.contains("@octocat"), "mention in {line:?}");
+        }
+    }
+    assert!(md.contains("@\u{2060}octocat"), "{md}");
+}
+
+#[test]
+fn test_snapshot_in_completions() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("snapshot"))
+        .stdout(predicate::str::contains("--format"));
+}

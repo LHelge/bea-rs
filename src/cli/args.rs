@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -332,6 +334,22 @@ pub enum Command {
         fix: bool,
     },
 
+    /// Render the store as a static snapshot for CI: Markdown (job summaries,
+    /// PR comments) or a self-contained HTML page. Has no JSON output
+    Snapshot {
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SnapshotFormat::Md)]
+        format: SnapshotFormat,
+
+        /// Write to this file (overwritten if it exists) instead of stdout
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Include done and cancelled tasks and the recent archive log
+        #[arg(long, short = 'a')]
+        all: bool,
+    },
+
     /// Open a task in $EDITOR for editing
     Edit {
         /// Task ID
@@ -393,4 +411,13 @@ impl From<AgentCategory> for bears::scaffold::Category {
             AgentCategory::All => bears::scaffold::Category::All,
         }
     }
+}
+
+/// The output format of `bea snapshot`.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SnapshotFormat {
+    /// A self-contained HTML page with an SVG dependency graph
+    Html,
+    /// GitHub-flavored Markdown with a Mermaid dependency graph
+    Md,
 }

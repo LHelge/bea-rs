@@ -1,7 +1,7 @@
 mod args;
 mod cmd;
 
-pub use args::{AgentCategory, Args, Command, DepCommand};
+pub use args::{AgentCategory, Args, Command, DepCommand, SnapshotFormat};
 
 use std::path::Path;
 
@@ -67,6 +67,12 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::Migrate { dry_run } => return cmd::cmd_migrate(base, *dry_run, cli.json),
         // Reads task files itself, so it can see what the loaders skip.
         Command::Doctor { fix } => return cmd::cmd_doctor(base, *fix, cli.json),
+        // Loads active tasks and archive itself, through `bears::snapshot::load`.
+        Command::Snapshot {
+            format,
+            output,
+            all,
+        } => return cmd::cmd_snapshot(base, *format, output.as_deref(), *all, cli.json).await,
         Command::Mcp | Command::Tui => unreachable!("handled in main"),
         _ => {}
     }
@@ -214,6 +220,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         | Command::Restore { .. }
         | Command::Migrate { .. }
         | Command::Doctor { .. }
+        | Command::Snapshot { .. }
         | Command::Log { .. }
         | Command::List { archived: true, .. }
         | Command::Mcp

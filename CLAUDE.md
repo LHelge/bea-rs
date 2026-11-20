@@ -67,7 +67,7 @@ src/
   cli/
     mod.rs         # CLI module root and dispatch
     args.rs        # clap command and argument definitions
-    cmd.rs         # Command handlers (list, show, create, edit, graph, etc.)
+    cmd.rs         # Command handlers (list, show, create, edit, graph, snapshot, etc.)
   mcp/
     mod.rs         # MCP module root and server setup
     params.rs      # Tool parameter structs (serde + JSON Schema)
@@ -130,7 +130,8 @@ cargo build                               # binary with all frontends
 
 - `store.rs`, `service.rs`, and `graph.rs` are the core library. CLI, MCP, and TUI are thin frontends.
 - Re-parse the entire `.bears/` directory from scratch on every invocation — no caching, no daemon.
-- `--json` flag on all CLI commands outputs JSON instead of human text.
+- `--json` flag on all CLI commands outputs JSON instead of human text (except `bea snapshot`, whose
+  output is a rendered artifact; it refuses `--json` with `InvalidUsage`).
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
 - Frontends never assume an ID's length: dotted IDs (`a1b.c2.d7`) vary, so CLI list output (`list`,
   `ready`, `review`, `epics`, `search`, `list --archived`, `log`) and the TUI task list pad each ID
@@ -471,6 +472,20 @@ pure and deterministic (no store, no clock; the time shown is `generated_at`) an
   content is escaped with `snapshot::html::escape` (`& < > " '`), in text, attributes and inside the
   SVG.
 
+### `bea snapshot` CLI
+
+`bea snapshot [--format html|md] [-o/--output FILE] [-a/--all]` (`cmd_snapshot` in `cli/cmd.rs`,
+`SnapshotFormat` in `cli/args.rs`) is a thin frontend over `bears::snapshot`: it calls
+`snapshot::load` with `include_all = --all`, the default `archive_limit` and `generated_at =
+Utc::now()` (the only non-deterministic part of the output), then `markdown::render` (`md`, the
+default) or `html::render`. Output goes to stdout with `print!`, byte for byte what `-o` writes, so
+`bea snapshot > f` and `bea snapshot -o f` give the same file; with `-o` nothing is printed. The
+file is overwritten if it exists, and a missing directory is an `Io` error naming the path (never
+created). The store is loaded before anything is written, so `NotInitialized` / `LegacyStore` fail
+with the usual hints and leave no file. There is deliberately no `--json` (the global flag is
+refused with `InvalidUsage`), no size or archive-limit flag, no MCP tool and no TUI view. It is
+dispatched before the shared `load_all`, since `snapshot::load` reads active tasks and archive itself.
+
 ### Cycle detection
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
@@ -672,7 +687,7 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency (its `epic` filter spanning the subtree), the `ready` epic filter over nested epics, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, the planning skill and CLI fallback say the `epic` filter reaches nested epics, and none mentions a `parent:` key or a CLI spelling that does not exist
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, task-list titles aligned across ID lengths, subtask tree expanding nested epics once, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map equal to the dry run's, two copies migrated identically, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths; `list`/`ready`/`review --epic` over a nested epic, by prefix, unknown or non-epic values refused, and an archived-only epic with two active children
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`, also when nothing moved or nothing was pruned); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map equal to the dry run's, two copies migrated identically, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths; `list`/`ready`/`review --epic` over a nested epic, by prefix, unknown or non-epic values refused, and an archived-only epic with two active children; `bea snapshot` (Markdown by default and `--format md`, HTML, `--all` adding done and archived work which the default leaves out, `-o` writing what stdout prints and printing nothing, an existing file overwritten, a missing directory refused, an unknown format and `--json` refused, not initialized and legacy store failing with their hints and no file written, a hostile title escaped in both formats, the command in shell completions); tests that compare two snapshot runs drop the "Generated" line, the only time-dependent one
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
   list/schemas, tool calls, the `epic` parameter of `list_ready`/`list_all_tasks`/`list_review`/

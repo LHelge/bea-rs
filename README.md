@@ -394,6 +394,34 @@ command that fixes them. With `--json`, `ok` says whether problems remain and `n
 a fix left tasks attached to a kept copy for you to check; such a fix still gives `"ok": true` and
 exit status 0.
 
+### `bea snapshot`
+Render the whole store as a static artifact for CI — a picture of where the work stands, to attach
+to a build or post on a pull request. It shows the counts per status and priority, epic progress,
+the ready, in-progress and review queues, a status board and the dependency graph.
+
+```sh
+bea snapshot                                   # Markdown to stdout
+bea snapshot --format md -o snapshot.md        # Markdown to a file
+bea snapshot --format html -o snapshot.html    # one self-contained HTML page
+bea snapshot --all --format html -o all.html   # with done/cancelled work and the archive log
+```
+
+- `--format md` (the default) is GitHub-flavored Markdown with a Mermaid dependency graph, for a CI
+  job summary or a pull-request comment. It stays under 60 000 bytes, within a PR comment's limit;
+  on a large store it shortens its lists and graph and says so.
+- `--format html` is one page with inline CSS and an SVG dependency graph — no scripts, fonts or
+  external resources — to keep as a build artifact or open in a browser. It follows the light/dark
+  setting of the browser.
+- `--all` / `-a` adds settled work: done and cancelled tasks on the board and in the graph, done and
+  cancelled epics, and the ten most recently archived tasks. Without it settled work is only counted.
+- `-o FILE` / `--output FILE` writes the file instead of stdout (an existing file is overwritten; the
+  directory must exist) and prints nothing.
+
+Task titles and other text from the store are escaped in both formats, so a title cannot inject
+markup, scripts or `@`-mentions. The header says when the snapshot was taken; otherwise the same
+store always gives the same output. `bea snapshot` has no `--json` output: the other commands'
+`--json` already covers the data.
+
 ### `bea edit`
 Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$VISUAL`, then `vi`. After the editor exits, the file is re-parsed and validated.
 
@@ -437,7 +465,8 @@ A full-screen terminal UI for browsing and managing tasks, with **live refresh**
 
 ## JSON output
 
-Every command accepts `--json` for machine-readable output:
+Every command except `bea snapshot` (which renders Markdown or HTML) accepts `--json` for
+machine-readable output:
 
 ```sh
 bea --json list
