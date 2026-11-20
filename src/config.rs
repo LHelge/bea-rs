@@ -194,6 +194,26 @@ mod tests {
         assert!(load(tmp.path()).is_err());
     }
 
+    /// `.bears.yml` errors are worded like frontmatter errors: what is wrong
+    /// and where, without advice to the YAML library's caller.
+    #[test]
+    fn test_load_yaml_errors_are_worded_for_the_file() {
+        let tmp = TempDir::new().unwrap();
+        for (content, expected) in [
+            (
+                "id-length: 3\nid-length: 4\n",
+                "duplicate key `id-length` at line 2, column 1",
+            ),
+            (
+                "id-length: three\n",
+                "expected a whole number of 0 or more at line 1, column 12",
+            ),
+        ] {
+            fs::write(config_path(tmp.path()), content).unwrap();
+            assert_eq!(load(tmp.path()).unwrap_err().to_string(), expected);
+        }
+    }
+
     #[test]
     fn test_missing_id_length_uses_default() {
         let tmp = TempDir::new().unwrap();

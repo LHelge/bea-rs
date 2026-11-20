@@ -3228,6 +3228,36 @@ fn test_doctor_healthy_store_succeeds() {
     assert_eq!(v["needs_review"], false, "{v}");
 }
 
+/// A hand-edited frontmatter that does not parse is reported, by the load
+/// warning and by `bea doctor` alike, as what is wrong in the file and where,
+/// on one line, without the YAML library's advice to its Rust caller.
+#[test]
+fn test_unparsable_frontmatter_is_reported_for_the_file() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    std::fs::write(
+        tmp.path().join(".bears/ab2-broken.md"),
+        "---\nid: ab2\ntitle: Broken\nstatus: open\npriority: P2\n\
+         created: \"2026-03-15T10:30:00Z\"\nupdated: \"2026-03-15T10:30:00Z\"\n\
+         assignee: ~\n---\n",
+    )
+    .unwrap();
+    let message = "expected a value, found null at line 7, column 11";
+
+    let out = bea(&tmp).arg("list").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        format!("warning: skipping ./.bears/ab2-broken.md: {message}\n")
+    );
+
+    let (code, v) = doctor_json(&tmp, &["doctor"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(v["findings"][0]["kind"], "unreadable-file", "{v}");
+    assert_eq!(v["findings"][0]["reason"], message, "{v}");
+}
+
 /// A duplicate ID (as a git merge of two branches leaves it) fails the
 /// check; `--fix` renumbers the copy, keeps the references on the original,
 /// and the store passes afterwards.

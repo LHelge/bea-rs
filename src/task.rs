@@ -159,7 +159,11 @@ pub mod timestamp {
         let text = String::deserialize(d)?;
         text.trim()
             .parse()
-            .map_err(|_| serde::de::Error::custom(format_args!("invalid timestamp `{text}`")))
+            .map_err(|_| {
+                serde::de::Error::custom(format_args!(
+                    "invalid timestamp `{text}`, expected a date and time such as `2026-03-15T10:30:00Z`"
+                ))
+            })
     }
 
     /// The same form for an optional timestamp (serialisation only).
@@ -1399,6 +1403,138 @@ updated: 2026-03-15T10:30:00Z
     fn test_parse_missing_delimiter() {
         let content = "id: broken\ntitle: No delimiters\n";
         assert!(parse_task(content).is_err());
+    }
+
+    /// The whole message of a frontmatter that fails to parse: a valid
+    /// frontmatter without the field that `lines` starts with, and `lines`
+    /// appended. Positions count from the first line after `---`, so `lines`
+    /// start at line 6 (replacing a required field) or 7 (an optional one).
+    fn frontmatter_error(lines: &str) -> String {
+        let key = format!("{}:", lines.split(':').next().unwrap());
+        let yaml: Vec<&str> = [
+            "id: ab2",
+            "title: Fix the login page",
+            "status: open",
+            "priority: P2",
+            "created: \"2026-03-15T10:30:00Z\"",
+            "updated: \"2026-03-15T10:30:00Z\"",
+        ]
+        .into_iter()
+        .filter(|line| !line.starts_with(&key))
+        .collect();
+        let content = format!("---\n{}\n{lines}\n---\n", yaml.join("\n"));
+        let err = parse_task(&content).expect_err(&content);
+        assert!(matches!(err, Error::Yaml(_)), "{err:?}");
+        err.to_string()
+    }
+
+    /// Frontmatter errors say what is wrong in the file and where, on one
+    /// line, with no advice aimed at the YAML library's caller. The messages
+    /// are pinned whole, so a library upgrade that rewords one fails here.
+    #[test]
+    fn test_frontmatter_errors_are_worded_for_the_file() {
+        let cases = [
+            // Null into a string field.
+            (
+                "assignee: ~",
+                "expected a value, found null at line 7, column 11",
+            ),
+            (
+                "title: ~",
+                "expected a value, found null at line 6, column 8",
+            ),
+            // A key given twice.
+            (
+                "tags: [a]\ntags: [b]",
+                "duplicate key `tags` at line 8, column 1",
+            ),
+            // A single value where a list belongs, and the reverse.
+            ("tags: backend", "expected a list at line 7, column 7"),
+            ("depends_on: abc", "expected a list at line 7, column 13"),
+            (
+                "tags:\n  - [a, b]",
+                "expected a single value, not a list or mapping at line 8, column 5",
+            ),
+            (
+                "assignee: [alice]",
+                "expected a single value, not a list or mapping at line 7, column 11",
+            ),
+            // Unknown status, priority and type values.
+            (
+                "status: started",
+                "unknown value `started`, expected one of proposed, open, in_progress, \
+                 review, done, blocked, cancelled at line 6, column 9",
+            ),
+            (
+                "priority: P9",
+                "unknown value `P9`, expected one of P0, P1, P2, P3 at line 6, column 11",
+            ),
+            (
+                "type: story",
+                "unknown value `story`, expected one of task, epic at line 7, column 7",
+            ),
+            // A number field that is not a number.
+            (
+                "attempts: lots",
+                "expected a whole number of 0 or more at line 7, column 11",
+            ),
+            (
+                "attempts: -1",
+                "expected a whole number of 0 or more at line 7, column 11",
+            ),
+            // A bad or empty timestamp.
+            (
+                "created: yesterday",
+                "invalid timestamp `yesterday`, expected a date and time such as \
+                 `2026-03-15T10:30:00Z` at line 6, column 10",
+            ),
+            (
+                "updated: 2026-03-15",
+                "invalid timestamp `2026-03-15`, expected a date and time such as \
+                 `2026-03-15T10:30:00Z` at line 6, column 10",
+            ),
+            (
+                "created: ~",
+                "expected a value, found null at line 6, column 10",
+            ),
+            // Broken YAML itself: the parser's own wording, with the position.
+            ("tags: [a", "unclosed bracket '[' at line 7, column 7"),
+        ];
+        for (lines, expected) in cases {
+            assert_eq!(frontmatter_error(lines), expected, "{lines}");
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_error_missing_field() {
+        let content = "---\nid: ab2\nstatus: open\npriority: P2\n\
+                       created: \"2026-03-15T10:30:00Z\"\nupdated: \"2026-03-15T10:30:00Z\"\n---\n";
+        assert_eq!(
+            parse_task(content).unwrap_err().to_string(),
+            "missing field `title` at line 5, column 1"
+        );
+    }
+
+    #[test]
+    fn test_frontmatter_errors_carry_no_library_advice() {
+        for lines in [
+            "assignee: ~",
+            "tags: []\ntags: []",
+            "attempts: lots",
+            "tags: x",
+        ] {
+            let message = frontmatter_error(lines);
+            for advice in [
+                "Option<",
+                "DuplicateKeyPolicy",
+                "Options",
+                "u32",
+                "; use",
+                "\n",
+            ] {
+                assert!(!message.contains(advice), "{message:?} contains {advice:?}");
+            }
+        }
     }
 
     #[test]
