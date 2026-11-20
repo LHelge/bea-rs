@@ -1402,10 +1402,10 @@ mod tests {
         assert!(matches!(err, Error::FenceViolation { .. }));
     }
 
-    // Deleting an epic leaves its children orphaned (their parent is part of
-    // their ID). That is a known interim state until reparenting exists, and
-    // is tracked as its own task; this test only pins the dependency scrub
-    // and that the orphan's ID stays reserved.
+    // Deleting an epic still leaves its children orphaned (their parent is
+    // part of their ID); detaching them to fresh root IDs on delete is its own
+    // task. This test only pins the dependency scrub and that the orphan's ID
+    // stays reserved.
     #[tokio::test]
     async fn test_delete_scrubs_dangling_references() {
         let tmp = tempfile::TempDir::new().unwrap();
