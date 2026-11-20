@@ -190,7 +190,7 @@ Key invariants:
 
 ### Storage format
 
-Tasks are stored as `.bears/{id}-{slug}.md` with YAML frontmatter:
+Tasks are stored as `.bears/{id}-{slug}.md` with YAML frontmatter. The slug is the title lowercased with every non-ASCII-alphanumeric run turned into one dash, cut to `task::MAX_SLUG_LEN` (100) bytes so a long title cannot exceed the 255-byte filename limit; a file is found by its ID, never its slug, so one written with a longer slug still loads and is renamed by its next write:
 
 ```markdown
 ---

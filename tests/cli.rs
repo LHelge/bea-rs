@@ -3628,3 +3628,62 @@ fn test_snapshot_in_completions() {
         .stdout(predicate::str::contains("snapshot"))
         .stdout(predicate::str::contains("--format"));
 }
+
+/// A title longer than a filename may be (255 bytes) is stored under a capped
+/// slug, and a file written with a longer slug is still found by its ID.
+#[test]
+fn test_long_titles_get_a_capped_slug() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    for title in ["long title ".repeat(30), "blåbärssylt överallt ".repeat(20)] {
+        let title = title.trim().to_string();
+        let output = bea(&tmp)
+            .args(["--json", "create", &title])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let id = json["id"].as_str().unwrap();
+
+        let name = std::fs::read_dir(tmp.path().join(".bears"))
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .find(|n| n.starts_with(&format!("{id}-")))
+            .unwrap();
+        assert!(name.len() <= id.len() + 1 + 100 + 3, "{name}");
+
+        // The whole title is kept in the file, whatever the slug.
+        bea(&tmp)
+            .args(["show", id])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(&title));
+    }
+
+    // A file from before the cap, with a slug longer than it, is found by ID
+    // and renamed to the capped slug by the next write.
+    let old = format!("zz9-{}.md", "a".repeat(180));
+    std::fs::write(
+        tmp.path().join(".bears").join(&old),
+        format!(
+            "---\nid: zz9\ntitle: {}\nstatus: open\npriority: P2\ncreated: \"2026-01-01T00:00:00Z\"\nupdated: \"2026-01-01T00:00:00Z\"\n---\n",
+            "a".repeat(180)
+        ),
+    )
+    .unwrap();
+    bea(&tmp).args(["show", "zz9"]).assert().success();
+    bea(&tmp).args(["start", "zz9"]).assert().success();
+    assert!(!tmp.path().join(".bears").join(&old).exists());
+    assert!(
+        tmp.path()
+            .join(".bears")
+            .join(format!("zz9-{}.md", "a".repeat(100)))
+            .exists()
+    );
+    bea(&tmp).args(["doctor"]).assert().success();
+}
