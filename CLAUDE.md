@@ -83,6 +83,8 @@ src/
   snapshot/        # `bea snapshot` data model: deterministic, serialisable store picture
     mod.rs         # Snapshot, SnapshotOptions, build/load, layered dependency graph
     tests.rs       # Unit tests for the data model
+    markdown.rs    # GitHub-flavored Markdown renderer with a Mermaid dependency graph
+    markdown/tests.rs  # Unit tests for the Markdown renderer
   store.rs         # Core: parse .bears/ dir, read/write task files, archive layer
   task.rs          # Task struct, frontmatter serde, enums, ID generation
   graph.rs         # Dependency graph: build, ready, effective priority, cycle detection, dep tree
@@ -406,6 +408,31 @@ renderers (`snapshot/markdown.rs`, `snapshot/html.rs`) consume a `Snapshot` and 
   dependency cycles (`Graph::cycles`) are condensed into one layer and marked `cyclic`. Each layer is
   ordered by the mean position of its dependencies, then epic, priority, creation date, ID.
 
+**Markdown renderer.** `snapshot::markdown::render(&Snapshot) -> String` (and `render_with(&Snapshot,
+&MarkdownOptions)`) is pure and deterministic, for GitHub job summaries and PR comments: summary
+tables, epics with progress (nesting indented), the ready / in-progress / review queues, the board as
+one `<details>` per non-empty column, a ```` ```mermaid ```` `flowchart LR` of `graph`, and the archive
+log only with `include_all`.
+
+- **Mermaid IDs are generated**, never task IDs (which contain dots): node `n{i}` is `graph.nodes[i]`,
+  subgraph `e{i}` is `epics[i]`, so an epic that is also a node gets two distinct IDs and a node keeps
+  its ID in every diagram. Each node sits in the subgraph of `SnapshotTask::epic`, subgraphs nest by
+  `EpicEntry::parent` and only those holding a node are drawn; epic nodes use the `[[…]]` shape,
+  statuses are `classDef`s (`in_progress` etc., only those used), cyclic edges are red (`linkStyle`).
+- **Bounded graph.** `MarkdownOptions { max_graph_nodes, max_graph_edges, max_graph_chars }`, defaults
+  `DEFAULT_MAX_GRAPH_NODES` = 100, `DEFAULT_MAX_GRAPH_EDGES` = 200 (Mermaid's own cap is 500) and
+  `DEFAULT_MAX_GRAPH_CHARS` = 30 000 bytes of Mermaid text for the whole document (Mermaid refuses
+  50 000 per diagram, a PR comment holds 65 536). A graph over the bounds is drawn per top-level epic
+  plus "Not in an epic", with a note counting the dependencies between parts that are not drawn; a
+  part still over the node/edge bounds or the remaining text budget becomes a note with its size.
+  Node titles are cut to `MAX_LABEL_CHARS` (40) with `…`; tables keep whole titles.
+- **Untrusted text.** Titles, tags, assignees and IDs go to one line (control characters and line
+  breaks become spaces). In Markdown, backslash, backtick and `* _ [ ] ~ | $ # !` are backslash-escaped, `< > &` become
+  entities and `@` is followed by a word joiner so it cannot mention anyone; well-formed IDs are code
+  spans, malformed ones are escaped as text. In Mermaid labels every ASCII character other than
+  letters, digits, space and `.,-_:/'!?+=*@$^~` becomes an entity code (`#35;`), so no quote, bracket,
+  `;`, `%%`, backtick or fence can end a label or add a statement.
+
 ### Cycle detection
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
@@ -573,6 +600,13 @@ Keep the dependency tree small. Compilation should be fast.
   position, settled/missing dependencies left out, cycles in one layer, epics as nodes only in an edge,
   effective priority, the archive log, the JSON shape, `load` (incl. not initialized), and a snapshot of
   this repository's own store, taken on a copy and skipped when `.bears/` is absent (packaged crate)
+- Unit tests in `snapshot/markdown/tests.rs`: every section (empty store, `generated_at`, counts,
+  epics with progress and nesting, queues, effective priority, board columns and the archive only with
+  `include_all`), determinism over map order, nested subgraphs with generated IDs, an epic node distinct
+  from its subgraph, status classes, cycles, hostile titles/tags/assignees/IDs that cannot break a table
+  row, start a mention or code block, or end a Mermaid label or add a statement, label truncation, and
+  the bounds (one diagram within them, per-epic parts over them with node IDs kept, a part over the
+  bounds and an exhausted text budget as notes, the defaults within GitHub's limits)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
