@@ -577,9 +577,13 @@ with the usual hints and leave no file.
   `create_new` (so concurrent runs to one target never share it), synced, then renamed over the
   target; it is removed if writing or renaming fails, and nothing else is left in the directory. An
   existing regular file's permissions are carried over (not its owner); an existing symlink at the
-  target is replaced by the file, never written through. There is deliberately no `--json` (the global flag is
-refused with `InvalidUsage`), no size or archive-limit flag, no MCP tool and no TUI view. It is
-dispatched before the shared `load_all`, since `snapshot::load` reads active tasks and archive itself.
+  target is replaced by the file, never written through. A read-only existing target is replaced
+  too, since a rename needs write access to the directory only (the old in-place write failed with
+  permission denied).
+
+There is deliberately no `--json` (the global flag is refused with `InvalidUsage`), no size or
+archive-limit flag, no MCP tool and no TUI view. It is dispatched before the shared `load_all`, since
+`snapshot::load` reads active tasks and archive itself.
 
 ### Cycle detection
 
