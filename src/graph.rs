@@ -223,6 +223,93 @@ impl Graph {
         false
     }
 
+    /// The dependency cycles in the graph: every strongly connected component
+    /// with more than one task, plus every task that depends on itself.
+    ///
+    /// Each cycle lists its task IDs sorted, and the cycles are sorted by
+    /// their first ID. Edges to IDs that are not in the graph are ignored.
+    /// Runs Tarjan's algorithm iteratively in O(V+E), so a long dependency
+    /// chain cannot overflow the stack.
+    pub fn cycles(&self) -> Vec<Vec<String>> {
+        let mut nodes: Vec<&str> = self.edges.keys().map(String::as_str).collect();
+        nodes.sort_unstable();
+        let index_of: HashMap<&str, usize> =
+            nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let succ: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|n| {
+                let mut s: Vec<usize> = self.edges[*n]
+                    .iter()
+                    .filter_map(|d| index_of.get(d.as_str()).copied())
+                    .collect();
+                s.sort_unstable();
+                s
+            })
+            .collect();
+
+        const UNVISITED: usize = usize::MAX;
+        let n = nodes.len();
+        let mut index = vec![UNVISITED; n];
+        let mut low = vec![0; n];
+        let mut on_stack = vec![false; n];
+        let mut stack = Vec::new();
+        let mut next_index = 0;
+        let mut cycles = Vec::new();
+
+        for root in 0..n {
+            if index[root] != UNVISITED {
+                continue;
+            }
+            // (node, position of the next successor to look at)
+            let mut work = vec![(root, 0usize)];
+            index[root] = next_index;
+            low[root] = next_index;
+            next_index += 1;
+            stack.push(root);
+            on_stack[root] = true;
+
+            while let Some(top) = work.last_mut() {
+                let v = top.0;
+                if let Some(&w) = succ[v].get(top.1) {
+                    top.1 += 1;
+                    if index[w] == UNVISITED {
+                        index[w] = next_index;
+                        low[w] = next_index;
+                        next_index += 1;
+                        stack.push(w);
+                        on_stack[w] = true;
+                        work.push((w, 0));
+                    } else if on_stack[w] {
+                        low[v] = low[v].min(index[w]);
+                    }
+                    continue;
+                }
+                work.pop();
+                if let Some(&(parent, _)) = work.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut component = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        component.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if component.len() > 1 || succ[v].contains(&v) {
+                        let mut ids: Vec<String> =
+                            component.iter().map(|&i| nodes[i].to_string()).collect();
+                        ids.sort();
+                        cycles.push(ids);
+                    }
+                }
+            }
+        }
+        cycles.sort();
+        cycles
+    }
+
     /// Build a dependency tree for display.
     ///
     /// Uses two sets to bound rendering:
@@ -802,6 +889,52 @@ mod tests {
         ]);
         let graph = Graph::build(&tasks);
         assert!(!graph.would_cycle("a", "b"));
+    }
+
+    #[test]
+    fn test_cycles_finds_each_component_once() {
+        // a -> b -> c -> a is one cycle, d -> d another; e depends on the
+        // first cycle and f is a dangling edge, neither is part of a cycle.
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b"]),
+            make_task("b", Status::Open, Priority::P1, vec!["c"]),
+            make_task("c", Status::Open, Priority::P1, vec!["a"]),
+            make_task("d", Status::Open, Priority::P1, vec!["d"]),
+            make_task("e", Status::Open, Priority::P1, vec!["a", "gone"]),
+        ]);
+        let graph = Graph::build(&tasks);
+        assert_eq!(
+            graph.cycles(),
+            vec![vec!["a", "b", "c"], vec!["d"]],
+            "the dependent and the dangling edge are not cycles"
+        );
+    }
+
+    #[test]
+    fn test_cycles_empty_for_a_dag() {
+        let tasks = make_tasks(vec![
+            make_task("a", Status::Open, Priority::P1, vec!["b", "c"]),
+            make_task("b", Status::Open, Priority::P1, vec!["c"]),
+            make_task("c", Status::Open, Priority::P1, vec![]),
+        ]);
+        assert!(Graph::build(&tasks).cycles().is_empty());
+    }
+
+    #[test]
+    fn test_cycles_survives_a_long_chain() {
+        // Deep enough to overflow a recursive search on a small stack.
+        let n = 50_000;
+        let tasks = make_tasks(
+            (0..n)
+                .map(|i| {
+                    let dep = format!("t{}", (i + 1) % n);
+                    make_task(&format!("t{i}"), Status::Open, Priority::P1, vec![&dep])
+                })
+                .collect(),
+        );
+        let cycles = Graph::build(&tasks).cycles();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0].len(), n);
     }
 
     #[test]

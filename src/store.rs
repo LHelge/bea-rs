@@ -866,6 +866,79 @@ pub fn delete(base: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// One task file as [`scan_task_files`] found it.
+#[derive(Debug)]
+pub struct TaskFile {
+    /// Path of the file: `.bears/…` or `.bears/archive/…` under the base.
+    pub path: PathBuf,
+    /// Whether the file is in the archive.
+    pub archived: bool,
+    /// The parsed task, or why the file could not be read or parsed.
+    pub task: std::result::Result<Task, String>,
+}
+
+/// Every task file in `.bears/` and `.bears/archive/`, active files first,
+/// each directory sorted by path.
+///
+/// Unlike [`load_all`] this keeps every file: duplicates of an ID, files
+/// that cannot be read or parsed (with the reason, and no warning printed)
+/// and files with a legacy `parent:` key. It is the file-level view a store
+/// check needs.
+pub fn scan_task_files(base: &Path) -> Result<Vec<TaskFile>> {
+    if !tasks_dir(base).exists() {
+        return Err(Error::NotInitialized);
+    }
+    let mut files = Vec::new();
+    for (dir, archived) in [(tasks_dir(base), false), (archive_dir(base), true)] {
+        if !dir.exists() {
+            continue;
+        }
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        for path in paths {
+            let task = fs::read_to_string(&path)
+                .map_err(Error::from)
+                .and_then(|c| task::parse_task(&c))
+                .map_err(|e| match e {
+                    Error::InvalidFrontmatter { reason, .. } => reason,
+                    other => other.to_string(),
+                });
+            files.push(TaskFile {
+                path,
+                archived,
+                task,
+            });
+        }
+    }
+    Ok(files)
+}
+
+/// Write `t` under its own filename (`{id}-{slug}.md`) in the directory of
+/// the file at `path`, then remove `path` if that is a different file.
+/// Returns the path written.
+///
+/// This addresses a file by path rather than a task by ID, so it can repair
+/// one of two files that carry the same ID, or a file whose name does not
+/// match its ID. Refuses with [`Error::IdTaken`] when another file already
+/// sits at the new path, rather than overwrite it.
+pub fn rewrite_task_file(path: &Path, t: &Task) -> Result<PathBuf> {
+    let new_path = path.with_file_name(task::filename(t));
+    if new_path != path && new_path.exists() {
+        return Err(Error::IdTaken(t.id.clone()));
+    }
+    write_task_file(&new_path, t)?;
+    if new_path != path {
+        fs::remove_file(path)?;
+    }
+    Ok(new_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
