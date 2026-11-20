@@ -631,7 +631,16 @@ pub fn id_from_filename(name: &str) -> Option<&str> {
     stem.split('-').next().filter(|id| !id.is_empty())
 }
 
-/// Convert a title to a URL-friendly slug.
+/// The longest slug [`slugify`] returns, in bytes.
+///
+/// A filename is limited to 255 bytes on the common filesystems; this leaves
+/// ample room for the ID, the separator and `.md` in `{id}-{slug}.md`.
+pub const MAX_SLUG_LEN: usize = 100;
+
+/// Convert a title to a URL-friendly slug of at most [`MAX_SLUG_LEN`] bytes.
+///
+/// The slug is ASCII (every other character becomes a dash), so a long title
+/// is cut on a character boundary; a dash left at the cut is trimmed.
 pub fn slugify(title: &str) -> String {
     let slug: String = title
         .to_lowercase()
@@ -653,6 +662,8 @@ pub fn slugify(title: &str) -> String {
             prev_dash = false;
         }
     }
+    // ASCII only, so any byte offset is a character boundary.
+    result.truncate(MAX_SLUG_LEN);
     // Trim trailing dash
     if result.ends_with('-') {
         result.pop();
@@ -749,6 +760,42 @@ mod tests {
     #[test]
     fn test_slugify_leading_trailing() {
         assert_eq!(slugify("  hello world  "), "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_caps_long_titles() {
+        let slug = slugify(&"word ".repeat(60));
+        assert!(slug.len() <= MAX_SLUG_LEN, "{} bytes", slug.len());
+        assert!(slug.starts_with("word-word-"));
+        assert!(!slug.ends_with('-'));
+        // A cut that lands on a dash leaves no trailing dash.
+        let slug = slugify(&format!("{} tail", "a".repeat(MAX_SLUG_LEN - 1)));
+        assert_eq!(slug, "a".repeat(MAX_SLUG_LEN - 1));
+        // A title at the limit is kept whole.
+        assert_eq!(slugify(&"a".repeat(MAX_SLUG_LEN)), "a".repeat(MAX_SLUG_LEN));
+    }
+
+    #[test]
+    fn test_slugify_multibyte_titles() {
+        // 300 three-byte characters: no panic on a boundary, nothing but ASCII.
+        assert_eq!(slugify(&"日".repeat(300)), "");
+        let slug = slugify(&"blåbärssylt överallt ".repeat(20));
+        assert!(slug.len() <= MAX_SLUG_LEN);
+        assert!(slug.is_ascii());
+        assert!(slug.starts_with("bl-b-rssylt-verallt-bl"));
+        assert!(!slug.ends_with('-'));
+    }
+
+    #[test]
+    fn test_filename_stays_under_the_filesystem_limit() {
+        let mut task = Task::new(
+            "a1b2c3d4.e5f6g7h8.i9j0k1l2".into(),
+            "x".repeat(300),
+            Priority::P2,
+        );
+        assert!(filename(&task).len() < 255);
+        task.title = "é".repeat(300);
+        assert_eq!(filename(&task), "a1b2c3d4.e5f6g7h8.i9j0k1l2-.md");
     }
 
     #[test]
