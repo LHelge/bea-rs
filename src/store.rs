@@ -783,8 +783,12 @@ impl Planner<'_> {
 }
 
 /// Resolve a task ID or unique prefix to a full task ID.
-/// Returns the exact match if found, or the unique prefix match.
-/// Errors if zero or multiple tasks match.
+///
+/// An exact match always wins. Otherwise every ID starting with `prefix`
+/// matches, and when all of them are one task and its descendants, that
+/// shallowest task is the answer: `8p` resolves to the epic `8ph` even though
+/// `8ph.c2` matches too, and `8ph.c` resolves to `8ph.c2` over `8ph.c2.d7`.
+/// Errors if nothing matches, or if the matches are genuinely different tasks.
 pub fn resolve_prefix(tasks: &HashMap<String, Task>, prefix: &str) -> Result<String> {
     // Exact match first
     if tasks.contains_key(prefix) {
@@ -793,18 +797,23 @@ pub fn resolve_prefix(tasks: &HashMap<String, Task>, prefix: &str) -> Result<Str
 
     let matches: Vec<&String> = tasks.keys().filter(|id| id.starts_with(prefix)).collect();
 
-    match matches.len() {
-        0 => Err(Error::TaskNotFound(prefix.into())),
-        1 => Ok(matches[0].clone()),
-        _ => {
-            let mut sorted = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-            sorted.sort();
-            Err(Error::AmbiguousPrefix {
-                prefix: prefix.into(),
-                matches: sorted.join(", "),
-            })
-        }
+    // The shortest match is the only candidate for an ancestor of the rest.
+    let Some(&top) = matches.iter().min_by_key(|id| id.len()) else {
+        return Err(Error::TaskNotFound(prefix.into()));
+    };
+    if matches
+        .iter()
+        .all(|&id| id == top || task::is_descendant(id, top))
+    {
+        return Ok(top.clone());
     }
+
+    let mut sorted = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    sorted.sort();
+    Err(Error::AmbiguousPrefix {
+        prefix: prefix.into(),
+        matches: sorted.join(", "),
+    })
 }
 
 /// Delete a task file by ID.
@@ -1220,6 +1229,65 @@ mod tests {
         }
         assert_eq!(resolve_prefix(&tasks, "a1b").unwrap(), "a1b");
         assert_eq!(resolve_prefix(&tasks, "a1b.c").unwrap(), "a1b.c2");
+    }
+
+    fn task_map(ids: &[&str]) -> HashMap<String, Task> {
+        ids.iter()
+            .map(|&id| {
+                (
+                    id.to_string(),
+                    Task::new(id.into(), id.into(), Priority::P2),
+                )
+            })
+            .collect()
+    }
+
+    /// A short prefix of an epic matches its children too; they are the same
+    /// subtree, so it resolves to the epic.
+    #[test]
+    fn test_resolve_prefix_of_parent_ignores_its_descendants() {
+        let tasks = task_map(&["e1x", "e1x.ab", "e1x.ab.cd", "e1x.ef"]);
+        assert_eq!(resolve_prefix(&tasks, "e1").unwrap(), "e1x");
+        assert_eq!(resolve_prefix(&tasks, "e").unwrap(), "e1x");
+    }
+
+    /// A prefix ending inside a child segment resolves to that child when the
+    /// other matches are its own descendants.
+    #[test]
+    fn test_resolve_prefix_inside_child_segment() {
+        let tasks = task_map(&["e1x", "e1x.ab", "e1x.ab.cd", "e1x.ef"]);
+        assert_eq!(resolve_prefix(&tasks, "e1x.a").unwrap(), "e1x.ab");
+        assert_eq!(resolve_prefix(&tasks, "e1x.ab.c").unwrap(), "e1x.ab.cd");
+    }
+
+    /// Different tasks are still ambiguous, whether siblings, unrelated roots
+    /// whose subtrees both match, or the children of a missing parent.
+    #[test]
+    fn test_resolve_prefix_distinct_subtrees_stay_ambiguous() {
+        let tasks = task_map(&["e1x", "e1x.ab", "e1x.ac", "e1y", "e1y.ab"]);
+        for prefix in ["e1", "e1x.a", "e1x."] {
+            let err = resolve_prefix(&tasks, prefix).unwrap_err();
+            assert!(
+                matches!(err, Error::AmbiguousPrefix { .. }),
+                "{prefix}: {err:?}"
+            );
+        }
+
+        // `e1xa` starts with `e1x` but is not its descendant.
+        let tasks = task_map(&["e1x", "e1xa"]);
+        assert!(matches!(
+            resolve_prefix(&tasks, "e1").unwrap_err(),
+            Error::AmbiguousPrefix { .. }
+        ));
+
+        // Orphans of a deleted parent are separate tasks.
+        let tasks = task_map(&["e1x.ab", "e1x.cd"]);
+        assert!(matches!(
+            resolve_prefix(&tasks, "e1").unwrap_err(),
+            Error::AmbiguousPrefix { .. }
+        ));
+        let tasks = task_map(&["e1x.ab", "e1x.ab.cd"]);
+        assert_eq!(resolve_prefix(&tasks, "e1").unwrap(), "e1x.ab");
     }
 
     #[test]
