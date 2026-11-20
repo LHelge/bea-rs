@@ -36,6 +36,13 @@ impl StatefulWidget for TaskListWidget<'_> {
     type State = ListState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut ListState) {
+        // Dotted IDs vary in length; pad each to the longest so titles line up.
+        let id_width = self
+            .tasks
+            .iter()
+            .map(|t| t.id.chars().count())
+            .max()
+            .unwrap_or(0);
         let items: Vec<ListItem> = self
             .tasks
             .iter()
@@ -56,7 +63,7 @@ impl StatefulWidget for TaskListWidget<'_> {
                     ),
                     Span::styled(format!("{indicator} "), Style::default().fg(st_color)),
                     Span::styled(
-                        format!("[{}] ", task.id),
+                        format!("{:<w$} ", format!("[{}]", task.id), w = id_width + 2),
                         Style::default().fg(self.theme.id_color),
                     ),
                     Span::raw(format!("{type_prefix}{}", task.title)),
@@ -156,5 +163,29 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("◆"));
         assert!(text.contains("My Epic"));
+    }
+
+    #[test]
+    fn titles_line_up_across_id_lengths() {
+        let tasks = vec![
+            Task::new("a1b".into(), "Root".into(), Priority::P1),
+            Task::new("a1b.c2.d7".into(), "Grandchild".into(), Priority::P1),
+        ];
+        let filter = Filter::default();
+        let theme = Theme::default();
+        let widget = TaskListWidget::new(&tasks, &filter, Style::default(), &theme);
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let mut state = ListState::default();
+        StatefulWidget::render(widget, area, &mut buf, &mut state);
+
+        let row = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
+        let (first, second) = (row(1), row(2));
+        assert_eq!(
+            first.find("Root"),
+            second.find("Grandchild"),
+            "titles should start in the same column:\n{first}\n{second}"
+        );
     }
 }
