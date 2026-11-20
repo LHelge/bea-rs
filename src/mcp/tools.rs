@@ -1,6 +1,6 @@
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use bears::error::Error;
@@ -528,8 +528,8 @@ impl BeaMcp {
 
 #[tool_handler]
 impl ServerHandler for BeaMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("bears", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "bears is a file-based task tracker. Use tools to manage tasks and dependencies. \
