@@ -3829,6 +3829,189 @@ fn test_snapshot_missing_output_directory_is_an_error() {
     assert!(!tmp.path().join("no").exists(), "directory was created");
 }
 
+/// Names of the entries directly in `dir`, sorted.
+fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Run `bea snapshot -o <output>` and assert it is refused as a path inside
+/// the store, with nothing written there.
+fn assert_snapshot_output_refused(tmp: &TempDir, output: &std::path::Path) {
+    let before = bears_snapshot(tmp);
+    bea(tmp)
+        .args(["snapshot", "-o"])
+        .arg(output)
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(output.display().to_string()))
+        .stderr(predicate::str::contains("inside the .bears/ store"));
+    assert_eq!(bears_snapshot(tmp), before, "{}: wrote", output.display());
+}
+
+#[test]
+fn test_snapshot_refuses_an_output_path_inside_the_store() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    for output in [
+        ".bears/snap.md",
+        "./.bears/archive/x.md",
+        "sub/../.bears/snap.md",
+        ".bears",
+        ".bears/archive",
+    ] {
+        assert_snapshot_output_refused(&tmp, std::path::Path::new(output));
+    }
+    assert_snapshot_output_refused(&tmp, &tmp.path().join(".bears").join("snap.md"));
+    // The store still loads cleanly.
+    bea(&tmp).arg("doctor").assert().success();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_refuses_a_symlinked_directory_into_the_store() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    std::os::unix::fs::symlink(tmp.path().join(".bears"), tmp.path().join("store")).unwrap();
+    std::os::unix::fs::symlink(".bears/archive", tmp.path().join("arch")).unwrap();
+    assert_snapshot_output_refused(&tmp, std::path::Path::new("store/snap.md"));
+    assert_snapshot_output_refused(&tmp, std::path::Path::new("arch/snap.md"));
+    bea(&tmp).arg("doctor").assert().success();
+}
+
+#[test]
+fn test_snapshot_accepts_paths_that_only_mention_bears() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    std::fs::create_dir_all(tmp.path().join("out/.bears")).unwrap();
+    std::fs::create_dir(tmp.path().join(".bears-site")).unwrap();
+    for output in [
+        "out/.bears-report.md",
+        ".bears-report.md",
+        ".bears-site/index.md",
+        // A directory called `.bears` that is not this store's.
+        "out/.bears/snap.md",
+    ] {
+        bea(&tmp)
+            .args(["snapshot", "-o", output])
+            .assert()
+            .success()
+            .stdout("");
+        assert!(
+            std::fs::read_to_string(tmp.path().join(output))
+                .unwrap()
+                .starts_with("# Bears snapshot"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn test_snapshot_output_leaves_no_temporary_file() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    std::fs::create_dir(tmp.path().join("out")).unwrap();
+    let out = tmp.path().join("out");
+    std::fs::write(out.join("snap.md"), "stale").unwrap();
+    bea(&tmp)
+        .args(["snapshot", "-o", "out/snap.md"])
+        .assert()
+        .success();
+    assert_eq!(dir_entries(&out), ["snap.md"]);
+
+    // A failed write (the target is a non-empty directory, so the rename
+    // fails) names the path and removes its temporary file.
+    std::fs::create_dir(out.join("dir.md")).unwrap();
+    std::fs::write(out.join("dir.md").join("keep"), "x").unwrap();
+    bea(&tmp)
+        .args(["snapshot", "-o", "out/dir.md"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot write out/dir.md"));
+    assert_eq!(dir_entries(&out), ["dir.md", "snap.md"]);
+    assert_eq!(dir_entries(&out.join("dir.md")), ["keep"]);
+}
+
+#[test]
+fn test_snapshot_concurrent_writes_to_one_target() {
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+    let children: Vec<_> = (0..8)
+        .map(|i| {
+            let format = if i % 2 == 0 { "md" } else { "html" };
+            std::process::Command::new(assert_cmd::cargo::cargo_bin("bea"))
+                .current_dir(tmp.path())
+                .args(["snapshot", "--format", format, "-o", "shared.out"])
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    // One whole snapshot wins; no temporary file is left behind.
+    let written = std::fs::read_to_string(tmp.path().join("shared.out")).unwrap();
+    assert!(
+        written.starts_with("# Bears snapshot")
+            || (written.starts_with("<!DOCTYPE html>") && written.trim_end().ends_with("</html>")),
+        "{written}"
+    );
+    assert!(
+        !dir_entries(tmp.path()).iter().any(|n| n.ends_with(".tmp")),
+        "{:?}",
+        dir_entries(tmp.path())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_output_keeps_permissions_and_replaces_a_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    snapshot_store(&tmp);
+
+    let file = tmp.path().join("snap.md");
+    std::fs::write(&file, "stale").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    bea(&tmp)
+        .args(["snapshot", "-o", "snap.md"])
+        .assert()
+        .success();
+    let meta = std::fs::metadata(&file).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .starts_with("# Bears")
+    );
+
+    // A symlink at the target is replaced by the snapshot, not written
+    // through: what it pointed at is left alone.
+    std::fs::write(tmp.path().join("real.md"), "untouched").unwrap();
+    std::os::unix::fs::symlink("real.md", tmp.path().join("link.md")).unwrap();
+    bea(&tmp)
+        .args(["snapshot", "-o", "link.md"])
+        .assert()
+        .success();
+    let link = tmp.path().join("link.md");
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_file());
+    assert!(
+        std::fs::read_to_string(&link)
+            .unwrap()
+            .starts_with("# Bears")
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("real.md")).unwrap(),
+        "untouched"
+    );
+}
+
 #[test]
 fn test_snapshot_rejects_an_unknown_format() {
     let tmp = TempDir::new().unwrap();

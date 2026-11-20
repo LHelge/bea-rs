@@ -457,7 +457,9 @@ bea snapshot --all --format html -o all.html   # with done/cancelled work and th
 - `--all` / `-a` adds settled work: done and cancelled tasks on the board and in the graph, done and
   cancelled epics, and the ten most recently archived tasks. Without it settled work is only counted.
 - `-o FILE` / `--output FILE` writes the file instead of stdout (an existing file is overwritten; the
-  directory must exist) and prints nothing.
+  directory must exist) and prints nothing. The file is written to a temporary file beside it and
+  renamed into place, so an interrupted run never leaves a truncated snapshot. A path inside
+  `.bears/` is refused, since every command would then try to read the snapshot as a task file.
 
 Task titles and other text from the store are escaped in both formats, so a title cannot inject
 markup, scripts or `@`-mentions. The header says when the snapshot was taken; otherwise the same
