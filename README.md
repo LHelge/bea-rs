@@ -284,6 +284,33 @@ lease: `updated` changes on every write to a task, so a worker that edits its ta
 body, a status change) restarts the clock, and a live worker on a long task appears once it has been
 quiet for long enough.
 
+### `bea prime`
+Prints a compact picture of the work, meant to be fed into a coding agent's context when a session
+starts: the first ready tasks (and how many more there are), the tasks in progress with their
+assignee and attempt count, the review queue, and a short reminder of the workflow verbs.
+
+```sh
+bea prime             # up to 10 ready tasks
+bea prime --limit 3   # fewer
+bea prime --json      # { "ready", "ready_total", "in_progress", "review" } as task summaries
+```
+
+The text has no colour when stdout is not a terminal. Like every other command it fails with
+"not initialized" where there is no `.bears/`. To run it from a Claude Code `SessionStart` hook, add
+this to `.claude/settings.json` and write the command so that a project without a store is no error:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] }
+    ]
+  }
+}
+```
+
+The hook's output is added to the agent's context. `bea init --claude` does not write this file.
+
 ### `bea review` / `bea reject`
 Review is the step between "I finished it" and "it's done":
 

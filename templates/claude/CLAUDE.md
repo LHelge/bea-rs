@@ -16,6 +16,13 @@ Bears is registered as an MCP server — use the MCP tools to manage tasks.
 - `create_task` — create new tasks or epics
 - `get_graph` — visualize the dependency graph
 
+`bea prime` prints the ready, in-progress and review queues with a reminder of these verbs, for a
+session-start hook. To have it in every session, add to `.claude/settings.json`:
+
+```json
+{ "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] }] } }
+```
+
 Tasks carry an `attempts` count that increments each time work is started on them. A high count means
 previous workers failed — try a different approach or escalate instead of repeating theirs.
 
