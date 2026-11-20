@@ -47,6 +47,11 @@ cargo install --path .
 
 The binary is named `bea`.
 
+> **Upgrading to 0.10?** Task IDs are now hierarchical and the `parent:` frontmatter key is gone.
+> `bea` refuses to load a store written by an earlier version until you run `bea migrate` once
+> (`bea migrate --dry-run` previews the renames). Commit or back up `.bears/` first. See
+> [Task IDs](#task-ids) and [`bea migrate`](#bea-migrate).
+
 ---
 
 ## Quick start
@@ -71,16 +76,17 @@ Each task is stored as `.bears/{id}-{slug}.md`:
 
 ```markdown
 ---
-id: a1b2
+id: x9k.a1
 title: Implement OAuth flow
 status: open
 priority: P1
-type: task
-created: 2026-03-15T10:30:00Z
-updated: 2026-03-15T10:30:00Z
-tags: [backend, auth]
-depends_on: [f4c9]
-parent: x9k2
+created: "2026-03-15T10:30:00Z"
+updated: "2026-03-15T10:30:00Z"
+tags:
+  - backend
+  - auth
+depends_on:
+  - f4c
 assignee: alice
 attempts: 2
 ---
@@ -88,7 +94,37 @@ attempts: 2
 Any Markdown body goes here.
 ```
 
-Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are omitted when empty — a missing `attempts` counts as `0`.
+Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are omitted when empty — a missing `attempts` counts as `0`. `type` is written only for epics (`type: epic`); a file without it is a task.
+
+### Task IDs
+
+IDs are short random lowercase alphanumerics that encode the epic a task belongs to:
+
+| ID | Meaning |
+|----|---------|
+| `x9k` | a top-level task or epic |
+| `x9k.a1` | a child of epic `x9k` |
+| `x9k.a1.d7` | a grandchild: a child of epic `x9k.a1` |
+
+There is no `parent` field: a task's parent is its ID minus the last segment, so the file
+`.bears/x9k.a1-implement-oauth-flow.md` sits right after its epic's `x9k-….md` in a directory
+listing. Create a child with `bea create … --parent <epic-id>`. Moving a task to another epic, or
+deleting an epic, **renames** the tasks involved — see [`bea update`](#bea-update) and
+[`bea delete`](#bea-delete). Don't edit an `id` or rename a task file by hand; `bea doctor` reports
+the damage if it happens.
+
+Wherever a command takes an ID you may type a unique prefix. A prefix that matches a task and its
+descendants (`x9k` matching `x9k`, `x9k.a1`, …) means that task.
+
+ID lengths are set in `.bears.yml`:
+
+```yaml
+id-length: 3        # length of a top-level ID (2-8, default 3)
+child-id-length: 2  # starting length of each child segment (1-8, default 2)
+```
+
+A child segment grows by one character for new children once an epic's sibling space is more than
+about a quarter full, so large epics never run out of IDs; existing IDs keep their length.
 
 **Statuses:** `proposed` · `open` · `in_progress` · `review` · `done` · `blocked` · `cancelled`
 
@@ -125,10 +161,12 @@ Flags are **idempotent**: re-running them on an already-initialized directory is
 
 ### `bea create`
 ```sh
-bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--body "..."] [--epic]
+bea create "Title" [--priority P0-P3] [--tag tag1,tag2] [--depends-on id1,id2] [--parent <epic-id>] [--body "..."] [--epic]
 ```
 
-Use `--epic` to create an epic instead of a regular task. Epics are high-level objectives that group child tasks via the `--parent` flag.
+Use `--epic` to create an epic instead of a regular task. Epics are high-level objectives that group
+child tasks: `--parent <epic-id>` creates the task under an epic, and its ID extends the epic's
+(`bea create "Login form" --parent x9k` → `x9k.a1`). Only an epic can be a parent.
 
 ### `bea list`
 Hides `done`, `cancelled` and `proposed` tasks by default. Use `--all` / `-a` to show everything, or
@@ -165,8 +203,13 @@ bea show <id>
 bea update <id> --status blocked
 bea update <id> --priority P0 --tag urgent,backend
 bea update <id> --title "New title" --body "Updated description"
-bea update <id> --parent <epic-id>    # reparent under an epic (use "" to detach)
+bea update <id> --parent <epic-id>    # move under an epic (use "" for the top level)
 ```
+
+Moving a task changes its ID: the task and everything below it get IDs under the new parent, and
+every `depends_on` that pointed at them — in active and archived tasks — is rewritten. The output
+lists each change (`  renamed x9k.a1 → p2m.q4`), and `--json` adds a `"renamed"` map of old ID to
+new ID. Moving a task never opens or closes an epic.
 
 ### `bea epics`
 List all epics with progress (done/total children).
@@ -208,7 +251,7 @@ Review is the step between "I finished it" and "it's done":
 ```sh
 bea review <id>   # in_progress → review, submit your work
 bea review        # list everything awaiting review
-bea reject <id>   # review → open, changes needed (assignee kept)
+bea reject <id>   # review → open, changes needed (assignee cleared)
 bea done <id>     # review → done, approved
 ```
 
@@ -217,8 +260,8 @@ each task so you can see who wrote it. It accepts the same `--tag`, `--epic` and
 `bea ready`. The queue is deliberately separate from `bea ready` — reviewing someone else's work and
 starting fresh work are different jobs, so an orchestrator can dispatch them to different workers.
 
-`bea reject` keeps the assignee, so a rejected task carries who wrote it and rework can be routed
-back to the same person. Use `bea release` instead to hand it back to the pool entirely.
+`bea reject` clears the assignee, so a rejected task returns to the pool and shows up in `bea ready`
+for whoever picks up the rework.
 
 ### `bea propose` / `bea accept`
 A proposal is work someone suggests but that has not been accepted into the backlog:
@@ -248,6 +291,10 @@ Permanently delete a task file.
 bea delete <id>
 ```
 
+Deleting an epic does not delete its children: each surviving subtree is detached and gets a fresh
+top-level ID (`x9k.a1` → `m3t`, `x9k.a1.d7` → `m3t.d7`), with references rewritten. The output lists
+the renames, and `--json` adds a `"renamed"` map.
+
 ### `bea prune`
 Permanently delete cancelled tasks. Use `--done` to also delete completed tasks. For **recoverable** cleanup, prefer `bea archive`.
 
@@ -255,6 +302,10 @@ Permanently delete cancelled tasks. Use `--done` to also delete completed tasks.
 bea prune
 bea prune --done
 ```
+
+Surviving children of a pruned epic are detached to fresh top-level IDs, as with `bea delete`. With
+`--json`, prune prints the list of pruned tasks; when it also renamed tasks it prints
+`{ "pruned": [...], "renamed": { "<old>": "<new>" } }` instead.
 
 ### `bea archive` / `bea restore` / `bea log`
 Move settled work out of the active set into `.bears/archive/`, keeping `list`/`ready`/`search`/`graph`/`epics` focused on active tasks. Unlike `prune`, archiving is **reversible**.
@@ -284,6 +335,37 @@ Matches against title, body, tags, and ID. Hides `done` and `cancelled` tasks by
 bea search "oauth"
 bea search "oauth" --all
 ```
+
+### `bea migrate`
+Convert a store written before 0.10 to hierarchical IDs. Every child task gets an ID under its epic,
+the `parent:` keys are dropped, and `depends_on` references are rewritten — archive included.
+
+```sh
+bea migrate --dry-run   # print the renames, write nothing
+bea migrate
+```
+
+Each rename is printed as `  renamed ch1 → ep1.f6`; `--json` returns the mapping. The new child IDs are
+drawn at random, so a dry run shows which tasks would be renamed, not the exact IDs a real run picks.
+Migration is idempotent (on a converted store it reports nothing to migrate) and resumable: if it is
+interrupted, run it again. Until a store is migrated, every other command, the MCP server and the TUI
+refuse to load it.
+
+### `bea doctor`
+Check the store, active and archive, for problems: legacy `parent:` keys, unreadable files, malformed
+or duplicate IDs, files whose name doesn't match their ID, dependencies on tasks that don't exist,
+tasks whose parent is missing or not an epic, and dependency cycles.
+
+```sh
+bea doctor
+bea doctor --fix
+```
+
+`bea doctor` exits with status 1 when it finds problems, so it can gate CI. `--fix` repairs what is
+safe to repair automatically — it renumbers duplicate IDs (references stay with the copy that keeps
+the ID, and the tasks that point at it are listed for you to review) and renames misnamed files —
+then checks again, exiting 1 only if problems remain. The rest are reported with a hint at the
+command that fixes them.
 
 ### `bea edit`
 Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$VISUAL`, then `vi`. After the editor exits, the file is re-parsed and validated.
@@ -355,7 +437,7 @@ bea mcp   # starts MCP server over stdio
 | `list_epics` | List all epics with progress |
 | `get_task` | Full task details (`id`); falls back to the archive, marking the result `archived: true` |
 | `create_task` | Create a task or epic (`title`, `priority?`, `tags?`, `depends_on?`, `parent?`, `body?`, `type?`) |
-| `update_task` | Update fields (`id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?`) |
+| `update_task` | Update fields (`id`, `title?`, `status?`, `priority?`, `tags?`, `assignee?`, `body?`, `parent?`); a new `parent` renames the task |
 | `start_task` | Set status to `in_progress`, optionally claiming it (`id`, `assignee?`) |
 | `list_review` | Tasks awaiting review, separate from `list_ready` (`limit?`, `tag?`, `epic?`) |
 | `review_task` | Submit in-progress work for review (`id`) |
@@ -365,16 +447,23 @@ bea mcp   # starts MCP server over stdio
 | `release_task` | Release an in-progress task: status → `open`, assignee cleared (`id`) |
 | `complete_task` | Set status to `done` (`id`) |
 | `cancel_task` | Set status to `cancelled` (`id`) |
-| `prune_tasks` | Permanently delete cancelled tasks (`include_done?`) |
+| `prune_tasks` | Permanently delete cancelled tasks (`include_done?`); detaches surviving children |
 | `add_dependency` | Add a dependency, cycle-safe (`id`, `depends_on`) |
 | `remove_dependency` | Remove a dependency (`id`, `depends_on`) |
-| `delete_task` | Permanently delete a task (`id`) |
+| `delete_task` | Permanently delete a task (`id`); an epic's children get fresh root IDs |
 | `search_tasks` | Full-text search (`query`, `limit?`, `active_only?`) |
 | `plan_epic` | An epic's child tasks in topological execution order (`id`) |
 | `get_graph` | Bounded dependency adjacency list (`include_done?`, `epic?`, `limit?`) |
 | `archive_task` | Archive a task (and settled children), or sweep all archivable tasks (`id?`) |
 | `restore_task` | Restore an archived task and its cascade (`id`) |
 | `list_archived` | List archived tasks, most recent first (`limit?`) |
+| `doctor` | Check the store for inconsistencies; read-only, returns `{ ok, files, findings }` |
+
+`create_task` with `parent` returns an ID under the epic's. `update_task` with `parent` (`""` for the
+top level) moves the task: its result carries a `renamed` map of old ID to new ID for the task and its
+subtree. `delete_task` and `prune_tasks` report detached children the same way (`prune_tasks` returns
+`{ pruned, renamed }` instead of a plain list when something was renamed). Agents should take the new
+IDs from that map rather than reuse IDs they noted earlier.
 
 ### Register with Claude Code
 
