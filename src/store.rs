@@ -162,7 +162,7 @@ async fn load_dir(dir: &Path, label: &str) -> Result<(HashMap<String, Task>, Vec
 /// The task files in `dir` that carry a legacy `parent:` key; a loader uses
 /// this for the directory it does not load. The verdict for each file is the
 /// parser's (see [`has_legacy_parent_key`]), so both loaders agree on every
-/// file. Files that cannot be read are passed over silently: the loader that
+/// file short of the exotic case named there. Files that cannot be read are passed over silently: the loader that
 /// owns `dir` warns about them.
 async fn scan_legacy(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(read_dir_contents(dir)
@@ -177,11 +177,14 @@ async fn scan_legacy(dir: &Path) -> Result<Vec<PathBuf>> {
 /// is never legacy, as the loaders skip it.
 ///
 /// Parsing every file just to answer this would make each load parse the
-/// directory it does not return, so a line scan runs first and only its rare
-/// hits are parsed: a file can only have the key if some frontmatter line
-/// (between the opening and closing `---`) starts at column 0 with `parent`,
-/// `"parent` or `'parent`. Body text and indented lines (block scalars,
-/// nested values) never pass it.
+/// directory it does not return, so a text scan runs first and only its hits
+/// are parsed: a file can only have the key if the word `parent` occurs
+/// somewhere in its frontmatter (between the opening and closing `---`).
+/// That is deliberately loose — indented frontmatter, quoted or complex
+/// (`? parent`) keys and flow mappings all pass, and a title that mentions
+/// "parent" just costs one extra parse — while body text never does. The
+/// one spelling it misses is a quoted key written with escapes
+/// (`"p\u0061rent"`), which no version of bears writes.
 fn has_legacy_parent_key(content: &str) -> bool {
     may_have_parent_key(content)
         && task::parse_task(content).is_ok_and(|t| t.legacy_parent.is_some())
@@ -200,9 +203,7 @@ fn may_have_parent_key(content: &str) -> bool {
         if line.trim_end() == "---" {
             return found;
         }
-        found |= ["parent", "\"parent", "'parent"]
-            .iter()
-            .any(|p| line.starts_with(p));
+        found |= line.contains("parent");
     }
     // No closing delimiter: not a task file the loaders accept.
     false
@@ -1772,6 +1773,7 @@ mod tests {
         assert!(legacy("title: T\nparent : ep\n"));
         assert!(legacy("title: T\n\"parent\": ep\n"));
         assert!(legacy("title: T\n'parent': ep\n"));
+        assert!(legacy("title: T\n? parent\n: ep\n"));
 
         assert!(!has_legacy_parent_key(&file("title: T\n", "parent: ep\n")));
         assert!(!legacy("title: |\n  line\n  parent: ep\n"));
@@ -1786,6 +1788,37 @@ mod tests {
         assert!(!has_legacy_parent_key("---\nid: ab\nparent: ep\n---\n"));
         assert!(!has_legacy_parent_key("---\nparent: ep\n"));
         assert!(!has_legacy_parent_key("parent: ep\n---\n"));
+    }
+
+    /// Frontmatter whose top-level mapping is indented as a whole still
+    /// parses, so both loaders must see its `parent:` key.
+    #[tokio::test]
+    async fn test_loaders_refuse_indented_frontmatter_with_a_parent_key() {
+        let indented = "---\n  id: zz\n  title: Indented\n  status: open\n  priority: P2\n  \
+                        created: \"2026-01-01T00:00:00Z\"\n  updated: \"2026-01-01T00:00:00Z\"\n  \
+                        parent: qq\n---\n";
+        assert!(has_legacy_parent_key(indented));
+        for archived in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            init(tmp.path()).unwrap();
+            let dir = if archived {
+                archive_dir(tmp.path())
+            } else {
+                tasks_dir(tmp.path())
+            };
+            fs::write(dir.join("zz-indented.md"), indented).unwrap();
+            assert!(
+                matches!(load_all(tmp.path()).await, Err(Error::LegacyStore { .. })),
+                "load_all, archived: {archived}"
+            );
+            assert!(
+                matches!(
+                    load_archived(tmp.path()).await,
+                    Err(Error::LegacyStore { .. })
+                ),
+                "load_archived, archived: {archived}"
+            );
+        }
     }
 
     /// A file with a `parent:` line that the parser rejects is skipped by the
