@@ -396,9 +396,19 @@ pub fn in_epic(task: &Task, epic: Option<&str>) -> bool {
     epic.is_none_or(|e| is_descendant(&task.id, e))
 }
 
-/// Canonical sort: priority ascending (P0 first), then creation date ascending.
+/// Canonical list order: priority ascending (P0 first), then creation date
+/// ascending, then ID, so that tasks equal in both never come out in the
+/// (random) iteration order of the map they were loaded into.
+pub fn canonical_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+    a.priority
+        .cmp(&b.priority)
+        .then(a.created.cmp(&b.created))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Sort tasks in [`canonical_order`].
 pub fn sort_by_priority_owned(tasks: &mut [Task]) {
-    tasks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    tasks.sort_by(canonical_order);
 }
 
 /// Unambiguous character set for ID generation.
@@ -1523,6 +1533,23 @@ updated: 2026-03-15T10:30:00Z
         assert_eq!(tasks[0].id, "b2"); // P0
         assert_eq!(tasks[1].id, "c3"); // P3, older
         assert_eq!(tasks[2].id, "a1"); // P3, newer
+    }
+
+    #[test]
+    fn test_sort_by_priority_owned_breaks_exact_ties_by_id() {
+        let created: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let ids = ["m", "b", "z", "a.c", "a", "k"];
+        let mut tasks: Vec<Task> = ids
+            .iter()
+            .map(|id| {
+                let mut t = Task::new((*id).into(), "Tie".into(), Priority::P2);
+                t.created = created;
+                t
+            })
+            .collect();
+        sort_by_priority_owned(&mut tasks);
+        let sorted: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(sorted, ["a", "a.c", "b", "k", "m", "z"]);
     }
 
     // ── Frontmatter parsing edge-case tests ─────────────────────────

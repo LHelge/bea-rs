@@ -133,6 +133,55 @@ fn test_ready_flow() {
         .stdout(predicate::str::contains(&id2));
 }
 
+/// Tasks equal in priority and creation date are listed by ID, not in the
+/// order the store's map happens to iterate in.
+#[test]
+fn test_exact_ties_listed_by_id() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let ids = ["qq", "dd", "xx", "bb", "mm", "ff", "ss", "kk"];
+    for id in ids {
+        let content = format!(
+            "---\nid: {id}\ntitle: Tie {id}\nstatus: open\npriority: P2\n\
+             created: \"2026-01-01T00:00:00Z\"\nupdated: \"2026-01-01T00:00:00Z\"\n---\n\nTie.\n"
+        );
+        std::fs::write(tmp.path().join(format!(".bears/{id}-tie-{id}.md")), content).unwrap();
+    }
+    let mut want = ids.to_vec();
+    want.sort();
+
+    for args in [
+        vec!["--json", "ready"],
+        vec!["--json", "list"],
+        vec!["--json", "search", "tie"],
+    ] {
+        let out = bea(&tmp).args(&args).output().unwrap();
+        assert!(out.status.success(), "{args:?} failed");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let got: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, want, "{args:?}");
+    }
+
+    // A limit keeps the first tasks of that order.
+    let out = bea(&tmp)
+        .args(["--json", "ready", "--limit", "2"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let got: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, ["bb", "dd"]);
+}
+
 #[test]
 fn test_dep_cycle_rejected() {
     let tmp = TempDir::new().unwrap();

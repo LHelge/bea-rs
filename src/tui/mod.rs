@@ -49,7 +49,7 @@ fn load_tasks_sync(base: &Path) -> Result<(Vec<Task>, HashMap<String, Task>)> {
         tokio::runtime::Handle::current().block_on(store::load_all(base))
     })?;
     let mut task_list: Vec<Task> = task_map.values().cloned().collect();
-    task_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    task_list.sort_by(bears::task::canonical_order);
     Ok((task_list, task_map))
 }
 
@@ -525,7 +525,7 @@ mod tests {
         // Load from disk and build initial app.
         let task_map = bears::store::load_all(tmp.path()).await.unwrap();
         let mut task_list: Vec<Task> = task_map.values().cloned().collect();
-        task_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        task_list.sort_by(bears::task::canonical_order);
         let mut app = App::new(task_list, task_map, tmp.path().to_path_buf());
 
         // Default filter (Open) should show the two open tasks, not the done one.
@@ -554,7 +554,7 @@ mod tests {
         // Re-load from disk and call App::reload (the path the watcher triggers).
         let new_map = bears::store::load_all(tmp.path()).await.unwrap();
         let mut new_list: Vec<Task> = new_map.values().cloned().collect();
-        new_list.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        new_list.sort_by(bears::task::canonical_order);
         app.reload(new_list, new_map);
 
         // all_tasks / task_map must reflect the new disk state.
