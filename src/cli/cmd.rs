@@ -1371,7 +1371,7 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
 /// file is opened, so a refused load (not initialized, legacy store) leaves
 /// no file behind. A path inside `.bears/` is refused (see
 /// [`refuse_output_in_store`]) and the file is written atomically (see
-/// [`write_atomically`]).
+/// [`store::write_atomically`], the routine every task file goes through).
 pub async fn cmd_snapshot(
     base: &Path,
     format: SnapshotFormat,
@@ -1401,7 +1401,7 @@ pub async fn cmd_snapshot(
     match output {
         Some(path) => {
             refuse_output_in_store(base, path)?;
-            write_atomically(path, rendered.as_bytes()).map_err(|e| {
+            store::write_atomically(path, rendered.as_bytes()).map_err(|e| {
                 Error::Io(std::io::Error::new(
                     e.kind(),
                     format!("cannot write {}: {e}", path.display()),
@@ -1448,69 +1448,6 @@ fn refuse_output_in_store(base: &Path, path: &Path) -> Result<()> {
         ))),
         _ => Ok(()),
     }
-}
-
-/// Write `contents` to `path` atomically: into a fresh temporary file in the
-/// same directory, then renamed over `path`, so a job killed mid-write leaves
-/// either the old file or the new one, never a truncated one.
-///
-/// The temporary name carries the process ID, the time and a counter, and is
-/// created with `create_new`, so a concurrent `bea snapshot -o` to the same
-/// target never shares it. It is removed when writing or renaming fails. An
-/// existing regular file's permissions are carried over; an existing symlink
-/// is replaced by the new file, not followed.
-fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::fs::{self, OpenOptions};
-    use std::io::{Error as IoError, ErrorKind, Write};
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    let name = path
-        .file_name()
-        .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "not a file name"))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or_default();
-
-    let mut attempts = 0;
-    let (tmp_path, mut file) = loop {
-        attempts += 1;
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp_name = format!(
-            ".{}.{}-{nanos}-{n}.tmp",
-            name.to_string_lossy(),
-            std::process::id()
-        );
-        let tmp_path = path.with_file_name(tmp_name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => break (tmp_path, file),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists && attempts < 100 => continue,
-            Err(e) => return Err(e),
-        }
-    };
-
-    let result = (|| {
-        file.write_all(contents)?;
-        if let Ok(meta) = fs::symlink_metadata(path)
-            && meta.is_file()
-        {
-            file.set_permissions(meta.permissions())?;
-        }
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp_path, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    result
 }
 
 /// `bea doctor [--fix]` — check the store for inconsistencies, and with
