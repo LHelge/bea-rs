@@ -2,6 +2,8 @@
 
 Use these commands when the Bears MCP tools (`mcp__bears__*`) are not available. Always pass `--json` for structured output.
 
+Task IDs are hierarchical: a task created with `--parent <epic-id>` gets an ID under the epic's (`a1b` → `a1b.c2`). Commands that move or detach tasks report the new IDs in a `renamed` map of old ID → new ID; use the new IDs afterwards.
+
 ## Task Creation
 
 ```bash
@@ -11,7 +13,7 @@ bea create "Task title" --priority P1 --json
 # Create an epic
 bea create "Epic title" --epic --priority P1 --json
 
-# Create with parent and tags
+# Create under an epic, with tags (the ID is created under the epic's: a1b.c2)
 bea create "Sub-task" --priority P1 --parent <epic-id> --tag backend,api --json
 
 # Create with dependencies
@@ -28,7 +30,7 @@ bea create "Task" --priority P1 --body "Description here" --json
 bea dep add <id> <dep-id> --json
 
 # Remove a dependency
-bea dep rm <id> <dep-id> --json
+bea dep remove <id> <dep-id> --json
 ```
 
 ## Querying
@@ -102,12 +104,18 @@ bea update <id> --body "New description" --json
 
 # Update status
 bea update <id> --status blocked --json
+
+# Move a task under another epic ("" for the top level). The task and its subtree
+# get new IDs; the result carries "renamed": { "<old-id>": "<new-id>", ... }
+bea update <id> --parent <epic-id> --json
+bea update <id> --parent "" --json
 ```
 
 ## Deletion
 
 ```bash
-# Delete a task permanently
+# Delete a task permanently. Deleting an epic gives its children new top-level
+# IDs, listed in the result's "renamed" map
 bea delete <id> --json
 
 # Prune cancelled tasks
@@ -115,4 +123,14 @@ bea prune --json
 
 # Prune cancelled and done tasks
 bea prune --done --json
+
+# When a pruned epic's surviving children got new IDs, prune returns
+# { "pruned": [...], "renamed": { ... } } instead of the plain list
+```
+
+## Store health
+
+```bash
+# Check the store for duplicate IDs, misnamed files, dangling dependencies, cycles
+bea doctor --json
 ```
