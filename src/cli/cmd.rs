@@ -331,6 +331,43 @@ pub fn cmd_review_queue(
     Ok(())
 }
 
+/// List in-progress tasks not updated for `hours` hours (`bea stale`).
+pub fn cmd_stale(tasks: &HashMap<String, Task>, hours: u32, json: bool) -> Result<()> {
+    let older_than = jiff::SignedDuration::from_hours(i64::from(hours));
+    let stale = service::list_stale(tasks, Timestamp::now(), older_than);
+    let eff = service::effective_priorities(tasks);
+
+    if json {
+        let summaries: Vec<_> = stale
+            .iter()
+            .map(|s| s.summary(eff.get(&s.task.id)))
+            .collect();
+        output(&summaries)?;
+    } else if stale.is_empty() {
+        println!("No in-progress tasks idle for {hours}h or more.");
+    } else {
+        let w = id_width(stale.iter().map(|s| s.task.id.as_str()));
+        for s in &stale {
+            let t = &s.task;
+            let who = if t.assignee.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", t.assignee)
+            };
+            println!(
+                "{} {} — {}{} idle {}h [{}]",
+                id_cell(&t.id, w),
+                format_priority(&t.priority, eff.get(&t.id)),
+                t.title,
+                who,
+                s.idle_hours(),
+                color_tags(&t.tags)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Submit an in-progress task for review (`bea review <id>`).
 pub fn cmd_review(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     let t = service::review_task(base, tasks, id)?;

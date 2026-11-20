@@ -213,6 +213,13 @@ pub enum Command {
         id: String,
     },
 
+    /// List in-progress tasks not updated for a while (claims a dead worker may have left)
+    Stale {
+        /// Report tasks not updated for at least this many hours
+        #[arg(long, default_value_t = bears::service::DEFAULT_STALE_HOURS)]
+        hours: u32,
+    },
+
     /// Submit an in-progress task for review, or list the review queue
     Review {
         /// Task ID to submit. Omit to list every task awaiting review.

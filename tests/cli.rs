@@ -183,6 +183,73 @@ fn test_exact_ties_listed_by_id() {
 }
 
 #[test]
+fn test_stale_lists_idle_claims() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    bea(&tmp)
+        .arg("stale")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "No in-progress tasks idle for 24h or more.",
+        ));
+
+    // A claim last touched long ago, and one started just now.
+    let content = "---\nid: old\ntitle: Abandoned work\nstatus: in_progress\npriority: P1\n\
+                   created: \"2020-01-01T00:00:00Z\"\nupdated: \"2020-01-01T00:00:00Z\"\n\
+                   assignee: dead-worker\nattempts: 1\n---\n\nBody.\n";
+    std::fs::write(tmp.path().join(".bears/old-abandoned-work.md"), content).unwrap();
+    let fresh = create_task(&tmp, "Fresh work");
+    bea(&tmp).args(["start", &fresh]).assert().success();
+    create_task(&tmp, "Not started");
+
+    bea(&tmp)
+        .arg("stale")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("old"))
+        .stdout(predicate::str::contains(
+            "Abandoned work (dead-worker) idle ",
+        ))
+        .stdout(predicate::str::contains("Fresh work").not())
+        .stdout(predicate::str::contains("Not started").not());
+
+    let out = bea(&tmp).args(["--json", "stale"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = v.as_array().unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0]["id"], "old");
+    assert_eq!(v[0]["assignee"], "dead-worker");
+    assert_eq!(v[0]["attempts"], 1);
+    assert_eq!(v[0]["updated"], "2020-01-01T00:00:00Z");
+    assert!(v[0]["idle_hours"].as_i64().unwrap() > 24 * 365);
+
+    // `--hours 0` reports every claim, the fresh one included.
+    let out = bea(&tmp)
+        .args(["--json", "stale", "--hours", "0"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["old", fresh.as_str()]);
+
+    // Listing changes nothing on disk.
+    let after = std::fs::read_to_string(tmp.path().join(".bears/old-abandoned-work.md")).unwrap();
+    assert_eq!(after, content);
+
+    bea(&tmp)
+        .args(["stale", "--hours", "-1"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn test_dep_cycle_rejected() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp).arg("init").assert().success();
