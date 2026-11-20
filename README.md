@@ -170,13 +170,13 @@ bea init
 Optionally scaffold coding-agent integration files with one or more harness flags:
 
 ```sh
-bea init --claude    # CLAUDE.md + .mcp.json + .claude/skills/ + .claude/agents/
+bea init --claude    # CLAUDE.md + .mcp.json + .claude/settings.json hook + .claude/skills/ + .claude/agents/
 bea init --copilot   # .github/copilot-instructions.md + .github/mcp.json + .github/skills/ + .github/agents/
 bea init --codex     # AGENTS.md
 bea init --claude --copilot   # combine flags
 ```
 
-Flags are **idempotent**: re-running them on an already-initialized directory is safe and refreshes the files. When merging `.mcp.json` / `.github/mcp.json`, any pre-existing unrelated server entries are preserved. The generated MCP server entry always uses `bea mcp` (not `cargo run`).
+Flags are **idempotent**: re-running them on an already-initialized directory is safe and refreshes the files. When merging `.mcp.json` / `.github/mcp.json`, any pre-existing unrelated server entries are preserved. `--claude` also merges the [`bea prime`](#bea-prime) `SessionStart` hook into `.claude/settings.json`, keeping every other setting and hook. The generated MCP server entry always uses `bea mcp` (not `cargo run`).
 
 ### `bea create`
 ```sh
@@ -303,20 +303,27 @@ bea prime --json      # { "ready", "ready_total", "in_progress", "review" } as t
 ```
 
 The text has no colour when stdout is not a terminal. Like every other command it fails with
-"not initialized" where there is no `.bears/`. To run it from a Claude Code `SessionStart` hook, add
-this to `.claude/settings.json` and write the command so that a project without a store is no error:
+"not initialized" where there is no `.bears/`. `bea init --claude` (and `bea agent skills|all --claude`)
+merges a Claude Code `SessionStart` hook running it into `.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] }
+      { "hooks": [{ "type": "command", "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && { test ! -d .bears || bea prime; }" }] }
     ]
   }
 }
 ```
 
-The hook's output is added to the agent's context. `bea init --claude` does not write this file.
+The hook's output is added to the agent's context at the start of every session (and after
+`/clear`, a resume or a compaction). The command changes to the project root (`$CLAUDE_PROJECT_DIR`,
+which Claude Code sets for hooks) because a hook runs in the session's current directory, and does
+nothing in a project without a store. The merge only touches the bears hook: other settings, hooks and
+`SessionStart` entries are kept, re-running it changes nothing, an older form of the bears hook (any
+handler whose command contains `bea prime`) is replaced, and a settings file that is not valid JSON or
+not of the expected shape is left untouched with a warning. `.claude/settings.local.json` is never
+written. To drop the hook, delete its entry; it comes back the next time the Claude scaffolding runs.
 
 ### `bea review` / `bea reject`
 Review is the step between "I finished it" and "it's done":

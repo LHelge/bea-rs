@@ -50,6 +50,139 @@ const COPILOT_AGENT_PLANNER: &str = include_str!("../templates/copilot/agents/pl
 /// Embedded template content for the Codex `AGENTS.md` instruction file.
 const CODEX_MD: &str = include_str!("../templates/codex/AGENTS.md");
 
+// ── Session-start hook ───────────────────────────────────────────────────────
+
+/// The shell command of the Claude Code `SessionStart` hook that `bea init
+/// --claude` merges into `.claude/settings.json`.
+///
+/// Claude Code runs a hook in the session's *current* directory, which can
+/// differ from the project root after a `cd`, so the command first changes to
+/// `$CLAUDE_PROJECT_DIR` (the project root, set by Claude Code for hooks), or
+/// stays where it is when the variable is unset. A project without a `.bears/`
+/// store is no error: the hook then prints nothing and succeeds.
+pub const PRIME_HOOK_COMMAND: &str =
+    "cd \"${CLAUDE_PROJECT_DIR:-.}\" && { test ! -d .bears || bea prime; }";
+
+/// Text by which an existing hook handler is recognised as the bears hook, in
+/// this form or an older one (e.g. `test ! -d .bears || bea prime`).
+const PRIME_HOOK_MARKER: &str = "bea prime";
+
+/// The Claude Code project settings file that carries the hook.
+const CLAUDE_SETTINGS: &str = ".claude/settings.json";
+
+/// What [`merge_session_hook`] did with the settings file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookMerge {
+    /// The file was created or changed.
+    Written,
+    /// The file already held the hook in its current form; nothing was written.
+    Unchanged,
+    /// The file was left untouched because it does not have the expected shape
+    /// (the reason says what was wrong); the hook was not added.
+    Skipped(String),
+}
+
+/// The bears `SessionStart` matcher group: no matcher (every session start),
+/// one command handler running [`PRIME_HOOK_COMMAND`].
+fn prime_hook_group() -> Value {
+    serde_json::json!({
+        "hooks": [{ "type": "command", "command": PRIME_HOOK_COMMAND }]
+    })
+}
+
+/// Whether a hook handler is the bears hook, current or older form.
+fn is_prime_handler(handler: &Value) -> bool {
+    handler
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains(PRIME_HOOK_MARKER))
+}
+
+/// Merge the bears `SessionStart` hook into the Claude Code settings file at
+/// `path`.
+///
+/// - A missing file is created holding only the hook.
+/// - Otherwise every other key, hook event and `SessionStart` entry is kept.
+///   Every handler recognised as the bears hook (its command contains
+///   `bea prime`) is removed, a matcher group left empty by that is dropped,
+///   and the current bears group is put where the first of them was (appended
+///   when there was none). An older form is therefore replaced, and a re-run
+///   finds the same group in the same place and writes nothing.
+/// - A file that is not valid JSON, not an object, or whose `hooks` is not an
+///   object or `hooks.SessionStart` not an array, is left untouched and
+///   reported as [`HookMerge::Skipped`].
+///
+/// The file is rewritten pretty-printed (keys in `serde_json`'s order, as the
+/// `.mcp.json` merge does) only when its content changes.
+pub fn merge_session_hook(path: &Path) -> Result<HookMerge> {
+    let existing: Option<Value> = if path.exists() {
+        let raw = fs::read_to_string(path)?;
+        match serde_json::from_str(&raw) {
+            Ok(v) => Some(v),
+            Err(e) => return Ok(HookMerge::Skipped(format!("it is not valid JSON ({e})"))),
+        }
+    } else {
+        None
+    };
+    let mut doc = existing
+        .clone()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+
+    let Some(root) = doc.as_object_mut() else {
+        return Ok(HookMerge::Skipped("it is not a JSON object".to_string()));
+    };
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Some(hooks) = hooks.as_object_mut() else {
+        return Ok(HookMerge::Skipped(
+            "its `hooks` is not an object".to_string(),
+        ));
+    };
+    let session = hooks
+        .entry("SessionStart")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(groups) = session.as_array_mut() else {
+        return Ok(HookMerge::Skipped(
+            "its `hooks.SessionStart` is not an array".to_string(),
+        ));
+    };
+
+    // Remove every bears handler, remembering where the first one was.
+    let mut insert_at: Option<usize> = None;
+    let mut kept: Vec<Value> = Vec::with_capacity(groups.len() + 1);
+    for mut group in groups.drain(..) {
+        let handlers = group.get_mut("hooks").and_then(Value::as_array_mut);
+        let Some(handlers) = handlers else {
+            kept.push(group);
+            continue;
+        };
+        let before = handlers.len();
+        handlers.retain(|h| !is_prime_handler(h));
+        if handlers.len() == before {
+            kept.push(group);
+            continue;
+        }
+        insert_at.get_or_insert(kept.len());
+        if !handlers.is_empty() {
+            kept.push(group);
+        }
+    }
+    let at = insert_at.unwrap_or(kept.len());
+    kept.insert(at, prime_hook_group());
+    *groups = kept;
+
+    if existing.as_ref() == Some(&doc) {
+        return Ok(HookMerge::Unchanged);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let pretty = serde_json::to_string_pretty(&doc)?;
+    fs::write(path, format!("{pretty}\n"))?;
+    Ok(HookMerge::Written)
+}
+
 // ── MCP strategy ─────────────────────────────────────────────────────────────
 
 /// How a harness registers its MCP server.
@@ -93,6 +226,10 @@ pub struct Harness {
     pub skills: &'static [ScaffoldFile],
     /// How to register the MCP server.
     pub mcp: McpStrategy,
+    /// Settings file (relative to the project root) into which the bears
+    /// `SessionStart` hook ([`PRIME_HOOK_COMMAND`]) is merged, or `None` for a
+    /// harness without one. Merged with the skills category, like the MCP entry.
+    pub session_hook: Option<&'static str>,
 }
 
 /// Which subset of a harness's files to scaffold.
@@ -100,7 +237,8 @@ pub struct Harness {
 pub enum Category {
     /// The instruction file only.
     Instructions,
-    /// Skills/references/agent files plus the MCP merge.
+    /// Skills/references/agent files plus the MCP merge (and, for Claude, the
+    /// `SessionStart` hook merge).
     Skills,
     /// Everything (instruction + skills + MCP).
     All,
@@ -108,8 +246,8 @@ pub enum Category {
 
 /// How to resolve a plain file that already exists on disk.
 ///
-/// The MCP merge is always performed regardless of policy (it is safe and
-/// idempotent — only the `bears` key is touched).
+/// The MCP merge and the session-hook merge are always performed regardless of
+/// policy (they are safe and idempotent — only the bears entry is touched).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WritePolicy {
     /// Overwrite every plain file unconditionally.
@@ -182,6 +320,7 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
                 server_key: "mcpServers",
                 seed_json: CLAUDE_MCP_SEED,
             },
+            session_hook: Some(CLAUDE_SETTINGS),
         },
     ),
     (
@@ -194,6 +333,7 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
                 server_key: "servers",
                 seed_json: COPILOT_MCP_SEED,
             },
+            session_hook: None,
         },
     ),
     (
@@ -202,6 +342,7 @@ pub static REGISTRY: &[(&str, &Harness)] = &[
             instruction: CODEX_INSTRUCTION,
             skills: &[],
             mcp: McpStrategy::None,
+            session_hook: None,
         },
     ),
 ];
@@ -317,8 +458,8 @@ fn category_has_skills(category: Category) -> bool {
 /// The plain-file targets (absolute paths) that scaffolding `category` for the
 /// given harness labels would touch.
 ///
-/// Excludes the MCP JSON file, which always merges safely and should never gate
-/// an overwrite prompt. Used by callers to decide whether anything already
+/// Excludes the MCP JSON file and the Claude settings file, which always merge
+/// safely and should never gate an overwrite prompt. Used by callers to decide whether anything already
 /// exists before prompting.
 pub fn category_targets(base: &Path, harness_labels: &[&str], category: Category) -> Vec<PathBuf> {
     let mut targets = Vec::new();
@@ -341,8 +482,8 @@ pub fn category_targets(base: &Path, harness_labels: &[&str], category: Category
 /// Scaffold the files belonging to `category` for the given harness labels into
 /// `base`, resolving on-disk collisions per `policy`.
 ///
-/// The MCP merge always runs for skill-bearing categories (it is safe and
-/// idempotent). Returns the list of paths that were actually created or
+/// The MCP merge and the session-hook merge always run for skill-bearing
+/// categories (they are safe and idempotent). Returns the list of paths that were actually created or
 /// modified (skipped files are omitted).
 pub fn scaffold_category(
     base: &Path,
@@ -395,6 +536,19 @@ pub fn scaffold_category(
                 let target_path = base.join(target);
                 merge_mcp_json(&target_path, server_key, seed_json)?;
                 written.push(target_path);
+            }
+
+            // The session-start hook is the same kind of wiring: always merge,
+            // whatever the write policy.
+            if let Some(target) = harness.session_hook {
+                let target_path = base.join(target);
+                match merge_session_hook(&target_path)? {
+                    HookMerge::Written | HookMerge::Unchanged => written.push(target_path),
+                    HookMerge::Skipped(reason) => eprintln!(
+                        "warning: leaving {} untouched, {reason}; the bears SessionStart hook was not added",
+                        target_path.display()
+                    ),
+                }
             }
         }
     }
@@ -900,5 +1054,206 @@ mod tests {
             targets.iter().all(|p| !p.ends_with(".mcp.json")),
             ".mcp.json must be excluded from prompt-trigger targets"
         );
+    }
+
+    // ── Session-start hook merge ──────────────────────────────────────────────
+
+    /// The bears handlers in `SessionStart`, in order.
+    fn prime_commands(doc: &Value) -> Vec<String> {
+        doc["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+            .filter_map(|h| h["command"].as_str())
+            .filter(|c| c.contains("bea prime"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// A missing settings file is created holding exactly the hook.
+    #[test]
+    fn test_merge_session_hook_fresh_create() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".claude/settings.json");
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+        assert_eq!(
+            read_json(&path),
+            serde_json::json!({
+                "hooks": { "SessionStart": [
+                    { "hooks": [{ "type": "command", "command": PRIME_HOOK_COMMAND }] }
+                ] }
+            })
+        );
+    }
+
+    /// Other settings, other hook events and other `SessionStart` entries
+    /// (including other handlers of a group that held an old bears handler) are
+    /// kept.
+    #[test]
+    fn test_merge_session_hook_preserves_other_settings() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        let mine = serde_json::json!({ "type": "command", "command": "echo hi" });
+        let existing = serde_json::json!({
+            "permissions": { "allow": ["Bash(cargo test:*)"] },
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "check" }] }],
+                "SessionStart": [
+                    { "matcher": "startup", "hooks": [mine.clone()] },
+                    { "hooks": [
+                        { "type": "command", "command": "test ! -d .bears || bea prime" },
+                        { "type": "command", "command": "echo also" }
+                    ] }
+                ]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+        let doc = read_json(&path);
+        assert_eq!(doc["permissions"], existing["permissions"]);
+        assert_eq!(doc["model"], "opus");
+        assert_eq!(doc["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);
+        let groups = doc["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0],
+            serde_json::json!({ "matcher": "startup", "hooks": [mine] })
+        );
+        assert_eq!(groups[1], prime_hook_group());
+        assert_eq!(
+            groups[2],
+            serde_json::json!({ "hooks": [{ "type": "command", "command": "echo also" }] })
+        );
+    }
+
+    /// A second merge finds the hook and writes nothing.
+    #[test]
+    fn test_merge_session_hook_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+        let first = fs::read_to_string(&path).unwrap();
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Unchanged);
+        assert_eq!(fs::read_to_string(&path).unwrap(), first);
+        assert_eq!(prime_commands(&read_json(&path)), [PRIME_HOOK_COMMAND]);
+    }
+
+    /// An older form of the hook is replaced in place, and duplicates collapse
+    /// to one.
+    #[test]
+    fn test_merge_session_hook_replaces_old_form() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        let old = serde_json::json!({ "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] });
+        let other = serde_json::json!({ "hooks": [{ "type": "command", "command": "other" }] });
+        let existing = serde_json::json!({
+            "hooks": { "SessionStart": [other.clone(), old.clone(), old] }
+        });
+        fs::write(&path, existing.to_string()).unwrap();
+
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+        let doc = read_json(&path);
+        assert_eq!(
+            doc["hooks"]["SessionStart"],
+            serde_json::json!([other, prime_hook_group()])
+        );
+    }
+
+    /// A file of the wrong shape is left byte for byte as it was.
+    #[test]
+    fn test_merge_session_hook_leaves_unexpected_files_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        for raw in [
+            "{ not json",
+            "[1, 2]",
+            r#"{"hooks": []}"#,
+            r#"{"hooks": {"SessionStart": {"hooks": []}}}"#,
+        ] {
+            fs::write(&path, raw).unwrap();
+            assert!(
+                matches!(merge_session_hook(&path).unwrap(), HookMerge::Skipped(_)),
+                "{raw}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
+    /// `--claude` merges the hook for `skills` and `all` (whatever the write
+    /// policy) but not for `instructions`; Copilot and Codex get no hook, and
+    /// `settings.local.json` is never touched.
+    #[test]
+    fn test_scaffold_session_hook_categories_and_harnesses() {
+        for (category, policy) in [
+            (Category::Skills, WritePolicy::SkipExisting),
+            (Category::All, WritePolicy::SkipExisting),
+            (Category::All, WritePolicy::Force),
+            (Category::All, WritePolicy::Append),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let settings = tmp.path().join(".claude/settings.json");
+            fs::create_dir_all(settings.parent().unwrap()).unwrap();
+            fs::write(&settings, r#"{"model": "opus"}"#).unwrap();
+            let written = scaffold_category(tmp.path(), &["claude"], category, policy).unwrap();
+            assert!(written.contains(&settings), "{category:?} {policy:?}");
+            let doc = read_json(&settings);
+            assert_eq!(doc["model"], "opus");
+            assert_eq!(prime_commands(&doc), [PRIME_HOOK_COMMAND]);
+            assert!(!tmp.path().join(".claude/settings.local.json").exists());
+        }
+
+        let tmp = TempDir::new().unwrap();
+        scaffold_category(
+            tmp.path(),
+            &["claude"],
+            Category::Instructions,
+            WritePolicy::Force,
+        )
+        .unwrap();
+        assert!(!tmp.path().join(".claude/settings.json").exists());
+
+        let tmp = TempDir::new().unwrap();
+        scaffold(tmp.path(), &["copilot", "codex"]).unwrap();
+        assert!(!tmp.path().join(".claude").exists());
+    }
+
+    /// A settings file of the wrong shape does not fail the scaffolding and is
+    /// not reported as written.
+    #[test]
+    fn test_scaffold_skips_invalid_settings() {
+        let tmp = TempDir::new().unwrap();
+        let settings = tmp.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, "{ broken").unwrap();
+        let written = scaffold(tmp.path(), &["claude"]).unwrap();
+        assert!(!written.contains(&settings));
+        assert!(written.iter().any(|p| p.ends_with(".mcp.json")));
+        assert_eq!(fs::read_to_string(&settings).unwrap(), "{ broken");
+    }
+
+    /// The README and the Claude instructions template show the scaffolded
+    /// command, as it appears in JSON; so does CLAUDE.md where it is present
+    /// (it is not in the packaged crate).
+    #[test]
+    fn test_docs_show_scaffolded_hook_command() {
+        let quoted = serde_json::to_string(PRIME_HOOK_COMMAND).unwrap();
+        assert!(CLAUDE_MD.contains(&quoted), "templates/claude/CLAUDE.md");
+        assert!(include_str!("../README.md").contains(&quoted), "README.md");
+        let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("CLAUDE.md");
+        if let Ok(text) = fs::read_to_string(dev) {
+            assert!(text.contains(PRIME_HOOK_COMMAND), "CLAUDE.md");
+        }
     }
 }

@@ -18,10 +18,11 @@ Bears is registered as an MCP server — use the MCP tools to manage tasks.
 
 `bea prime` prints the ready, in-progress and review queues and a reminder of the workflow verbs, for
 a session-start hook. The reminder gives the verbs in their CLI form (`bea start`, `bea review`, …);
-while the Bears MCP server is connected, use the MCP tools of the same names listed above. To have it in every session, add to `.claude/settings.json`:
+while the Bears MCP server is connected, use the MCP tools of the same names listed above. `bea init --claude`
+adds it to `.claude/settings.json` as a `SessionStart` hook, so its output opens every session:
 
 ```json
-{ "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] }] } }
+{ "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && { test ! -d .bears || bea prime; }" }] }] } }
 ```
 
 Tasks carry an `attempts` count that increments each time work is started on them. A high count means
