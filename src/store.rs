@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -298,20 +298,134 @@ pub fn load_one(base: &Path, id: &str) -> Result<Task> {
 
 /// Save a task to disk. Deletes the old file if the slug has changed.
 pub fn save(base: &Path, t: &Task) -> Result<()> {
-    let dir = tasks_dir(base);
-    let new_path = dir.join(task::filename(t));
+    let new_path = tasks_dir(base).join(task::filename(t));
     let old_path = find_task_path(base, &t.id).ok();
 
-    // Write atomically (temp file + rename) so a crash cannot truncate a task.
-    let tmp_path = dir.join(format!(".{}.tmp", task::filename(t)));
-    fs::write(&tmp_path, task::render_task(t))?;
-    fs::rename(&tmp_path, &new_path)?;
+    write_task_file(&new_path, t)?;
 
     // Remove the old file only after the new one is safely in place
     if let Some(old_path) = old_path
         && old_path != new_path
     {
         fs::remove_file(&old_path)?;
+    }
+    Ok(())
+}
+
+/// Write `t` to `path` atomically (temp file + rename in the same
+/// directory), so a crash cannot leave a truncated task behind.
+fn write_task_file(path: &Path, t: &Task) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::TaskNotFound(t.id.clone()))?;
+    let tmp_path = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
+    fs::write(&tmp_path, task::render_task(t))?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// Read and parse every task file in `dir`, sorted by path. A missing
+/// directory yields nothing; files that cannot be read or parsed are skipped
+/// with a warning, as [`load_all`] does.
+fn read_task_files(dir: &Path) -> Result<Vec<(PathBuf, Task)>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        match fs::read_to_string(&path)
+            .map_err(Error::from)
+            .and_then(|c| task::parse_task(&c))
+        {
+            Ok(t) => files.push((path, t)),
+            Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+        }
+    }
+    Ok(files)
+}
+
+/// Rename tasks across the active store and the archive.
+///
+/// `renames` maps old IDs to new IDs. Each task whose ID is a key is written
+/// under its new ID in the directory it already lives in (active or
+/// archive), and every `depends_on` entry naming a key is rewritten in every
+/// task, active and archived. Nothing else changes, `updated` included: a
+/// caller that wants the rename to count as an edit records that itself.
+/// Renaming a task does not rename the tasks below it; a caller moving a
+/// subtree puts every one of its IDs in `renames`.
+///
+/// Everything is checked before anything is written: each key must be the ID
+/// of an active or archived task ([`Error::TaskNotFound`]), each new ID must
+/// be well formed ([`Error::InvalidId`]), and no new ID may be shared by two
+/// keys or belong to a task that keeps its ID ([`Error::IdTaken`]).
+///
+/// The files under their new IDs are written first, then the rewritten
+/// references, and the old files are removed last. An interruption therefore
+/// leaves some tasks on disk under both their old and their new ID, but never
+/// loses one, and no rewritten reference names an ID that has no file.
+pub fn rename_ids(base: &Path, renames: &BTreeMap<String, String>) -> Result<()> {
+    if !tasks_dir(base).exists() {
+        return Err(Error::NotInitialized);
+    }
+    if renames.is_empty() {
+        return Ok(());
+    }
+    let mut files = read_task_files(&tasks_dir(base))?;
+    files.extend(read_task_files(&archive_dir(base))?);
+
+    let present: HashSet<&str> = files.iter().map(|(_, t)| t.id.as_str()).collect();
+    if let Some(missing) = renames.keys().find(|old| !present.contains(old.as_str())) {
+        return Err(Error::TaskNotFound(missing.clone()));
+    }
+    let mut targets = HashSet::new();
+    for new in renames.values() {
+        task::validate_id(new)?;
+        let kept_by_other = present.contains(new.as_str()) && !renames.contains_key(new);
+        if kept_by_other || !targets.insert(new.as_str()) {
+            return Err(Error::IdTaken(new.clone()));
+        }
+    }
+
+    let mut moved = Vec::new();
+    let mut rewritten = Vec::new();
+    let mut old_paths = Vec::new();
+    for (path, mut t) in files {
+        let mut changed = false;
+        for dep in &mut t.depends_on {
+            if let Some(new) = renames.get(dep) {
+                *dep = new.clone();
+                changed = true;
+            }
+        }
+        if let Some(new) = renames.get(&t.id) {
+            t.id = new.clone();
+            let new_path = path.with_file_name(task::filename(&t));
+            moved.push((new_path, t));
+            old_paths.push(path);
+        } else if changed {
+            rewritten.push((path, t));
+        }
+    }
+
+    let mut written = HashSet::new();
+    for (path, t) in moved.iter().chain(rewritten.iter()) {
+        write_task_file(path, t)?;
+        written.insert(path.clone());
+    }
+    for path in old_paths {
+        // A new file may have taken an old file's name (a swap of IDs).
+        if !written.contains(&path) {
+            fs::remove_file(&path)?;
+        }
     }
     Ok(())
 }
@@ -820,6 +934,144 @@ mod tests {
         let active = load_all(tmp.path()).await.unwrap();
         assert_eq!(active.len(), 1);
         assert!(active.contains_key("ac01"));
+    }
+
+    fn renames(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    fn archive(base: &Path, t: &Task) {
+        fs::write(
+            archive_dir(base).join(task::filename(t)),
+            task::render_task(t),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rename_ids_across_active_and_archive() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let mut epic = Task::new("e1".into(), "Epic".into(), Priority::P1);
+        epic.task_type = TaskType::Epic;
+        let mut child = Task::new("e1.c2".into(), "Child".into(), Priority::P2);
+        child.depends_on = vec!["e1.d3".into()];
+        let old_child = Task::new("e1.d3".into(), "Old child".into(), Priority::P2);
+        let mut user = Task::new("u1".into(), "User".into(), Priority::P2);
+        user.depends_on = vec!["e1.c2".into(), "zz".into()];
+        let mut archived_user = Task::new("au".into(), "Archived user".into(), Priority::P2);
+        archived_user.depends_on = vec!["e1".into()];
+        let untouched = Task::new("zz".into(), "Untouched".into(), Priority::P2);
+        for t in [&epic, &child, &user, &untouched] {
+            save(tmp.path(), t).unwrap();
+        }
+        archive(tmp.path(), &old_child);
+        archive(tmp.path(), &archived_user);
+        let zz_path = find_task_path(tmp.path(), "zz").unwrap();
+        let untouched_before = fs::read_to_string(&zz_path).unwrap();
+        let untouched_mtime = fs::metadata(&zz_path).unwrap().modified().unwrap();
+
+        rename_ids(
+            tmp.path(),
+            &renames(&[("e1", "n9"), ("e1.c2", "n9.c2"), ("e1.d3", "n9.d3")]),
+        )
+        .unwrap();
+
+        let active = load_all(tmp.path()).await.unwrap();
+        let mut ids: Vec<_> = active.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, ["n9", "n9.c2", "u1", "zz"]);
+        assert_eq!(active["n9"].task_type, TaskType::Epic);
+        assert_eq!(active["n9.c2"].depends_on, ["n9.d3"]);
+        assert_eq!(active["u1"].depends_on, ["n9.c2", "zz"]);
+        // A rename is not an edit: `updated` stays as it was.
+        assert_eq!(active["n9.c2"].updated, child.updated);
+        assert_eq!(active["u1"].updated, user.updated);
+        // A task with nothing to rewrite is not touched at all.
+        assert_eq!(fs::read_to_string(&zz_path).unwrap(), untouched_before);
+        assert_eq!(
+            fs::metadata(&zz_path).unwrap().modified().unwrap(),
+            untouched_mtime
+        );
+
+        let archived = load_archived(tmp.path()).await.unwrap();
+        let mut ids: Vec<_> = archived.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, ["au", "n9.d3"]);
+        assert_eq!(archived["au"].depends_on, ["n9"]);
+
+        // The old files are gone, from both directories.
+        for id in ["e1", "e1.c2"] {
+            assert!(find_task_path(tmp.path(), id).is_err(), "{id}");
+        }
+        assert!(find_archived_path(tmp.path(), "e1.d3").is_err());
+        let leftovers = fs::read_dir(tasks_dir(tmp.path()))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[tokio::test]
+    async fn test_rename_ids_swaps_ids_with_the_same_slug() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let mut a = Task::new("aa".into(), "Same".into(), Priority::P0);
+        a.depends_on = vec!["bb".into()];
+        let b = Task::new("bb".into(), "Same".into(), Priority::P3);
+        save(tmp.path(), &a).unwrap();
+        save(tmp.path(), &b).unwrap();
+
+        rename_ids(tmp.path(), &renames(&[("aa", "bb"), ("bb", "aa")])).unwrap();
+
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks["bb"].priority, Priority::P0);
+        assert_eq!(tasks["bb"].depends_on, ["aa"]);
+        assert_eq!(tasks["aa"].priority, Priority::P3);
+    }
+
+    #[tokio::test]
+    async fn test_rename_ids_validates_before_writing() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let mut a = Task::new("aa".into(), "A".into(), Priority::P2);
+        a.depends_on = vec!["bb".into()];
+        save(tmp.path(), &a).unwrap();
+        save(
+            tmp.path(),
+            &Task::new("bb".into(), "B".into(), Priority::P2),
+        )
+        .unwrap();
+        archive(
+            tmp.path(),
+            &Task::new("cc".into(), "C".into(), Priority::P2),
+        );
+        let before = load_all(tmp.path()).await.unwrap();
+
+        let err = |pairs: &[(&str, &str)]| rename_ids(tmp.path(), &renames(pairs)).unwrap_err();
+        assert!(matches!(err(&[("nope", "xx")]), Error::TaskNotFound(id) if id == "nope"));
+        // Taken by a task that keeps its ID, active or archived.
+        assert!(matches!(err(&[("bb", "xx"), ("aa", "cc")]), Error::IdTaken(id) if id == "cc"));
+        assert!(matches!(err(&[("aa", "bb")]), Error::IdTaken(id) if id == "bb"));
+        // Two tasks cannot share a new ID.
+        assert!(matches!(err(&[("aa", "xx"), ("bb", "xx")]), Error::IdTaken(id) if id == "xx"));
+        assert!(matches!(err(&[("aa", "Bad_1")]), Error::InvalidId { .. }));
+
+        let after = load_all(tmp.path()).await.unwrap();
+        assert_eq!(
+            after.keys().collect::<HashSet<_>>(),
+            before.keys().collect::<HashSet<_>>()
+        );
+        assert_eq!(after["aa"].depends_on, ["bb"]);
+        assert!(find_archived_path(tmp.path(), "cc").is_ok());
+
+        // An empty map is a no-op.
+        rename_ids(tmp.path(), &BTreeMap::new()).unwrap();
     }
 
     #[tokio::test]

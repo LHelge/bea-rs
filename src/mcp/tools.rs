@@ -132,7 +132,10 @@ impl BeaMcp {
         )
     }
 
-    #[tool(description = "Update task fields")]
+    #[tool(
+        description = "Update task fields. Changing the parent moves the task: it and \
+                       its subtree get new IDs, returned as a `renamed` map of old ID to new ID"
+    )]
     async fn update_task(
         &self,
         Parameters(params): Parameters<UpdateTaskParams>,
@@ -141,11 +144,11 @@ impl BeaMcp {
             async {
                 let tasks = store::load_all(&self.base).await?;
                 // Map MCP parent: None = unchanged, "" = root, "id" = under that
-                // epic. The service refuses any value other than the current parent.
+                // epic. A new parent moves the task, renaming its whole subtree.
                 let parent_update: Option<Option<String>> = params
                     .parent
                     .map(|p| if p.is_empty() { None } else { Some(p) });
-                let t = service::update_task(
+                let service::UpdatedTask { task: t, renamed } = service::update_task(
                     &self.base,
                     &tasks,
                     &params.id,
@@ -157,7 +160,14 @@ impl BeaMcp {
                     params.title,
                     parent_update,
                 )?;
-                ok_json(serde_json::to_value(t.summary(None))?)
+                // The summary, plus the old → new ID map when the task moved.
+                let mut value = serde_json::to_value(t.summary(None))?;
+                if !renamed.is_empty()
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert("renamed".into(), serde_json::to_value(&renamed)?);
+                }
+                ok_json(value)
             }
             .await,
         )
@@ -1653,7 +1663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_parent_derived_and_reparent_rejected() {
+    async fn test_tool_parent_derived_and_reparent_renames() {
         let (_tmp, mcp) = setup();
         let create = |title: &str, parent: Option<String>, task_type: Option<TaskType>| {
             let params = CreateTaskParams {
@@ -1707,21 +1717,43 @@ mod tests {
         assert!(!same.is_error.unwrap_or(false), "{}", extract_text(&same));
         assert_eq!(extract_json(&same)["id"], child_id);
 
-        // Detaching or attaching a task is a reparent: a tool-level error.
-        for (id, parent) in [(&child_id, ""), (&root_id, epic_id.as_str())] {
-            let result = update_parent(id, parent).await.unwrap();
-            assert_eq!(result.is_error, Some(true), "{id} -> {parent:?}");
-            assert!(
-                extract_text(&result).contains("not supported"),
-                "{}",
-                extract_text(&result)
-            );
-        }
+        assert!(extract_json(&same).get("renamed").is_none());
+
+        // Attaching a root task renames it under the epic and returns the map.
+        let moved = update_parent(&root_id, &epic_id).await.unwrap();
+        assert!(!moved.is_error.unwrap_or(false), "{}", extract_text(&moved));
+        let moved = extract_json(&moved);
+        let new_id = moved["id"].as_str().unwrap().to_string();
+        assert!(new_id.starts_with(&format!("{epic_id}.")), "{new_id}");
+        assert_eq!(
+            moved["renamed"],
+            serde_json::json!({ root_id.clone(): new_id })
+        );
         let detail = mcp
+            .get_task(Parameters(TaskIdParams { id: new_id.clone() }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&detail)["parent"], epic_id);
+        let gone = mcp
             .get_task(Parameters(TaskIdParams { id: root_id }))
             .await
             .unwrap();
-        assert!(extract_json(&detail)["parent"].is_null());
+        assert_eq!(gone.is_error, Some(true));
+
+        // Detaching gives a fresh root ID.
+        let detached = extract_json(&update_parent(&child_id, "").await.unwrap());
+        let root = detached["id"].as_str().unwrap();
+        assert!(!root.contains('.'), "{root}");
+        assert_eq!(detached["renamed"][&child_id], root);
+
+        // Moving an epic under its own child is a tool-level error.
+        let refused = update_parent(&epic_id, &new_id).await.unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert!(
+            extract_text(&refused).contains("lies below it"),
+            "{}",
+            extract_text(&refused)
+        );
     }
 
     #[tokio::test]

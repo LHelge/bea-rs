@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::Utc;
@@ -242,16 +242,34 @@ pub fn get_task(tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Tas
     Ok(tasks[&id].clone())
 }
 
+/// What [`update_task`] did: the task as it now stands, and the IDs that a
+/// parent change renamed.
+#[derive(Debug, Clone)]
+pub struct UpdatedTask {
+    /// The updated task, under its new ID if it moved.
+    pub task: Task,
+    /// Old ID → new ID for every task the move renamed: the task itself and
+    /// every task below it, active and archived. Empty when the parent did
+    /// not change.
+    pub renamed: BTreeMap<String, String>,
+}
+
 /// Update task fields. Only `Some` fields are changed.
 ///
 /// The `parent` parameter uses a double-Option to distinguish three states:
 /// - `None`           → leave parent unchanged
 /// - `Some(None)`     → make the task a root task
-/// - `Some(Some(id))` → put the task under the given epic (must exist)
+/// - `Some(Some(id))` → put the task under the given epic
 ///
 /// A task's parent is part of its ID, so a parent that differs from the
-/// current one returns [`Error::ReparentUnsupported`] before anything is
-/// written; naming the current parent is accepted and changes nothing.
+/// current one moves the task: it gets a fresh ID (a root ID when detached, a
+/// child ID of the new epic otherwise), every task below it keeps its own
+/// segments under the new prefix, and every `depends_on` naming one of them,
+/// active or archived, is rewritten (see [`store::rename_ids`]). The new
+/// parent must be an existing epic ([`Error::TaskNotFound`],
+/// [`Error::ParentNotEpic`]) outside the task's own subtree
+/// ([`Error::ParentInSubtree`]); all of that is checked before anything is
+/// written. Naming the current parent changes nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn update_task(
     base: &Path,
@@ -264,22 +282,24 @@ pub fn update_task(
     body: Option<String>,
     title: Option<String>,
     parent: Option<Option<String>>,
-) -> Result<Task> {
+) -> Result<UpdatedTask> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
 
-    if let Some(new_parent) = parent {
-        let new_parent = new_parent
-            .filter(|p| !p.is_empty())
-            .map(|p| store::resolve_prefix(tasks, &p))
-            .transpose()?;
-        if new_parent.as_deref() != t.parent() {
-            return Err(Error::ReparentUnsupported {
-                id: t.id,
-                parent: new_parent,
-            });
+    let renamed = match parent {
+        Some(new_parent) => {
+            let new_parent = new_parent
+                .filter(|p| !p.is_empty())
+                .map(|p| store::resolve_prefix(tasks, &p))
+                .transpose()?;
+            if new_parent.as_deref() == t.parent() {
+                BTreeMap::new()
+            } else {
+                plan_move(base, tasks, &id, new_parent.as_deref())?
+            }
         }
-    }
+        None => BTreeMap::new(),
+    };
 
     let previous_status = t.status;
     let status_changed = status.as_ref().is_some_and(|s| *s != t.status);
@@ -304,14 +324,86 @@ pub fn update_task(
     }
     t.updated = Utc::now();
 
+    // The field changes are saved under the old ID first, then the subtree
+    // is renamed, so an interruption leaves either the old or the new state.
     store::save(base, &t)?;
-
-    // Apply status-change side effects (e.g. epic auto-close) when status changed.
-    if status_changed {
-        on_status_changed(base, tasks, &t)?;
+    if renamed.is_empty() {
+        if status_changed {
+            on_status_changed(base, tasks, &t)?;
+        }
+        return Ok(UpdatedTask { task: t, renamed });
     }
 
-    Ok(t)
+    store::rename_ids(base, &renamed)?;
+    let t = store::load_one(base, &renamed[&id])?;
+    // Apply status-change side effects (e.g. epic auto-close) against the
+    // store as it stands after the move, so the new parent is the one checked.
+    if status_changed {
+        on_status_changed(base, &apply_renames(tasks, &renamed), &t)?;
+    }
+    Ok(UpdatedTask { task: t, renamed })
+}
+
+/// Work out the renames that move task `id` under `new_parent` (`None`: to
+/// the top level), after checking that the move is allowed. Writes nothing.
+fn plan_move(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id: &str,
+    new_parent: Option<&str>,
+) -> Result<BTreeMap<String, String>> {
+    if let Some(parent) = new_parent {
+        if parent == id || task::is_descendant(parent, id) {
+            return Err(Error::ParentInSubtree {
+                id: id.to_string(),
+                parent: parent.to_string(),
+            });
+        }
+        if !tasks[parent].task_type.is_epic() {
+            return Err(Error::ParentNotEpic(parent.to_string()));
+        }
+    }
+
+    let config = config::load(base)?;
+    let reserved = store::reserved_ids(base, tasks);
+    let new_id = match new_parent {
+        Some(parent) => task::generate_child_id(parent, &reserved, &config),
+        None => task::generate_id(&reserved, config.id_length as usize),
+    };
+
+    // The task and everything below it, active and archived. The new ID is
+    // fresh and so are all of its descendants (the reserved pool holds every
+    // ancestor of every known ID), so none of the new IDs can collide.
+    let archived = store::archived_id_set(base);
+    Ok(tasks
+        .keys()
+        .chain(archived.iter())
+        .filter(|old| old.as_str() == id || task::is_descendant(old, id))
+        .map(|old| (old.clone(), format!("{new_id}{}", &old[id.len()..])))
+        .collect())
+}
+
+/// A copy of `tasks` with `renames` applied to IDs and `depends_on` entries,
+/// as [`store::rename_ids`] applies them on disk.
+fn apply_renames(
+    tasks: &HashMap<String, Task>,
+    renames: &BTreeMap<String, String>,
+) -> HashMap<String, Task> {
+    tasks
+        .values()
+        .map(|t| {
+            let mut t = t.clone();
+            if let Some(new) = renames.get(&t.id) {
+                t.id = new.clone();
+            }
+            for dep in &mut t.depends_on {
+                if let Some(new) = renames.get(dep) {
+                    *dep = new.clone();
+                }
+            }
+            (t.id.clone(), t)
+        })
+        .collect()
 }
 
 /// Set task status by ID or prefix.
@@ -565,7 +657,7 @@ pub fn update_task_fenced(
     title: Option<String>,
     parent: Option<Option<String>>,
     expected_assignee: &str,
-) -> Result<Task> {
+) -> Result<UpdatedTask> {
     let id = assert_fence(base, tasks, id_or_prefix, expected_assignee)?;
     update_task(
         base, tasks, &id, status, priority, tags, assignee, body, title, parent,
@@ -1286,7 +1378,8 @@ mod tests {
             None,
             "worker-1",
         )
-        .unwrap();
+        .unwrap()
+        .task;
         assert_eq!(t.body, "findings");
 
         let t = add_dependency_fenced(tmp.path(), &tasks, "aaa", "bbb", "worker-1").unwrap();
@@ -2155,61 +2248,205 @@ mod tests {
         }
     }
 
+    /// Call `update_task` changing only the parent (and the title, so the
+    /// field edits can be seen to land on the moved task).
+    fn move_task(
+        base: &Path,
+        tasks: &HashMap<String, Task>,
+        id: &str,
+        parent: Option<&str>,
+        status: Option<Status>,
+    ) -> Result<UpdatedTask> {
+        update_task(
+            base,
+            tasks,
+            id,
+            status,
+            None,
+            None,
+            None,
+            None,
+            Some("Moved".into()),
+            Some(parent.map(String::from)),
+        )
+    }
+
+    fn archive_file(base: &Path, t: &Task) {
+        std::fs::write(
+            store::archive_dir(base).join(task::filename(t)),
+            task::render_task(t),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn test_update_task_rejects_parent_change() {
-        // Changing the parent means renaming the task (reparenting is not
-        // implemented yet): it must fail before anything is written.
+    async fn test_update_task_moves_subtree_and_rewrites_references() {
         let tmp = tempfile::TempDir::new().unwrap();
-        store::init(tmp.path()).unwrap();
-        store::save(tmp.path(), &make_epic("e1")).unwrap();
-        store::save(tmp.path(), &make_epic("e2")).unwrap();
-        store::save(tmp.path(), &make_child("c1", "e1", Status::Open)).unwrap();
-        store::save(tmp.path(), &make_task("rrr", Status::Open)).unwrap();
-        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        store::save(base, &make_epic("e1")).unwrap();
+        store::save(base, &make_epic("e2")).unwrap();
+        store::save(base, &make_epic("e1.ab")).unwrap();
+        store::save(base, &make_task("e1.ab.cd", Status::Open)).unwrap();
+        store::save(base, &make_task("e1.zz", Status::Open)).unwrap();
+        let mut user = make_task("uuu", Status::Open);
+        user.depends_on = vec!["e1.ab.cd".into(), "e1.zz".into()];
+        store::save(base, &user).unwrap();
+        // An archived descendant and an archived dependant.
+        archive_file(base, &make_task("e1.ab.ef", Status::Done));
+        let mut archived_user = make_task("aaa", Status::Done);
+        archived_user.depends_on = vec!["e1.ab".into()];
+        archive_file(base, &archived_user);
+        let tasks = store::load_all(base).await.unwrap();
 
-        let update = |id: &str, parent: Option<&str>| {
-            update_task(
-                tmp.path(),
-                &tasks,
-                id,
-                Some(Status::InProgress),
-                None,
-                None,
-                None,
-                None,
-                Some("Renamed".into()),
-                Some(parent.map(String::from)),
-            )
-        };
+        let updated = move_task(base, &tasks, "e1.ab", Some("e2"), None).unwrap();
 
-        // Move under another epic, detach, or attach a root task.
-        for (id, parent, expected) in [
-            ("e1.c1", Some("e2"), Some("e2")),
-            ("e1.c1", None, None),
-            ("rrr", Some("e1"), Some("e1")),
-        ] {
-            let err = update(id, parent).unwrap_err();
+        let new_id = updated.task.id.clone();
+        assert_eq!(task::parent_of(&new_id), Some("e2"), "{new_id}");
+        assert_eq!(updated.task.title, "Moved");
+        assert_eq!(updated.task.task_type, TaskType::Epic);
+        let expected: BTreeMap<String, String> = [
+            ("e1.ab".to_string(), new_id.clone()),
+            ("e1.ab.cd".to_string(), format!("{new_id}.cd")),
+            ("e1.ab.ef".to_string(), format!("{new_id}.ef")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(updated.renamed, expected);
+
+        let active = store::load_all(base).await.unwrap();
+        let mut ids: Vec<_> = active.keys().cloned().collect();
+        ids.sort();
+        let mut want = vec![
+            "e1".to_string(),
+            "e1.zz".into(),
+            "e2".into(),
+            "uuu".into(),
+            new_id.clone(),
+            format!("{new_id}.cd"),
+        ];
+        want.sort();
+        assert_eq!(ids, want);
+        assert_eq!(active[&new_id].title, "Moved");
+        assert_eq!(
+            active["uuu"].depends_on,
+            [format!("{new_id}.cd"), "e1.zz".to_string()]
+        );
+        assert!(active[&format!("{new_id}.cd")].is_child_of(&new_id));
+
+        let archived = store::load_archived(base).await.unwrap();
+        assert!(archived.contains_key(&format!("{new_id}.ef")));
+        assert!(!archived.contains_key("e1.ab.ef"));
+        assert_eq!(archived["aaa"].depends_on, vec![new_id]);
+    }
+
+    #[tokio::test]
+    async fn test_update_task_detach_gives_a_fresh_root_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        store::save(base, &make_epic("e1")).unwrap();
+        store::save(base, &make_child("c1", "e1", Status::Open)).unwrap();
+        store::save(base, &make_child("c2", "e1", Status::Open)).unwrap();
+
+        // `None` and `Some("")` both mean the top level.
+        for (id, parent) in [("e1.c1", None), ("e1.c2", Some(""))] {
+            let tasks = store::load_all(base).await.unwrap();
+            let reserved = store::reserved_ids(base, &tasks);
+            let updated = move_task(base, &tasks, id, parent, None).unwrap();
+            let new_id = &updated.task.id;
+            assert_eq!(task::id_depth(new_id), 0, "{new_id}");
+            assert_eq!(new_id.len(), config::load(base).unwrap().id_length as usize);
+            assert!(!reserved.contains(new_id), "{new_id} was taken");
+            assert_eq!(
+                updated.renamed,
+                BTreeMap::from([(id.to_string(), new_id.clone())])
+            );
+            assert!(store::find_task_path(base, id).is_err());
+            assert_eq!(store::load_one(base, new_id).unwrap().title, "Moved");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_task_moves_a_root_task_under_an_epic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        store::save(base, &make_epic("e1")).unwrap();
+        store::save(base, &make_task("rrr", Status::Open)).unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+
+        let updated = move_task(base, &tasks, "rrr", Some("e1"), None).unwrap();
+        let new_id = &updated.task.id;
+        assert_eq!(task::parent_of(new_id), Some("e1"));
+        let child_length = config::load(base).unwrap().child_id_length as usize;
+        assert_eq!(task::leaf_segment(new_id).len(), child_length);
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(
+            list_tasks(&tasks, None, None, None, true, false, Some("e1")).len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_task_move_applies_status_side_effects_at_the_new_parent() {
+        // A done task moved into an epic whose other children are all done
+        // closes that epic, as finishing it there would have.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        store::save(base, &make_epic("e1")).unwrap();
+        store::save(base, &make_epic("e2")).unwrap();
+        store::save(base, &make_child("c1", "e1", Status::InProgress)).unwrap();
+        store::save(base, &make_child("c2", "e1", Status::Open)).unwrap();
+        store::save(base, &make_child("d1", "e2", Status::Done)).unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+
+        let updated = move_task(base, &tasks, "e1.c2", Some("e2"), Some(Status::Done)).unwrap();
+        assert_eq!(updated.task.status, Status::Done);
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks["e2"].status, Status::Done, "e2 should auto-close");
+        assert_eq!(tasks["e1"].status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_update_task_rejects_invalid_parents_before_writing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        store::save(base, &make_epic("e1")).unwrap();
+        store::save(base, &make_epic("e1.ab")).unwrap();
+        store::save(base, &make_task("e1.ab.cd", Status::Open)).unwrap();
+        store::save(base, &make_task("rrr", Status::Open)).unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+
+        // Under itself or under one of its own descendants.
+        for (id, parent) in [("e1", "e1"), ("e1", "e1.ab"), ("e1.ab", "e1.ab")] {
+            let err = move_task(base, &tasks, id, Some(parent), None).unwrap_err();
             match &err {
-                Error::ReparentUnsupported { id: got, parent } => {
-                    assert_eq!(got, id);
-                    assert_eq!(parent.as_deref(), expected);
+                Error::ParentInSubtree { id: got, parent: p } => {
+                    assert_eq!((got.as_str(), p.as_str()), (id, parent));
                 }
-                other => panic!("{id}: {other:?}"),
+                other => panic!("{id} under {parent}: {other:?}"),
             }
             assert!(err.to_string().contains(id), "{err}");
         }
-        // Nothing was written.
-        let reloaded = store::load_all(tmp.path()).await.unwrap();
-        for id in ["e1.c1", "rrr"] {
-            assert_eq!(reloaded[id].status, Status::Open);
-            assert_ne!(reloaded[id].title, "Renamed");
-        }
-
-        // An unknown parent is still reported as such.
         assert!(matches!(
-            update("e1.c1", Some("zzz")),
+            move_task(base, &tasks, "e1.ab.cd", Some("rrr"), None),
+            Err(Error::ParentNotEpic(p)) if p == "rrr"
+        ));
+        assert!(matches!(
+            move_task(base, &tasks, "rrr", Some("zzz"), None),
             Err(Error::TaskNotFound(_))
         ));
+
+        // Nothing was written.
+        let reloaded = store::load_all(base).await.unwrap();
+        assert_eq!(
+            reloaded.keys().collect::<HashSet<_>>(),
+            tasks.keys().collect::<HashSet<_>>()
+        );
+        assert!(reloaded.values().all(|t| t.title != "Moved"));
     }
 
     #[tokio::test]
@@ -2238,7 +2475,8 @@ mod tests {
                 None,
                 Some(parent),
             )
-            .unwrap();
+            .unwrap()
+            .task;
             assert_eq!(updated.id, id);
             assert_eq!(updated.priority, Priority::P0);
         }
@@ -3139,7 +3377,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .task;
         assert_eq!(t.attempt_count(), 2);
 
         // A non-status update leaves the counter alone.
@@ -3156,7 +3395,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .task;
         assert_eq!(t.attempt_count(), 2);
     }
 
