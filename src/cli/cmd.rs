@@ -743,20 +743,31 @@ fn cmd_show_plan(tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<
             ids.join(", ")
         );
     }
-    let all: Vec<&Task> = plan
-        .tasks
-        .iter()
-        .chain(plan.cyclic.iter())
-        .copied()
-        .collect();
-
     if json {
+        // Each step's detail; a step that is a nested epic adds its `progress`.
         let eff = service::effective_priorities(tasks);
-        let details: Vec<_> = all.iter().map(|t| t.detail(eff.get(&t.id))).collect();
+        let details = plan
+            .steps()
+            .map(|t| {
+                let mut v = serde_json::to_value(t.detail(eff.get(&t.id)))?;
+                if let Some(p) = plan.progress.get(&t.id) {
+                    v["progress"] = serde_json::to_value(p)?;
+                }
+                Ok(v)
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
         output(&details)?;
     } else {
-        for (i, t) in all.iter().enumerate() {
+        for (i, t) in plan.steps().enumerate() {
             print!("# {}. {}\n\n", i + 1, t.title);
+            if let Some(p) = plan.progress.get(&t.id) {
+                print!(
+                    "_Nested epic `{id}`, {done}/{total} done. Its own steps: `bea show {id} --plan`._\n\n",
+                    id = t.id,
+                    done = p.done,
+                    total = p.total
+                );
+            }
             if !t.body.is_empty() {
                 print!("{}\n\n", t.body);
             }

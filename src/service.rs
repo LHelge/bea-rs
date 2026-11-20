@@ -1490,16 +1490,34 @@ pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgre
     EpicProgress { done, total }
 }
 
-/// Execution plan for an epic's children.
+/// Execution plan for an epic: its direct children, each one step.
+///
+/// A nested epic is one step of its parent's plan, like it is one unit of
+/// work for progress and auto-close; the tasks below it are in its own plan,
+/// not in this one. Its step carries its [`EpicProgress`] in `progress`.
 pub struct EpicPlan<'a> {
     /// Children in topological execution order.
     pub tasks: Vec<&'a Task>,
     /// Children that cannot be ordered because they are in a dependency cycle.
     pub cyclic: Vec<&'a Task>,
+    /// Progress of every step that is itself an epic, by its ID.
+    pub progress: HashMap<String, EpicProgress>,
 }
 
-/// Return children of an epic in topological execution order.
+impl<'a> EpicPlan<'a> {
+    /// Every step: the ordered ones, then the cyclic ones, so nothing is lost.
+    pub fn steps(&self) -> impl Iterator<Item = &'a Task> + '_ {
+        self.tasks.iter().chain(self.cyclic.iter()).copied()
+    }
+}
+
+/// Return the direct children of an epic in topological execution order.
 /// Children caught in a dependency cycle are reported separately.
+///
+/// Only dependencies between the children order the plan: a child that
+/// depends on a nested epic among them comes after it, while a dependency on
+/// anything else — a task outside the epic, or a task inside a nested epic —
+/// lies outside this plan and does not order it.
 pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Result<EpicPlan<'a>> {
     // Validate parent exists and is an epic
     let resolved = store::resolve_prefix(tasks, parent_id)?;
@@ -1519,9 +1537,15 @@ pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Resul
 
     let graph = Graph::build(tasks);
     let topo = graph.topo_sort_subset(&child_ids, tasks);
+    let progress = child_ids
+        .iter()
+        .filter(|id| tasks[id.as_str()].task_type.is_epic())
+        .map(|id| (id.clone(), epic_progress(tasks, id)))
+        .collect();
     Ok(EpicPlan {
         tasks: topo.sorted,
         cyclic: topo.cyclic,
+        progress,
     })
 }
 
@@ -3171,6 +3195,49 @@ mod tests {
         let ids: Vec<&str> = plan.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["e1.c1", "e1.c2", "e1.c3"]);
         assert!(plan.cyclic.is_empty());
+    }
+
+    /// A nested epic is one step of its parent's plan, with its progress; the
+    /// tasks below it are not steps. A dependency on the nested epic orders
+    /// after it, one on a task inside it lies outside the plan and does not.
+    #[test]
+    fn test_plan_epic_nested_epic_is_one_step() {
+        let mut nested = make_epic("e1.n");
+        nested.priority = Priority::P3;
+        let mut inner_done = make_child("a", "e1.n", Status::Done);
+        inner_done.priority = Priority::P0;
+        let inner_open = make_child("b", "e1.n", Status::Open);
+        let inner_cancelled = make_child("c", "e1.n", Status::Cancelled);
+        // Orders after the nested epic although it outranks it.
+        let mut after_epic = make_child("t", "e1", Status::Open);
+        after_epic.priority = Priority::P0;
+        after_epic.depends_on = vec!["e1.n".to_string()];
+        // Depends on a task inside the nested epic: not ordered by it.
+        let mut on_inner = make_child("u", "e1", Status::Open);
+        on_inner.priority = Priority::P0;
+        on_inner.depends_on = vec!["e1.n.b".to_string()];
+
+        let tasks = task_map(vec![
+            make_epic("e1"),
+            nested,
+            inner_done,
+            inner_open,
+            inner_cancelled,
+            after_epic,
+            on_inner,
+        ]);
+        let plan = plan_epic(&tasks, "e1").unwrap();
+        let ids: Vec<&str> = plan.steps().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["e1.u", "e1.n", "e1.t"]);
+        assert!(plan.cyclic.is_empty());
+        assert_eq!(plan.progress.len(), 1, "only the epic step has progress");
+        assert_eq!(plan.progress["e1.n"], EpicProgress { done: 1, total: 2 });
+
+        // The nested epic's own plan holds its tasks.
+        let inner = plan_epic(&tasks, "e1.n").unwrap();
+        let ids: Vec<&str> = inner.steps().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["e1.n.a", "e1.n.b", "e1.n.c"]);
+        assert!(inner.progress.is_empty());
     }
 
     #[test]

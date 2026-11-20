@@ -149,7 +149,8 @@ pub enum Command {
         /// Task ID
         id: String,
 
-        /// Output subtasks in execution order as markdown
+        /// Output an epic's direct children in execution order as markdown;
+        /// a nested epic is one step (see its own steps with `--plan` on its ID)
         #[arg(long)]
         plan: bool,
     },

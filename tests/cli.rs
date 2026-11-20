@@ -4172,3 +4172,66 @@ fn test_long_titles_get_a_capped_slug() {
     );
     bea(&tmp).args(["doctor"]).assert().success();
 }
+
+/// `bea show <epic> --plan` lists the epic's direct children: a nested epic is
+/// one step, with its progress and how to see inside it, and its tasks are not
+/// steps; a child that depends on the nested epic comes after it.
+#[test]
+fn test_show_plan_nested_epic_is_one_step() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let create = |args: &[&str]| -> String {
+        let out = bea(&tmp)
+            .args(["--json", "create"])
+            .args(args)
+            .output()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["id"].as_str().unwrap().to_string()
+    };
+    let outer = create(&["Outer", "--epic"]);
+    let inner = create(&["Inner", "--epic", "--parent", &outer]);
+    let done = create(&["Inner done", "--parent", &inner]);
+    create(&["Inner open", "--parent", &inner]);
+    create(&[
+        "After inner",
+        "--parent",
+        &outer,
+        "--depends-on",
+        &inner,
+        "--priority",
+        "P0",
+    ]);
+    bea(&tmp).args(["done", &done]).assert().success();
+
+    let out = bea(&tmp).args(["show", &outer, "--plan"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("# 1. Inner\n"), "{text}");
+    assert!(text.contains("# 2. After inner\n"), "{text}");
+    assert!(
+        !text.contains("Inner done") && !text.contains("Inner open"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "_Nested epic `{inner}`, 1/2 done. Its own steps: `bea show {inner} --plan`._"
+        )),
+        "{text}"
+    );
+
+    let out = bea(&tmp)
+        .args(["--json", "show", &outer, "--plan"])
+        .output()
+        .unwrap();
+    let steps: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let steps = steps.as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["id"], inner.as_str());
+    assert_eq!(steps[0]["type"], "epic");
+    assert_eq!(
+        steps[0]["progress"],
+        serde_json::json!({ "done": 1, "total": 2 })
+    );
+    assert!(steps[1].get("progress").is_none());
+}
