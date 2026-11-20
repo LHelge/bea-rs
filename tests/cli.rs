@@ -705,6 +705,110 @@ fn test_delete_unblocks_dependents() {
         .stdout(predicate::str::contains("Depends on deleted"));
 }
 
+/// Deleting an epic detaches its children to fresh root IDs and prints the
+/// renames, in text and in `--json`.
+#[test]
+fn test_delete_epic_detaches_children() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic = create_epic(&tmp, "Doomed epic");
+    let child = create_child_task(&tmp, "Survivor", &epic);
+    let out = bea(&tmp)
+        .args(["--json", "delete", &epic])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["id"], epic.as_str());
+    let new_id = v["renamed"][&child].as_str().unwrap().to_string();
+    assert!(!new_id.contains('.'), "{new_id}");
+
+    let out = bea(&tmp)
+        .args(["--json", "show", &new_id])
+        .output()
+        .unwrap();
+    let shown: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(shown["title"], "Survivor");
+    assert!(shown.get("parent").is_none_or(|p| p.is_null()), "{shown}");
+
+    // Text output lists the renames under the deletion line.
+    let epic = create_epic(&tmp, "Second epic");
+    let child = create_child_task(&tmp, "Second survivor", &epic);
+    let out = bea(&tmp).args(["delete", &epic]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains(&format!("Deleted task {epic}")), "{stdout}");
+    assert!(stdout.contains(&format!("renamed {child} → ")), "{stdout}");
+
+    // A task without children prints no rename and no `renamed` key.
+    let plain = create_task(&tmp, "Plain");
+    let out = bea(&tmp)
+        .args(["--json", "delete", &plain])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("renamed").is_none(), "{v}");
+}
+
+/// Pruning an epic detaches only the children that survive the prune; the
+/// `--json` output becomes `{ pruned, renamed }` when something moved.
+#[test]
+fn test_prune_epic_detaches_surviving_children() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic = create_epic(&tmp, "Cancelled epic");
+    let keep = create_child_task(&tmp, "Keep", &epic);
+    let drop = create_child_task(&tmp, "Drop", &epic);
+    bea(&tmp).args(["cancel", &drop]).assert().success();
+    bea(&tmp).args(["cancel", &epic]).assert().success();
+
+    let out = bea(&tmp).args(["--json", "prune"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let mut pruned: Vec<_> = v["pruned"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    pruned.sort();
+    let mut expected = vec![epic.clone(), drop.clone()];
+    expected.sort();
+    assert_eq!(pruned, expected);
+    let renamed = v["renamed"].as_object().unwrap();
+    assert_eq!(renamed.len(), 1, "{v}");
+    let new_id = renamed[&keep].as_str().unwrap();
+    assert!(!new_id.contains('.'), "{new_id}");
+    bea(&tmp)
+        .args(["show", new_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Keep"));
+
+    // Text output, and a prune with nothing to detach keeps the plain list.
+    let epic = create_epic(&tmp, "Another epic");
+    let keep = create_child_task(&tmp, "Keep again", &epic);
+    bea(&tmp).args(["cancel", &epic]).assert().success();
+    bea(&tmp)
+        .arg("prune")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Pruned {epic}")))
+        .stdout(predicate::str::contains(format!("renamed {keep} → ")));
+
+    let lone = create_task(&tmp, "Lone");
+    bea(&tmp).args(["cancel", &lone]).assert().success();
+    let out = bea(&tmp).args(["--json", "prune"]).output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+}
+
 /// Re-running `bea init` must not reset an existing .bears.yml.
 #[test]
 fn test_init_idempotent_preserves_config() {
