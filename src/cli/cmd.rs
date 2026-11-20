@@ -420,9 +420,16 @@ pub fn cmd_prime(tasks: &HashMap<String, Task>, limit: usize, json: bool) -> Res
             tags
         );
     };
-    let attempts = |t: &Task| match t.attempt_count() {
+    // An in-progress task is on its Nth attempt; on a ready or reviewed task
+    // the count is of attempts already made.
+    let attempt = |t: &Task| match t.attempt_count() {
         0 => String::new(),
         n => format!("attempt {n}"),
+    };
+    let earlier = |t: &Task| match t.attempt_count() {
+        0 => String::new(),
+        1 => "1 earlier attempt".to_string(),
+        n => format!("{n} earlier attempts"),
     };
 
     println!("# Bears task context");
@@ -439,7 +446,7 @@ pub fn cmd_prime(tasks: &HashMap<String, Task>, limit: usize, json: bool) -> Res
             ),
         }
         for t in &prime.ready {
-            line(t, &[attempts(t)]);
+            line(t, &[earlier(t)]);
         }
     }
     println!();
@@ -453,7 +460,7 @@ pub fn cmd_prime(tasks: &HashMap<String, Task>, limit: usize, json: bool) -> Res
             } else {
                 t.assignee.clone()
             };
-            line(t, &[who, attempts(t)]);
+            line(t, &[who, attempt(t)]);
         }
     }
     println!();
@@ -462,7 +469,7 @@ pub fn cmd_prime(tasks: &HashMap<String, Task>, limit: usize, json: bool) -> Res
     } else {
         println!("Awaiting review ({}):", prime.review.len());
         for t in &prime.review {
-            line(t, std::slice::from_ref(&t.assignee));
+            line(t, &[t.assignee.clone(), earlier(t)]);
         }
     }
     println!();
