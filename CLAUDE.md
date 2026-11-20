@@ -419,13 +419,23 @@ log only with `include_all`.
   its ID in every diagram. Each node sits in the subgraph of `SnapshotTask::epic`, subgraphs nest by
   `EpicEntry::parent` and only those holding a node are drawn; epic nodes use the `[[…]]` shape,
   statuses are `classDef`s (`in_progress` etc., only those used), cyclic edges are red (`linkStyle`).
-- **Bounded graph.** `MarkdownOptions { max_graph_nodes, max_graph_edges, max_graph_chars }`, defaults
-  `DEFAULT_MAX_GRAPH_NODES` = 100, `DEFAULT_MAX_GRAPH_EDGES` = 200 (Mermaid's own cap is 500) and
-  `DEFAULT_MAX_GRAPH_CHARS` = 30 000 bytes of Mermaid text for the whole document (Mermaid refuses
-  50 000 per diagram, a PR comment holds 65 536). A graph over the bounds is drawn per top-level epic
-  plus "Not in an epic", with a note counting the dependencies between parts that are not drawn; a
-  part still over the node/edge bounds or the remaining text budget becomes a note with its size.
-  Node titles are cut to `MAX_LABEL_CHARS` (40) with `…`; tables keep whole titles.
+- **Bounded document.** `MarkdownOptions { max_graph_nodes, max_graph_edges, max_graph_chars,
+  max_document_chars }`. With the defaults `render` never returns more than
+  `DEFAULT_MAX_DOCUMENT_CHARS` = 60 000 bytes, under the 65 536 characters of a PR comment, whatever the
+  store's size (a job-summary caller can raise it; 1 MiB there). The header and summary counts are
+  always complete; the graph section gets at most half of what is left, and the tables then share the
+  rest in document order. A table that does not fit ends after its last whole row with
+  `_…and N more not shown._`, board columns and graph parts that no longer fit become
+  `_…and N more columns/parts not shown._`, a section with no room is left out, and a `**Shortened.**`
+  note under the summary says so. Nothing is ever cut inside a row, a `<details>` block or a fence.
+  Titles are cut to `MAX_CELL_CHARS` (200) in tables and headings, `MAX_LABEL_CHARS` (40) in nodes.
+- **Bounded graph.** Defaults `DEFAULT_MAX_GRAPH_NODES` = 100, `DEFAULT_MAX_GRAPH_EDGES` = 200 (Mermaid's
+  own cap is 500) and `DEFAULT_MAX_GRAPH_CHARS` = 30 000 bytes of Mermaid text for the whole document
+  (Mermaid refuses 50 000 per diagram), never more than the graph section's share. A graph over the
+  node/edge bounds, or whose one diagram would be over the text budget, is drawn per top-level epic
+  plus "Not in an epic", with a note naming the bound it exceeded and counting the dependencies
+  between parts that are not drawn; a part still over the node/edge bounds ("too large to draw here")
+  or the remaining text budget ("no room left") becomes a note with its size.
 - **Untrusted text.** Titles, tags, assignees and IDs go to one line (control characters and line
   breaks become spaces). In Markdown, backslash, backtick and `* _ [ ] ~ | $ # !` are backslash-escaped, `< > &` become
   entities and `@` is followed by a word joiner so it cannot mention anyone; well-formed IDs are code
@@ -605,8 +615,12 @@ Keep the dependency tree small. Compilation should be fast.
   `include_all`), determinism over map order, nested subgraphs with generated IDs, an epic node distinct
   from its subgraph, status classes, cycles, hostile titles/tags/assignees/IDs that cannot break a table
   row, start a mention or code block, or end a Mermaid label or add a statement, label truncation, and
-  the bounds (one diagram within them, per-epic parts over them with node IDs kept, a part over the
-  bounds and an exhausted text budget as notes, the defaults within GitHub's limits)
+  the graph bounds (one diagram within them, per-epic parts over them with node IDs kept, a part over
+  the bounds and an exhausted text budget as notes, a graph over only the text budget saying so, the
+  defaults within GitHub's limits), and the document budget (a 1 500-task store with hostile titles
+  within 60 000 bytes and well-formed with the counts complete, a raised budget showing everything, a
+  zero budget leaving the summary and the note, a sweep of budgets never exceeded nor breaking a row,
+  `<details>` block or fence, a cut table ending on a whole row with its count, titles cut in tables)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
