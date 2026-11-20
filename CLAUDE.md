@@ -170,7 +170,7 @@ attempts: 2
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde_yml` for the YAML portion, keeping the rest as the body string. Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
+Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `parent`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
 
 ### ID generation
 
@@ -326,7 +326,7 @@ On `update_task`, an empty-string `parent` (`""`) clears the parent; omitting it
 
 - `clap` (derive) — CLI parsing
 - `clap_complete` — shell completion generation
-- `serde`, `serde_yml`, `serde_json` — serialization
+- `serde`, `serde-saphyr`, `serde_json` — serialization (`serde-saphyr` is pure safe Rust; it replaced `serde_yml`, which is unsound and unmaintained per RUSTSEC-2025-0068)
 - `chrono` — timestamps
 - `rand` — ID generation
 - `thiserror` — error types
@@ -359,7 +359,7 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/`; archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`)
 - Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade), reparenting; start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)

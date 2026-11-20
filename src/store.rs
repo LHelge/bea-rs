@@ -490,9 +490,12 @@ mod tests {
         match &err {
             Error::InvalidFrontmatter { path, reason } => {
                 assert!(path.ends_with("bad2-bad-yaml.md"));
-                // Should contain the serde_yml error details, not just "failed to parse"
+                // Should contain the YAML parser's error details, not just "failed to parse"
                 assert!(!reason.contains("failed to parse frontmatter"), "{reason}");
                 assert!(!reason.is_empty());
+                // One line with a position, so it fits in a warning.
+                assert!(!reason.contains('\n'), "{reason}");
+                assert!(reason.contains("line 1"), "{reason}");
             }
             other => panic!("expected InvalidFrontmatter, got {other:?}"),
         }
