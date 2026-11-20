@@ -16,8 +16,9 @@ Bears is registered as an MCP server — use the MCP tools to manage tasks.
 - `create_task` — create new tasks or epics
 - `get_graph` — visualize the dependency graph
 
-`bea prime` prints the ready, in-progress and review queues with a reminder of these verbs, for a
-session-start hook. To have it in every session, add to `.claude/settings.json`:
+`bea prime` prints the ready, in-progress and review queues and a reminder of the workflow verbs, for
+a session-start hook. The reminder gives the verbs in their CLI form (`bea start`, `bea review`, …);
+while the Bears MCP server is connected, use the MCP tools of the same names listed above. To have it in every session, add to `.claude/settings.json`:
 
 ```json
 { "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] }] } }

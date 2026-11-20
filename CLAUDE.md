@@ -577,7 +577,7 @@ those of the Markdown header.
 `bea snapshot [--format html|md] [-o/--output FILE] [-a/--all]` (`cmd_snapshot` in `cli/cmd.rs`,
 `SnapshotFormat` in `cli/args.rs`) is a thin frontend over `bears::snapshot`: it calls
 `snapshot::load` with `include_all = --all`, the default `archive_limit` and `generated_at =
-Utc::now()` (the only non-deterministic part of the output), then `markdown::render` (`md`, the
+Timestamp::now()` (the only non-deterministic part of the output), then `markdown::render` (`md`, the
 default) or `html::render`. Output goes to stdout with `print!`, byte for byte what `-o` writes, so
 `bea snapshot > f` and `bea snapshot -o f` give the same file; with `-o` nothing is printed. The
 file is overwritten if it exists, and a missing directory is an `Io` error naming the path (never
