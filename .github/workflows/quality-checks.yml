@@ -26,3 +26,19 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+
+      # Reads .cargo/audit.toml: fails on vulnerabilities and on unmaintained,
+      # unsound or yanked crates, except for the advisories ignored there.
+      - name: Check RustSec advisories
+        run: cargo audit

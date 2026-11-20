@@ -6,11 +6,22 @@ on:
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/push.yml'
+      - '.github/workflows/quality-checks.yml'
   pull_request:
     paths:
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/push.yml'
+      - '.github/workflows/quality-checks.yml'
+  # Advisories are published without any change to this repository, so run the
+  # checks weekly as well to catch them on main before a pull request does.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   quality-checks:
