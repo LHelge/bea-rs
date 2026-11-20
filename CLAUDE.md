@@ -401,7 +401,10 @@ file, parse errors included, prints nothing), so it sees them.
   "<title>")` lines, each followed by the kept copy and the tasks left attached to it, and
   `  moved <from> → <to>` lines) and **exits 1 when problems are found** — after `--fix`, only
   when problems remain — so it can gate CI. A fix that left tasks attached to a kept copy still
-  exits 0 (the store is consistent) but ends by telling the user to review them. `--json` prints the report plus `ok`; with `--fix`,
+  exits 0 (the store is consistent) but ends by telling the user to review them. `--json` prints the report plus `ok` and
+  `needs_review` (both always present; `needs_review` is `StoreReport::needs_review()`, `true` exactly
+  when a fix in this run renumbered a copy whose `dependents` or `descendants` stayed with the kept
+  copy, so always `false` without `--fix`; it changes neither `ok` nor the exit status); with `--fix`,
   `renamed` (a list, since one old ID can have several copies) and `moved` are always present. It
   runs before `load_all`, so it works on a legacy store. The MCP `doctor` tool returns
   `{ ok, files, findings }` and has no fix parameter.
@@ -518,11 +521,12 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `archived_id_set`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
-  and untouched by a repair, not initialized; `repair_store`: root and child duplicates renumbered in
+  and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in
   place with references and `updated` kept, active copy kept over archived, filename-matching copy
   kept, misnamed file renamed, report-only findings and an occupied target left as they were);
   `mcp/tools.rs` (`doctor` read-only, findings are not a tool error); `tests/cli.rs` (`bea doctor`
-  exit status 0/1, `--fix` and `--json` output, problems remaining after `--fix`, legacy store with
+  exit status 0/1, `--fix` and `--json` output, `needs_review` true only after a fix that left
+  references to review, problems remaining after `--fix`, legacy store with
   migrate hint, not initialized); `tests/mcp.rs` (tool listed)
 - Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)

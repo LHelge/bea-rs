@@ -365,7 +365,9 @@ bea doctor --fix
 safe to repair automatically — it renumbers duplicate IDs (references stay with the copy that keeps
 the ID, and the tasks that point at it are listed for you to review) and renames misnamed files —
 then checks again, exiting 1 only if problems remain. The rest are reported with a hint at the
-command that fixes them.
+command that fixes them. With `--json`, `ok` says whether problems remain and `needs_review` whether
+a fix left tasks attached to a kept copy for you to check; such a fix still gives `"ok": true` and
+exit status 0.
 
 ### `bea edit`
 Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$VISUAL`, then `vi`. After the editor exits, the file is re-parsed and validated.
