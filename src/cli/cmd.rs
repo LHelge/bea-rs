@@ -370,7 +370,7 @@ fn print_transition(t: &Task, note: &str, json: bool) -> Result<()> {
 
 pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
     let mut epics: Vec<&Task> = tasks.values().filter(|t| t.task_type.is_epic()).collect();
-    epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    epics.sort_by(|a, b| task::canonical_order(a, b));
 
     if json {
         let out: Vec<_> = epics
@@ -913,6 +913,7 @@ pub fn cmd_graph(tasks: &HashMap<String, Task>, all: bool, json: bool) -> Result
         eff.get(&a.id)
             .cmp(&eff.get(&b.id))
             .then(a.created.cmp(&b.created))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     if roots.is_empty() {

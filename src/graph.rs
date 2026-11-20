@@ -78,7 +78,8 @@ impl Graph {
             .filter(|t| task::in_epic(t, epic))
             .collect();
 
-        // Sort by effective priority (P0 first), then by creation date (oldest first).
+        // Sort by effective priority (P0 first), then by creation date (oldest
+        // first), then by ID, so exact ties never follow the map's iteration order.
         // The priority map was computed once above — no repeated BFS in the comparator.
         result.sort_by(|a, b| {
             eff.get(&a.id)
@@ -86,6 +87,7 @@ impl Graph {
                 .unwrap_or(a.priority)
                 .cmp(&eff.get(&b.id).copied().unwrap_or(b.priority))
                 .then(a.created.cmp(&b.created))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         if let Some(limit) = limit {
@@ -417,11 +419,8 @@ impl Graph {
             let ta = tasks.get(*a);
             let tb = tasks.get(*b);
             match (ta, tb) {
-                (Some(ta), Some(tb)) => ta
-                    .priority
-                    .cmp(&tb.priority)
-                    .then(ta.created.cmp(&tb.created)),
-                _ => std::cmp::Ordering::Equal,
+                (Some(ta), Some(tb)) => task::canonical_order(ta, tb),
+                _ => a.cmp(b),
             }
         });
         let mut queue: VecDeque<&str> = seed.into_iter().collect();
@@ -449,11 +448,8 @@ impl Graph {
                     let ta = tasks.get(*a);
                     let tb = tasks.get(*b);
                     match (ta, tb) {
-                        (Some(ta), Some(tb)) => ta
-                            .priority
-                            .cmp(&tb.priority)
-                            .then(ta.created.cmp(&tb.created)),
-                        _ => std::cmp::Ordering::Equal,
+                        (Some(ta), Some(tb)) => task::canonical_order(ta, tb),
+                        _ => a.cmp(b),
                     }
                 });
                 queue.extend(newly_ready);
@@ -467,7 +463,7 @@ impl Graph {
             .filter(|id| !sorted_ids.contains(id.as_str()))
             .filter_map(|id| tasks.get(id))
             .collect();
-        cyclic.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+        cyclic.sort_by(|a, b| task::canonical_order(a, b));
 
         SubsetTopo {
             sorted: result,
@@ -718,6 +714,38 @@ mod tests {
         let graph = Graph::build(&tasks);
         let ready = graph.ready(&tasks, None, Some(2), None);
         assert_eq!(ready.len(), 2);
+    }
+
+    #[test]
+    fn test_ready_breaks_exact_ties_by_id() {
+        // Equal effective priority and creation date: the ID decides, whatever
+        // order the map iterates in.
+        let created: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let ids = ["q", "d", "x", "b.a", "b", "m", "f", "s"];
+        let tasks = make_tasks(
+            ids.iter()
+                .map(|id| {
+                    let mut t = make_task(id, Status::Open, Priority::P1, vec![]);
+                    t.created = created;
+                    t
+                })
+                .collect(),
+        );
+        let graph = Graph::build(&tasks);
+        let ready: Vec<&str> = graph
+            .ready(&tasks, None, None, None)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(ready, ["b", "b.a", "d", "f", "m", "q", "s", "x"]);
+
+        // A limit keeps the first tasks of that order, not an arbitrary subset.
+        let limited: Vec<&str> = graph
+            .ready(&tasks, None, Some(3), None)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(limited, ["b", "b.a", "d"]);
     }
 
     #[test]

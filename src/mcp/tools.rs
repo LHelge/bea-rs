@@ -536,7 +536,7 @@ impl BeaMcp {
                 let tasks = store::load_all(&self.base).await?;
                 let mut epics: Vec<&task::Task> =
                     tasks.values().filter(|t| t.task_type.is_epic()).collect();
-                epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+                epics.sort_by(|a, b| task::canonical_order(a, b));
                 let summaries: Vec<_> = epics
                     .iter()
                     .map(|t| t.epic_summary(service::epic_progress(&tasks, &t.id)))
