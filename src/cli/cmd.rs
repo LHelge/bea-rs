@@ -1217,6 +1217,7 @@ pub fn cmd_doctor(base: &Path, fix: bool, json: bool) -> Result<()> {
     if json {
         let mut value = serde_json::to_value(&report)?;
         value["ok"] = report.is_healthy().into();
+        value["needs_review"] = report.needs_review().into();
         if fix {
             for key in ["renamed", "moved"] {
                 if value.get(key).is_none() {
@@ -1255,7 +1256,7 @@ pub fn cmd_doctor(base: &Path, fix: bool, json: bool) -> Result<()> {
             println!("  moved {} → {}", m.from.display(), m.to.display());
         }
         let to_check = report.renamed.iter().filter(|r| r.has_attached()).count();
-        if report.is_healthy() && to_check > 0 {
+        if report.is_healthy() && report.needs_review() {
             println!(
                 "Checked {} task file(s): no problems remain, but tasks referring to \
                  {to_check} renumbered ID(s) were left with the copy that kept the ID; review \

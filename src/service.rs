@@ -1517,6 +1517,13 @@ impl StoreReport {
     pub fn is_healthy(&self) -> bool {
         self.findings.is_empty()
     }
+
+    /// Whether a repair renumbered a copy that left tasks attached to the
+    /// copy that kept the ID (see [`Renumbered::has_attached`]). Such a store
+    /// can be healthy and still want a person to check those references.
+    pub fn needs_review(&self) -> bool {
+        self.renamed.iter().any(Renumbered::has_attached)
+    }
 }
 
 /// Check the store, active and archive, for inconsistencies the loaders do
@@ -4401,6 +4408,30 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn test_store_report_needs_review() {
+        let renumbered = |dependents: &[&str], descendants: &[&str]| Renumbered {
+            from: "aaa".into(),
+            to: "bbb".into(),
+            file: PathBuf::from(".bears/bbb-copy.md"),
+            title: "Copy".into(),
+            kept_file: PathBuf::from(".bears/aaa-original.md"),
+            kept_title: "Original".into(),
+            dependents: dependents.iter().map(|s| s.to_string()).collect(),
+            descendants: descendants.iter().map(|s| s.to_string()).collect(),
+        };
+        let report = |renamed| StoreReport {
+            renamed,
+            ..StoreReport::default()
+        };
+
+        assert!(!report(vec![]).needs_review());
+        assert!(!report(vec![renumbered(&[], &[])]).needs_review());
+        assert!(report(vec![renumbered(&["ccc"], &[])]).needs_review());
+        assert!(report(vec![renumbered(&[], &["aaa.x1"])]).needs_review());
+        assert!(report(vec![renumbered(&[], &[]), renumbered(&["ccc"], &[])]).needs_review());
     }
 
     #[test]

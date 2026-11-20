@@ -2841,6 +2841,7 @@ fn test_doctor_healthy_store_succeeds() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["files"], 1);
     assert_eq!(v["findings"], serde_json::json!([]));
+    assert_eq!(v["needs_review"], false, "{v}");
 }
 
 /// A duplicate ID (as a git merge of two branches leaves it) fails the
@@ -2876,9 +2877,14 @@ fn test_doctor_fix_renumbers_a_duplicate() {
     assert_eq!(v["findings"][0]["kind"], "duplicate-id");
     assert_eq!(v["findings"][0]["id"], id.as_str());
 
+    assert_eq!(v["needs_review"], false, "nothing fixed without --fix: {v}");
+
+    // The dependent stays with the kept copy, so the fix asks for a review
+    // without failing.
     let (code, v) = doctor_json(&tmp, &["doctor", "--fix"]);
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(v["ok"], true);
+    assert_eq!(v["needs_review"], true, "{v}");
     assert_eq!(v["moved"], serde_json::json!([]));
     let renamed = v["renamed"].as_array().unwrap();
     assert_eq!(renamed.len(), 1);
@@ -2895,6 +2901,24 @@ fn test_doctor_fix_renumbers_a_duplicate() {
     let (_, shown) = doctor_json(&tmp, &["show", &dependent]);
     assert_eq!(shown["depends_on"], serde_json::json!([id]));
     bea(&tmp).arg("doctor").assert().success();
+}
+
+/// A renumbered duplicate nothing refers to leaves nothing to review.
+#[test]
+fn test_doctor_fix_without_references_needs_no_review() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let (id, path) = doctor_task(&tmp, "Original");
+    let copy = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("title: Original", "title: Copy");
+    std::fs::write(tmp.path().join(format!(".bears/{id}-the-copy.md")), copy).unwrap();
+
+    let (code, v) = doctor_json(&tmp, &["doctor", "--fix"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["renamed"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["needs_review"], false, "{v}");
 }
 
 /// When the duplicated ID is an epic, its children stay with the copy that
