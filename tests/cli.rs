@@ -250,6 +250,124 @@ fn test_stale_lists_idle_claims() {
 }
 
 #[test]
+fn test_prime_prints_the_session_context() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    // An empty store still prints every section and the workflow reminder.
+    bea(&tmp)
+        .arg("prime")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ready: none."))
+        .stdout(predicate::str::contains("In progress: none."))
+        .stdout(predicate::str::contains("Awaiting review: none."))
+        .stdout(predicate::str::contains("bea start <id>"))
+        .stdout(predicate::str::contains("bea review <id>"));
+
+    let ready: Vec<String> = (1..=3)
+        .map(|i| create_task(&tmp, &format!("Ready {i}")))
+        .collect();
+    let wip = create_task(&tmp, "Claimed work");
+    bea(&tmp)
+        .args(["start", &wip, "-a", "worker-1"])
+        .assert()
+        .success();
+    let rev = create_task(&tmp, "Finished work");
+    bea(&tmp).args(["start", &rev]).assert().success();
+    bea(&tmp).args(["review", &rev]).assert().success();
+
+    let out = bea(&tmp).args(["prime", "--limit", "2"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    // Not a terminal, so no colour codes.
+    assert!(!text.contains('\u{1b}'), "{text}");
+    assert!(
+        text.contains("Ready (2 of 3, 1 not shown; `bea ready` lists all):"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Ready 1") && text.contains("Ready 2"),
+        "{text}"
+    );
+    assert!(!text.contains("Ready 3"), "{text}");
+    assert!(text.contains("In progress (1):"), "{text}");
+    assert!(
+        text.contains("Claimed work (worker-1, attempt 1)"),
+        "{text}"
+    );
+    assert!(text.contains("Awaiting review (1):"), "{text}");
+    assert!(text.contains("Finished work"), "{text}");
+
+    // The default shows all three ready tasks without a "not shown" note.
+    bea(&tmp)
+        .arg("prime")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ready (3):"))
+        .stdout(predicate::str::contains("Ready 3"));
+
+    let out = bea(&tmp)
+        .args(["--json", "prime", "--limit", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ready_total"], 3);
+    assert_eq!(v["ready"].as_array().unwrap().len(), 1);
+    assert_eq!(v["ready"][0]["id"], ready[0].as_str());
+    assert_eq!(v["in_progress"][0]["id"], wip.as_str());
+    assert_eq!(v["in_progress"][0]["assignee"], "worker-1");
+    assert_eq!(v["in_progress"][0]["attempts"], 1);
+    assert_eq!(v["review"][0]["id"], rev.as_str());
+}
+
+/// Without a store `bea prime` fails like every other command; the hook
+/// command the docs give (`test ! -d .bears || bea prime`) is then a no-op.
+#[cfg(unix)]
+#[test]
+fn test_prime_without_store() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .arg("prime")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bea init"));
+
+    let hook = |tmp: &TempDir| {
+        let bin = assert_cmd::cargo::cargo_bin("bea");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("test ! -d .bears || '{}' prime", bin.display()))
+            .current_dir(tmp.path())
+            .output()
+            .unwrap()
+    };
+    let out = hook(&tmp);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+
+    bea(&tmp).arg("init").assert().success();
+    let out = hook(&tmp);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("# Bears task context")
+    );
+}
+
+#[test]
+fn test_prime_in_completions() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prime"));
+}
+
+#[test]
 fn test_dep_cycle_rejected() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp).arg("init").assert().success();
