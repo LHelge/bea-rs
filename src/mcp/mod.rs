@@ -21,6 +21,20 @@ impl BeaMcp {
         let tool_router = Self::build_tool_router();
         Self { base, tool_router }
     }
+
+    /// Resolve an `epic` parameter (an ID or a prefix) to the epic's ID.
+    async fn resolve_epic(
+        &self,
+        tasks: &std::collections::HashMap<String, bears::Task>,
+        epic: Option<&str>,
+    ) -> Result<Option<String>, Error> {
+        match epic {
+            Some(e) => Ok(Some(
+                bears::service::resolve_epic_filter(&self.base, tasks, e).await?,
+            )),
+            None => Ok(None),
+        }
+    }
 }
 
 fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {

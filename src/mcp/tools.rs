@@ -21,13 +21,10 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
+                let epic = self.resolve_epic(&tasks, params.epic.as_deref()).await?;
                 let limit = params.limit.map(|v| v as usize);
-                let ready = service::list_ready(
-                    &tasks,
-                    params.tag.as_deref(),
-                    limit,
-                    params.epic.as_deref(),
-                );
+                let ready =
+                    service::list_ready(&tasks, params.tag.as_deref(), limit, epic.as_deref());
                 let eff = service::effective_priorities(&tasks);
                 let summaries: Vec<_> = ready.iter().map(|t| t.summary(eff.get(&t.id))).collect();
                 ok_json(serde_json::json!(summaries))
@@ -44,6 +41,7 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
+                let epic = self.resolve_epic(&tasks, params.epic.as_deref()).await?;
                 // active_only=true → include_all=false (hide done/cancelled)
                 let include_all = !params.active_only.unwrap_or(false);
                 let mut filtered = service::list_tasks(
@@ -53,7 +51,7 @@ impl BeaMcp {
                     params.tag.as_deref(),
                     include_all,
                     params.include_proposed.unwrap_or(false),
-                    params.epic.as_deref(),
+                    epic.as_deref(),
                 );
                 if let Some(limit) = params.limit {
                     filtered.truncate(limit as usize);
@@ -220,13 +218,10 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
+                let epic = self.resolve_epic(&tasks, params.epic.as_deref()).await?;
                 let limit = params.limit.map(|v| v as usize);
-                let queue = service::list_review(
-                    &tasks,
-                    params.tag.as_deref(),
-                    limit,
-                    params.epic.as_deref(),
-                );
+                let queue =
+                    service::list_review(&tasks, params.tag.as_deref(), limit, epic.as_deref());
                 let eff = service::effective_priorities(&tasks);
                 let summaries: Vec<_> = queue.iter().map(|t| t.summary(eff.get(&t.id))).collect();
                 ok_json(serde_json::json!(summaries))
@@ -441,15 +436,12 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
+                let epic = self.resolve_epic(&tasks, params.epic.as_deref()).await?;
                 let graph = service::build_graph(&tasks);
                 let include_done = params.include_done.unwrap_or(false);
                 let limit = params.limit.map(|v| v as usize);
-                let adj = graph.bounded_adjacency_list(
-                    &tasks,
-                    include_done,
-                    params.epic.as_deref(),
-                    limit,
-                );
+                let adj =
+                    graph.bounded_adjacency_list(&tasks, include_done, epic.as_deref(), limit);
                 ok_json(serde_json::json!(adj))
             }
             .await,

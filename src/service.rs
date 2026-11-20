@@ -70,8 +70,48 @@ pub fn create_task(
     Ok(t)
 }
 
+/// Resolve the value of an `epic` filter to the epic's full ID, the way every
+/// other ID argument is resolved (an exact ID, or a prefix through
+/// [`store::resolve_prefix`]).
+///
+/// `tasks` are the active tasks. An exact active ID is taken without reading
+/// the archive. Otherwise the value is resolved against active and archived
+/// IDs together, so an epic that lives only in the archive still filters its
+/// active children, and a prefix of such an epic names the epic rather than
+/// one of those children.
+///
+/// Errors: [`Error::InvalidId`] for an empty value, [`Error::TaskNotFound`]
+/// when it names no task, [`Error::AmbiguousPrefix`] when it names several,
+/// and [`Error::NotAnEpic`] when the task it names is not an epic (only epics
+/// have tasks below them, so the filter could only ever be empty).
+///
+/// The `list_*` functions and [`Graph::bounded_adjacency_list`] take the
+/// resolved ID; they match it exactly.
+pub async fn resolve_epic_filter(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    epic: &str,
+) -> Result<String> {
+    let is_epic = |t: &Task| {
+        if t.task_type.is_epic() {
+            Ok(t.id.clone())
+        } else {
+            Err(Error::NotAnEpic(t.id.clone()))
+        }
+    };
+    if let Some(t) = tasks.get(epic) {
+        return is_epic(t);
+    }
+    let mut all = store::load_archived(base).await?;
+    all.extend(tasks.iter().map(|(id, t)| (id.clone(), t.clone())));
+    let id = store::resolve_prefix(&all, epic)?;
+    is_epic(&all[&id])
+}
+
 /// List tasks with optional filters, sorted by priority then creation date.
-/// List tasks with optional filters.
+///
+/// `epic` is an exact epic ID (see [`resolve_epic_filter`]); it matches every
+/// task below that epic.
 ///
 /// `include_all` also yields done/cancelled tasks. Proposals are separate:
 /// they stay out of every listing unless `include_proposed` is set or the
@@ -2322,6 +2362,63 @@ mod tests {
         // The nested epic filters its own subtree only.
         let ready = list_ready(&nested_epic_store(Status::Open), None, None, Some("e1.s"));
         assert_eq!(ids(&ready), ["e1.s.t"]);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_epic_filter_resolves_like_other_id_arguments() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        for t in nested_epic_store(Status::Open).into_values() {
+            store::save(base, &t).unwrap();
+        }
+        store::save(base, &make_epic("q7")).unwrap();
+        store::save(base, &make_child("k", "q7", Status::Open)).unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+        let resolve = async |v: &str| resolve_epic_filter(base, &tasks, v).await;
+
+        assert_eq!(resolve("e1").await.unwrap(), "e1");
+        assert_eq!(resolve("e1.s").await.unwrap(), "e1.s");
+        // A prefix of an epic resolves past the epic's own children.
+        assert_eq!(resolve("q").await.unwrap(), "q7");
+        assert!(matches!(
+            resolve("e1.").await,
+            Err(Error::AmbiguousPrefix { .. })
+        ));
+        assert!(matches!(
+            resolve("e").await,
+            Err(Error::AmbiguousPrefix { .. })
+        ));
+        assert!(matches!(resolve("e1.a").await, Err(Error::NotAnEpic(id)) if id == "e1.a"));
+        assert!(matches!(resolve("zz").await, Err(Error::NotAnEpic(id)) if id == "zz"));
+        assert!(matches!(resolve("nope").await, Err(Error::TaskNotFound(_))));
+        assert!(matches!(resolve("").await, Err(Error::InvalidId { .. })));
+    }
+
+    /// An epic that lives only in the archive still filters its active
+    /// children, by its full ID or a prefix: the prefix resolves against
+    /// active and archived IDs together, so it names the epic and not its
+    /// one active child.
+    #[tokio::test]
+    async fn test_resolve_epic_filter_finds_an_archived_epic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        let mut epic = make_epic("arc");
+        epic.status = Status::Done;
+        store::save(base, &epic).unwrap();
+        store::save(base, &make_child("ch", "arc", Status::Open)).unwrap();
+        store::move_to_archive(base, "arc").unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+
+        for value in ["arc", "ar"] {
+            let epic = resolve_epic_filter(base, &tasks, value).await.unwrap();
+            assert_eq!(epic, "arc", "{value}");
+            assert_eq!(
+                ids(&list_ready(&tasks, None, None, Some(&epic))),
+                ["arc.ch"]
+            );
+        }
     }
 
     /// Progress counts direct children: the nested epic is one unit of work.

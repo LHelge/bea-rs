@@ -350,6 +350,45 @@ async fn test_epic_filters_match_nested_epics_over_mcp() {
     client.cancel().await.unwrap();
 }
 
+/// The `epic` parameter takes a prefix; an unknown ID or a non-epic is a
+/// tool error.
+#[tokio::test]
+async fn test_epic_filter_resolves_prefixes_over_mcp() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect(&tmp).await;
+
+    let epic = create_task(&client, serde_json::json!({ "title": "E", "type": "epic" })).await;
+    let epic = epic["id"].as_str().unwrap().to_string();
+    let child = create_task(&client, serde_json::json!({ "title": "C", "parent": epic })).await;
+
+    for tool in ["list_ready", "list_all_tasks", "list_review", "get_graph"] {
+        let call = async |epic: &str| {
+            client
+                .call_tool(params(tool, serde_json::json!({ "epic": epic })))
+                .await
+                .unwrap()
+        };
+        let r = call(&epic[..2]).await;
+        assert_ne!(r.is_error, Some(true), "{tool}: {:?}", r.content);
+        let r = call("zzzzzzzzz").await;
+        assert_eq!(r.is_error, Some(true), "{tool}");
+        assert!(extract_text(&r).contains("not found"), "{tool}");
+        let r = call(child["id"].as_str().unwrap()).await;
+        assert_eq!(r.is_error, Some(true), "{tool}");
+        assert!(extract_text(&r).contains("is not an epic"), "{tool}");
+    }
+    let r = client
+        .call_tool(params(
+            "list_ready",
+            serde_json::json!({ "epic": &epic[..2] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&r)[0]["id"], child["id"]);
+
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_unknown_id_is_tool_error_not_protocol_error() {
     let tmp = TempDir::new().unwrap();

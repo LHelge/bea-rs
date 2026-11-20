@@ -1345,6 +1345,62 @@ fn test_epic_filters_match_nested_epics() {
     assert_eq!(ids(&["ready", "--epic", &inner]), [leaf]);
 }
 
+/// `--epic` takes a prefix like every other ID argument; a value naming no
+/// task or a task that is not an epic is an error, not an empty list.
+#[test]
+fn test_epic_filters_resolve_prefixes() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic = create_epic(&tmp, "Prefixed");
+    // The only other task is below the epic, so the prefix is unambiguous.
+    let child = create_child_task(&tmp, "Child work", &epic);
+    let prefix = &epic[..2];
+
+    for cmd in ["list", "ready", "review"] {
+        bea(&tmp)
+            .args(["--json", cmd, "--epic", prefix])
+            .assert()
+            .success();
+        bea(&tmp)
+            .args([cmd, "--epic", "zzzzzzzzz"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not found"));
+        bea(&tmp)
+            .args([cmd, "--epic", &child])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("is not an epic"));
+    }
+    bea(&tmp)
+        .args(["--json", "ready", "--epic", prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&child));
+}
+
+/// An epic that lives only in the archive still filters its active children,
+/// by its ID or a prefix.
+#[test]
+fn test_epic_filter_on_an_archived_epic() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic = create_epic(&tmp, "Archived epic");
+    let child = create_child_task(&tmp, "Left behind", &epic);
+    bea(&tmp).args(["done", &epic]).assert().success();
+    bea(&tmp).args(["archive", &epic]).assert().success();
+
+    for value in [epic.as_str(), &epic[..2]] {
+        bea(&tmp)
+            .args(["--json", "ready", "--epic", value])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(&child));
+    }
+}
+
 /// cs7: editing the id field in bea edit must not orphan the original file.
 #[test]
 fn test_edit_id_change_rejected_no_orphan() {
