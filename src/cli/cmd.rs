@@ -1066,6 +1066,63 @@ pub async fn cmd_log(base: &Path, limit: Option<usize>, json: bool) -> Result<()
     Ok(())
 }
 
+/// `bea migrate [--dry-run]` — convert a store written before hierarchical IDs.
+pub fn cmd_migrate(base: &Path, dry_run: bool, json: bool) -> Result<()> {
+    let migration = store::migrate(base, dry_run)?;
+
+    if json {
+        let orphaned: Vec<_> = migration
+            .orphaned
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "id": o.id,
+                    "parent": o.parent,
+                    "reason": o.reason.to_string(),
+                })
+            })
+            .collect();
+        output(&serde_json::json!({
+            "dry_run": dry_run,
+            "renamed": migration.renamed,
+            "orphaned": orphaned,
+            "legacy_files": migration.legacy_files,
+        }))?;
+        return Ok(());
+    }
+
+    if migration.is_noop() {
+        println!("Nothing to migrate: the store already uses hierarchical IDs.");
+        return Ok(());
+    }
+    for (old, new) in &migration.renamed {
+        println!("  renamed {} → {}", old, color_id(new));
+    }
+    for o in &migration.orphaned {
+        let why = match o.reason {
+            store::OrphanReason::MissingParent => "does not exist",
+            store::OrphanReason::ParentNotEpic => "is not an epic",
+            store::OrphanReason::ParentCycle => "is part of a parent cycle",
+        };
+        println!(
+            "  kept {} as is: its parent {} {}, so the link was dropped",
+            color_id(&o.id),
+            o.parent,
+            why
+        );
+    }
+    let renamed = migration.renamed.len();
+    if dry_run {
+        println!("Dry run: would rename {renamed} task(s); nothing was written.");
+    } else {
+        println!(
+            "Migrated the store: renamed {renamed} task(s), {} file(s) had a parent: key.",
+            migration.legacy_files
+        );
+    }
+    Ok(())
+}
+
 pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
     // Resolve prefix and load task
     let original = service::get_task(tasks, id)?;

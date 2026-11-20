@@ -314,6 +314,14 @@ pub enum Command {
         limit: Option<usize>,
     },
 
+    /// Convert a store written before hierarchical IDs (0.10): give every
+    /// child task an ID under its epic and drop the `parent:` keys
+    Migrate {
+        /// Print the renames without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Open a task in $EDITOR for editing
     Edit {
         /// Task ID

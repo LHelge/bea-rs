@@ -69,6 +69,9 @@ fn hint_for(e: &Error) -> Option<&'static str> {
         Error::NotArchivable { .. } => {
             Some("archive or complete the blocking dependents first, or use `bea archive` to sweep")
         }
+        Error::LegacyStore { .. } => Some(
+            "run `bea migrate` to give child tasks hierarchical IDs (`bea migrate --dry-run` previews the renames)",
+        ),
         _ => None,
     }
 }

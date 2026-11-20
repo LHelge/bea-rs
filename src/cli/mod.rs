@@ -51,6 +51,8 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         Command::List { archived: true, .. } => {
             return cmd::cmd_list_archived(base, cli.json).await;
         }
+        // Works on a legacy store, which every loader refuses.
+        Command::Migrate { dry_run } => return cmd::cmd_migrate(base, *dry_run, cli.json),
         Command::Mcp | Command::Tui => unreachable!("handled in main"),
         _ => {}
     }
@@ -187,6 +189,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         | Command::Agent { .. }
         | Command::Completions { .. }
         | Command::Restore { .. }
+        | Command::Migrate { .. }
         | Command::Log { .. }
         | Command::List { archived: true, .. }
         | Command::Mcp
