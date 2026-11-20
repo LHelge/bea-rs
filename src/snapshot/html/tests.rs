@@ -133,9 +133,18 @@ fn render_is_deterministic() {
 }
 
 #[test]
+fn title_matches_the_markdown_renderer() {
+    let html = render(&snapshot(false));
+    assert!(html.contains("<title>Bears snapshot</title>"));
+    assert!(html.contains("<h1>Bears snapshot</h1>"));
+    assert!(!html.contains("bears snapshot"));
+}
+
+#[test]
 fn generated_time_is_shown_only_when_given() {
     let html = render(&snapshot(false));
-    assert!(html.contains("Generated 2026-11-20T12:00:00Z"));
+    // The same wording and format as the Markdown header.
+    assert!(html.contains("Generated 2026-11-20 12:00 UTC."), "{html}");
     let mut s = snapshot(false);
     s.generated_at = None;
     assert!(!render(&s).contains("Generated"));
