@@ -521,8 +521,12 @@ impl Migration {
 /// Convert a store written before hierarchical IDs, active and archive alike.
 ///
 /// Every task whose legacy `parent:` key names an epic gets a fresh child ID
-/// under that epic's (new) ID, from [`task::generate_child_id`]; parents are
+/// under that epic's (new) ID, from [`task::derive_child_id`]; parents are
 /// placed before their children, so nested epics carry their whole chain.
+/// The IDs are derived from the old IDs, and tasks are placed in order of
+/// their old IDs, so the same store always migrates to the same IDs: a dry
+/// run shows the IDs the real run assigns, and two copies of a store migrate
+/// identically. Nothing depends on the time, `updated` or directory order.
 /// Root tasks keep their IDs. A task found below a renamed task by its ID
 /// alone keeps its last segment under the new prefix. Every `depends_on` is
 /// rewritten, `updated` is kept, and every file that carried a `parent:` key
@@ -802,7 +806,9 @@ impl Planner<'_> {
                 return kept;
             }
         }
-        task::generate_child_id(parent_id, &self.reserved, self.config)
+        // Derived from the old ID, not drawn at random, so that a dry run
+        // and the real run, or two copies of the store, agree.
+        task::derive_child_id(parent_id, &t.id, &self.reserved, self.config)
     }
 
     fn orphan(&mut self, t: &Task, reason: OrphanReason) {
@@ -1983,6 +1989,65 @@ mod tests {
         assert_eq!(m.renamed.len(), 5);
         assert_eq!(m.legacy_files, 5);
         assert_eq!(snapshot(tmp.path()), before);
+    }
+
+    /// Copy every task file of `from` (active and archive) into a fresh store.
+    fn copy_store(from: &Path) -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        for (rel, content) in snapshot(from) {
+            fs::write(tasks_dir(tmp.path()).join(rel), content).unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn test_migrate_dry_run_shows_the_ids_the_real_run_assigns() {
+        let tmp = TempDir::new().unwrap();
+        legacy_store(tmp.path());
+        let preview = migrate(tmp.path(), true).unwrap();
+        assert_eq!(migrate(tmp.path(), true).unwrap(), preview);
+        let real = migrate(tmp.path(), false).unwrap();
+        assert_eq!(real.renamed, preview.renamed);
+        assert_eq!(real, preview);
+    }
+
+    /// The same legacy store, migrated in two places, ends up byte-identical.
+    #[test]
+    fn test_migrate_is_the_same_for_two_copies_of_a_store() {
+        let a = TempDir::new().unwrap();
+        legacy_store(a.path());
+        // Many siblings under one-char segments, so some candidates collide
+        // and the segment length grows part-way.
+        fs::write(crate::config::config_path(a.path()), "child-id-length: 1\n").unwrap();
+        save(a.path(), &epic("big")).unwrap();
+        for n in 0..20 {
+            write_legacy(a.path(), &plain(&format!("k{n}")), "big", n % 3 == 0);
+        }
+        let b = copy_store(a.path());
+        fs::copy(
+            crate::config::config_path(a.path()),
+            crate::config::config_path(b.path()),
+        )
+        .unwrap();
+
+        let ma = migrate(a.path(), false).unwrap();
+        let mb = migrate(b.path(), false).unwrap();
+        assert_eq!(ma, mb);
+        assert_eq!(snapshot(a.path()), snapshot(b.path()));
+
+        let big: Vec<&String> = ma
+            .renamed
+            .iter()
+            .filter(|(old, _)| old.starts_with('k'))
+            .map(|(_, new)| new)
+            .collect();
+        assert_eq!(big.len(), 20);
+        assert_eq!(big.iter().collect::<HashSet<_>>().len(), 20, "{big:?}");
+        let lengths: HashSet<usize> = big.iter().map(|id| task::leaf_segment(id).len()).collect();
+        // 25% of 31 one-char segments is 7.75: the rest get two chars.
+        assert_eq!(lengths, [1, 2].into(), "{big:?}");
+        assert!(big.iter().all(|id| task::parent_of(id) == Some("big")));
     }
 
     #[tokio::test]
