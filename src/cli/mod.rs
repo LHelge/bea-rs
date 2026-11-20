@@ -53,6 +53,8 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         }
         // Works on a legacy store, which every loader refuses.
         Command::Migrate { dry_run } => return cmd::cmd_migrate(base, *dry_run, cli.json),
+        // Reads task files itself, so it can see what the loaders skip.
+        Command::Doctor { fix } => return cmd::cmd_doctor(base, *fix, cli.json),
         Command::Mcp | Command::Tui => unreachable!("handled in main"),
         _ => {}
     }
@@ -190,6 +192,7 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
         | Command::Completions { .. }
         | Command::Restore { .. }
         | Command::Migrate { .. }
+        | Command::Doctor { .. }
         | Command::Log { .. }
         | Command::List { archived: true, .. }
         | Command::Mcp

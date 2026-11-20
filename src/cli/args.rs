@@ -322,6 +322,16 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Check the store for inconsistencies (duplicate IDs, misnamed files,
+    /// dangling dependencies, missing or non-epic parents, cycles). Exits
+    /// non-zero when problems are found
+    Doctor {
+        /// Renumber duplicate IDs and rename misnamed files, then check again;
+        /// exits non-zero only if problems remain
+        #[arg(long)]
+        fix: bool,
+    },
+
     /// Open a task in $EDITOR for editing
     Edit {
         /// Task ID
