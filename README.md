@@ -47,10 +47,29 @@ cargo install --path .
 
 The binary is named `bea`.
 
-> **Upgrading to 0.10?** Task IDs are now hierarchical and the `parent:` frontmatter key is gone.
-> `bea` refuses to load a store written by an earlier version until you run `bea migrate` once
-> (`bea migrate --dry-run` previews the renames and the new IDs). Commit or back up `.bears/` first. See
-> [Task IDs](#task-ids) and [`bea migrate`](#bea-migrate).
+### Upgrading to 0.10
+
+0.10 is a breaking release. Task IDs are now hierarchical (a child of epic `a1b` is `a1b.c2`) and the
+`parent:` frontmatter key is gone. `bea` refuses to load a store written by an earlier version until
+it has been converted once with `bea migrate`. Upgrade in this order:
+
+1. **Install 0.10 first, everywhere that touches the store**: your shell, CI, and the `bea` that
+   your coding agents' MCP server runs (restart the agent or editor so the server restarts too).
+   An older `bea` cannot read a migrated store's child links: it sees every child task as a
+   top-level task with no epic.
+2. **Commit or back up `.bears/`.**
+3. **Preview**: `bea migrate --dry-run` prints every `old → new` rename and writes nothing. It
+   shows exactly the IDs the real run assigns.
+4. **Migrate**: `bea migrate`, then `bea doctor` to check the result, and commit it. The new IDs
+   depend only on the store's contents, so another branch that migrates its own copy gets the same
+   IDs. If the run is interrupted, run it again.
+
+Task IDs you wrote down elsewhere (commit messages, notes) keep their old values; `bea migrate --json`
+prints the old → new map. Also changed in 0.10: `bea prune --json` and the MCP `prune_tasks` tool
+always return `{ "pruned": [...], "renamed": {...} }`; deleting or pruning an epic gives its children
+new top-level IDs; and an `epic` filter matches the epic's whole subtree, accepts an ID prefix, and is
+an error, not an empty list, when it names no epic. See [Task IDs](#task-ids) and
+[`bea migrate`](#bea-migrate).
 
 ---
 
