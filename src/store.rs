@@ -365,8 +365,12 @@ fn read_task_files(dir: &Path) -> Result<Vec<(PathBuf, Task)>> {
 ///
 /// Everything is checked before anything is written: each key must be the ID
 /// of an active or archived task ([`Error::TaskNotFound`]), each new ID must
-/// be well formed ([`Error::InvalidId`]), and no new ID may be shared by two
-/// keys or belong to a task that keeps its ID ([`Error::IdTaken`]).
+/// be well formed ([`Error::InvalidId`]), and every new ID must be unused:
+/// not shared by two keys and not the ID of any task, active or archived
+/// ([`Error::IdTaken`]). The old and new IDs are therefore disjoint, so swaps
+/// (`a → b, b → a`), chains (`a → b, b → c`) and identity entries (`a → a`)
+/// are all refused: renaming onto an ID that is itself being renamed away
+/// could overwrite its file before that task's new file exists.
 ///
 /// The files under their new IDs are written first, then the rewritten
 /// references, and the old files are removed last. An interruption therefore
@@ -389,8 +393,7 @@ pub fn rename_ids(base: &Path, renames: &BTreeMap<String, String>) -> Result<()>
     let mut targets = HashSet::new();
     for new in renames.values() {
         task::validate_id(new)?;
-        let kept_by_other = present.contains(new.as_str()) && !renames.contains_key(new);
-        if kept_by_other || !targets.insert(new.as_str()) {
+        if present.contains(new.as_str()) || !targets.insert(new.as_str()) {
             return Err(Error::IdTaken(new.clone()));
         }
     }
@@ -416,16 +419,12 @@ pub fn rename_ids(base: &Path, renames: &BTreeMap<String, String>) -> Result<()>
         }
     }
 
-    let mut written = HashSet::new();
+    // Every new ID is unused, so no new file can land on an old file's path.
     for (path, t) in moved.iter().chain(rewritten.iter()) {
         write_task_file(path, t)?;
-        written.insert(path.clone());
     }
     for path in old_paths {
-        // A new file may have taken an old file's name (a swap of IDs).
-        if !written.contains(&path) {
-            fs::remove_file(&path)?;
-        }
+        fs::remove_file(&path)?;
     }
     Ok(())
 }
@@ -1016,23 +1015,50 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
+    /// Maps whose new IDs are also old IDs are refused before anything is
+    /// written: a swap or chain could overwrite a file whose task has not yet
+    /// been written under its new ID.
     #[tokio::test]
-    async fn test_rename_ids_swaps_ids_with_the_same_slug() {
+    async fn test_rename_ids_refuses_swaps_chains_and_identity() {
         let tmp = TempDir::new().unwrap();
         init(tmp.path()).unwrap();
         let mut a = Task::new("aa".into(), "Same".into(), Priority::P0);
         a.depends_on = vec!["bb".into()];
-        let b = Task::new("bb".into(), "Same".into(), Priority::P3);
         save(tmp.path(), &a).unwrap();
-        save(tmp.path(), &b).unwrap();
+        save(
+            tmp.path(),
+            &Task::new("bb".into(), "Same".into(), Priority::P3),
+        )
+        .unwrap();
+        save(
+            tmp.path(),
+            &Task::new("cc".into(), "Same".into(), Priority::P1),
+        )
+        .unwrap();
+        let before: Vec<_> = ["aa", "bb", "cc"]
+            .iter()
+            .map(|id| fs::read_to_string(find_task_path(tmp.path(), id).unwrap()).unwrap())
+            .collect();
 
-        rename_ids(tmp.path(), &renames(&[("aa", "bb"), ("bb", "aa")])).unwrap();
+        for (pairs, taken) in [
+            (&[("aa", "bb"), ("bb", "aa")][..], "bb"),
+            (&[("aa", "bb"), ("bb", "xx")][..], "bb"),
+            (&[("bb", "cc"), ("cc", "xx")][..], "cc"),
+            (&[("aa", "aa")][..], "aa"),
+        ] {
+            let err = rename_ids(tmp.path(), &renames(pairs)).unwrap_err();
+            assert!(
+                matches!(&err, Error::IdTaken(id) if id == taken),
+                "{pairs:?}: {err:?}"
+            );
+        }
 
-        let tasks = load_all(tmp.path()).await.unwrap();
-        assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks["bb"].priority, Priority::P0);
-        assert_eq!(tasks["bb"].depends_on, ["aa"]);
-        assert_eq!(tasks["aa"].priority, Priority::P3);
+        let after: Vec<_> = ["aa", "bb", "cc"]
+            .iter()
+            .map(|id| fs::read_to_string(find_task_path(tmp.path(), id).unwrap()).unwrap())
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(fs::read_dir(tasks_dir(tmp.path())).unwrap().count(), 4); // + archive/
     }
 
     #[tokio::test]
