@@ -463,7 +463,7 @@ fn long_titles_are_cut_in_the_diagram_only() {
         .unwrap()
         .trim_end_matches("\"]:::open");
     assert_eq!(shown.chars().count(), MAX_LABEL_CHARS);
-    // The table keeps the whole title, on one line.
+    // The table keeps the whole title (under `MAX_CELL_CHARS`), on one line.
     assert!(md.contains(&format!("| `a` | {} |", "word ".repeat(30).trim())));
 }
 
@@ -568,8 +568,195 @@ fn the_text_budget_covers_every_diagram() {
     let md = render_with(&s, &options);
     let drawn: usize = mermaid_blocks(&md).iter().map(String::len).sum();
     assert!(drawn <= one / 2);
-    assert!(md.contains("too large to draw here"));
+    assert!(md.contains("no room left to draw them here"));
+    assert!(!md.contains("too large to draw here"));
     assert!(!mermaid_blocks(&md).is_empty());
+}
+
+#[test]
+fn a_graph_over_the_text_budget_says_so_not_the_node_bounds() {
+    let s = two_epics(5);
+    let one = mermaid_blocks(&render(&s))[0].len();
+    let options = MarkdownOptions {
+        max_graph_chars: one - 1,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    // 11 tasks and 10 dependencies are within the node and edge bounds.
+    assert!(!md.contains("more than one diagram shows"), "{md}");
+    assert!(
+        md.contains(&format!(
+            "One diagram of the graph's 11 tasks would take {} bytes, more than the {} this \
+         document has room for, so it is drawn per top-level epic.",
+            // The fences and the blank line after the diagram count too.
+            "```mermaid\n".len() + one + "```\n\n".len(),
+            one - 1
+        )),
+        "{md}"
+    );
+    assert!(md.contains("drawn per top-level epic"));
+}
+
+/// A store far too large for one PR comment: `n` tasks with long, hostile
+/// titles under 20 epics, chained by dependencies.
+fn huge(n: u32, include_all: bool) -> Snapshot {
+    let mut tasks: Vec<Task> = (0..20).map(|i| epic(&format!("e{i:02}"), 0)).collect();
+    for i in 0..n {
+        let id = format!("e{:02}.t{i:04}", i % 20);
+        let status = match i % 5 {
+            0 | 1 => Status::Open,
+            2 => Status::InProgress,
+            3 => Status::Review,
+            _ => Status::Done,
+        };
+        let dep = format!("e{:02}.t{:04}", i % 20, i.wrapping_sub(20));
+        let deps: Vec<&str> = if i >= 20 && i % 3 == 0 {
+            vec![dep.as_str()]
+        } else {
+            vec![]
+        };
+        let mut t = make(&id, status, i % 60, &deps);
+        t.title = format!("{i} {}", HOSTILE.replace('\n', " "));
+        t.tags = vec!["a|b".into(), "@x".into()];
+        tasks.push(t);
+    }
+    let options = SnapshotOptions {
+        include_all,
+        ..SnapshotOptions::default()
+    };
+    let archive = map((0..30)
+        .map(|i| {
+            let mut t = make(&format!("z{i:02}"), Status::Done, i, &[]);
+            t.title = HOSTILE.into();
+            t
+        })
+        .collect());
+    build(&map(tasks), &archive, &options)
+}
+
+/// The structure a cut must never break.
+fn assert_well_formed(md: &str) {
+    assert_tables_well_formed(md);
+    mermaid_blocks(md);
+    assert_eq!(
+        md.matches("<details>").count(),
+        md.matches("</details>").count(),
+        "unbalanced details"
+    );
+    assert!(md.ends_with('\n') && !md.ends_with("\n\n"));
+}
+
+#[test]
+fn a_huge_store_fits_a_pr_comment() {
+    let s = huge(1500, false);
+    let md = render(&s);
+    assert!(md.len() <= DEFAULT_MAX_DOCUMENT_CHARS, "{} bytes", md.len());
+    assert!(md.chars().count() < 65_536);
+    assert_well_formed(&md);
+    // The cut is visible, and the counts are complete.
+    assert!(md.contains("**Shortened.**"));
+    assert!(md.contains("more not shown._") || md.contains("rows not shown._"));
+    assert!(md.contains("1500 tasks, 20 epics, 30 archived."));
+    assert!(md.contains("| open | 600 |"));
+    assert!(md.contains("| done | 300 |"));
+    // Titles are cut in tables.
+    assert!(md.lines().all(|l| l.len() < 4_000));
+    assert_eq!(md, render(&s), "deterministic");
+}
+
+#[test]
+fn a_raised_budget_shows_everything() {
+    let s = huge(1500, true);
+    let options = MarkdownOptions {
+        max_document_chars: 16 << 20,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(md.len() > DEFAULT_MAX_DOCUMENT_CHARS);
+    assert!(!md.contains("**Shortened.**"));
+    assert!(!md.contains("not shown._"));
+    assert_well_formed(&md);
+    assert!(md.contains("## Recently archived"));
+    // The graph keeps its own bounds.
+    assert!(mermaid_blocks(&md).iter().map(String::len).sum::<usize>() <= DEFAULT_MAX_GRAPH_CHARS);
+}
+
+#[test]
+fn no_budget_leaves_the_summary_and_the_note() {
+    let options = MarkdownOptions {
+        max_document_chars: 0,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&huge(50, false), &options);
+    assert!(md.contains("## Summary"));
+    assert!(md.contains("50 tasks, 20 epics, 30 archived."));
+    assert!(md.contains("**Shortened.**"));
+    assert!(!md.contains("## Ready"));
+    assert!(!md.contains("## Dependency graph"));
+    assert_well_formed(&md);
+}
+
+#[test]
+fn every_budget_is_kept_without_breaking_the_structure() {
+    let s = huge(300, true);
+    let floor = render_with(
+        &s,
+        &MarkdownOptions {
+            max_document_chars: 0,
+            ..MarkdownOptions::default()
+        },
+    )
+    .len();
+    for budget in (floor..floor + 40_000).step_by(997) {
+        let options = MarkdownOptions {
+            max_document_chars: budget,
+            ..MarkdownOptions::default()
+        };
+        let md = render_with(&s, &options);
+        assert!(md.len() <= budget, "{} > {budget}", md.len());
+        assert_well_formed(&md);
+        assert!(md.contains("**Shortened.**"));
+    }
+}
+
+#[test]
+fn a_cut_table_ends_after_a_whole_row_with_a_count() {
+    let tasks: Vec<Task> = (0..40)
+        .map(|i| make(&format!("t{i:02}"), Status::Open, i, &[]))
+        .collect();
+    let s = snap(tasks);
+    let full = render_with(
+        &s,
+        &MarkdownOptions {
+            max_document_chars: 1 << 20,
+            ..MarkdownOptions::default()
+        },
+    );
+    let options = MarkdownOptions {
+        max_document_chars: full.len() - 500,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(md.len() <= options.max_document_chars);
+    assert_well_formed(&md);
+    let shown = section(&md, "Board")
+        .lines()
+        .filter(|l| l.starts_with("| `t"))
+        .count();
+    assert!(shown < 40, "{md}");
+    let note = format!("_…and {} more not shown._", 40 - shown);
+    assert!(section(&md, "Board").contains(&note), "{md}");
+    assert!(md.contains("**Shortened.**"));
+    assert!(!full.contains("**Shortened.**"));
+}
+
+#[test]
+fn titles_are_cut_in_tables() {
+    let mut a = make("a", Status::Open, 0, &[]);
+    a.title = "x".repeat(MAX_CELL_CHARS + 50);
+    let md = render(&snap(vec![a]));
+    let cut = format!("| `a` | {}… |", "x".repeat(MAX_CELL_CHARS - 1));
+    assert!(md.contains(&cut), "{md}");
 }
 
 #[test]
