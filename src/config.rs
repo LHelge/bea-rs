@@ -22,13 +22,9 @@ pub struct Config {
     /// in `a1b.c2`). A parent's new children get longer segments once its
     /// sibling space fills up; see [`crate::task::generate_child_id`].
     ///
-    /// Written to `.bears.yml` only when it differs from the default, so a
-    /// fresh config file keeps its one-line shape.
-    #[serde(
-        rename = "child-id-length",
-        default = "default_child_id_length",
-        skip_serializing_if = "is_default_child_id_length"
-    )]
+    /// Always written, like `id-length`, so a fresh `.bears.yml` shows both;
+    /// a file without it loads with the default.
+    #[serde(rename = "child-id-length", default = "default_child_id_length")]
     pub child_id_length: u8,
 }
 
@@ -38,10 +34,6 @@ fn default_id_length() -> u8 {
 
 fn default_child_id_length() -> u8 {
     DEFAULT_CHILD_ID_LENGTH
-}
-
-fn is_default_child_id_length(length: &u8) -> bool {
-    *length == DEFAULT_CHILD_ID_LENGTH
 }
 
 impl Default for Config {
@@ -130,7 +122,10 @@ mod tests {
     fn test_create_default_file_content() {
         let tmp = TempDir::new().unwrap();
         let path = create_default(tmp.path()).unwrap();
-        assert_eq!(fs::read_to_string(path).unwrap(), "id-length: 3\n");
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "id-length: 3\nchild-id-length: 2\n"
+        );
     }
 
     #[test]
@@ -226,6 +221,11 @@ mod tests {
         fs::write(config_path(tmp.path()), "id-length: 5\n").unwrap();
         let config = load(tmp.path()).unwrap();
         assert_eq!(config.child_id_length, DEFAULT_CHILD_ID_LENGTH);
+        assert_eq!(
+            fs::read_to_string(config_path(tmp.path())).unwrap(),
+            "id-length: 5\n",
+            "a load never rewrites the file"
+        );
     }
 
     #[test]
@@ -246,6 +246,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(config_path(tmp.path()), "child-id-length: 0\n").unwrap();
         assert!(load(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_default_child_id_length_is_written() {
+        assert_eq!(
+            crate::task::to_yaml(&Config::default()).unwrap(),
+            "id-length: 3\nchild-id-length: 2\n"
+        );
     }
 
     #[test]

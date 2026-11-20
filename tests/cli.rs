@@ -819,6 +819,15 @@ fn test_prune_epic_detaches_surviving_children() {
     assert_eq!(v, serde_json::json!({ "pruned": [], "renamed": {} }));
 }
 
+/// A fresh `.bears.yml` names both ID lengths, defaults included.
+#[test]
+fn test_init_writes_both_id_lengths() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let content = std::fs::read_to_string(tmp.path().join(".bears.yml")).unwrap();
+    assert_eq!(content, "id-length: 3\nchild-id-length: 2\n");
+}
+
 /// Re-running `bea init` must not reset an existing .bears.yml.
 #[test]
 fn test_init_idempotent_preserves_config() {
@@ -829,7 +838,7 @@ fn test_init_idempotent_preserves_config() {
     bea(&tmp).arg("init").assert().success();
 
     let content = std::fs::read_to_string(tmp.path().join(".bears.yml")).unwrap();
-    assert!(content.contains("id-length: 6"), "config was clobbered");
+    assert_eq!(content, "id-length: 6\n", "config was clobbered");
 }
 
 /// Completing a child via `update --status done` auto-closes the epic,
