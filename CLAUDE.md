@@ -572,7 +572,7 @@ Keep the dependency tree small. Compilation should be fast.
   tree order with progress and the nearest shown epic, longest-path layering, ordering by dependency
   position, settled/missing dependencies left out, cycles in one layer, epics as nodes only in an edge,
   effective priority, the archive log, the JSON shape, `load` (incl. not initialized), and a snapshot of
-  this repository's own store
+  this repository's own store, taken on a copy and skipped when `.bears/` is absent (packaged crate)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `StoreReport::needs_review`; `repair_store`: root and child duplicates renumbered in

@@ -516,8 +516,29 @@ async fn load_refuses_an_uninitialised_directory() {
 
 #[tokio::test]
 async fn snapshot_of_this_repository_is_consistent() {
-    // Read-only: `load` never writes.
-    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // On a copy, so that a tracker writing to the live store cannot change
+    // it between the two loads. `.bears/` is not in the published crate.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(".bears");
+    if !src.is_dir() {
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    store::init(tmp.path()).unwrap();
+    for (from, to) in [
+        (src.clone(), store::tasks_dir(tmp.path())),
+        (src.join("archive"), store::archive_dir(tmp.path())),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&from) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "md") {
+                std::fs::copy(&path, to.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+    }
+    let base = tmp.path();
     let s = load(base, &all()).await.unwrap();
     assert_eq!(s, load(base, &all()).await.unwrap());
     assert!(s.totals.tasks > 0);
