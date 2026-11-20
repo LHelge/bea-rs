@@ -182,7 +182,9 @@ bea list --all
 ```
 
 `--epic` (here and on `ready` and `review`) matches every task below the epic: its children, and the
-tasks under any nested epic. The epic itself is not listed.
+tasks under any nested epic. The epic itself is not listed. It takes an ID or a unique prefix, like
+every other ID argument, and also works for an archived epic whose children are still active. A value
+that names no task, or a task that is not an epic, is an error.
 
 ### `bea ready`
 Show tasks that are `open` and have all dependencies completed. Epics are excluded — only actionable tasks appear. This is the key command for agent workflows — always start here.
@@ -470,6 +472,10 @@ top level) moves the task: its result carries a `renamed` map of old ID to new I
 subtree. `delete_task` and `prune_tasks` report detached children the same way (`prune_tasks` always returns
 `{ pruned, renamed }`, with `renamed` empty when nothing was renamed). Agents should take the new
 IDs from that map rather than reuse IDs they noted earlier.
+
+The `epic` parameter of `list_ready`, `list_all_tasks`, `list_review` and `get_graph` behaves like
+`--epic` on the CLI: an ID or unique prefix, matching every task below the epic, nested epics
+included; an unknown ID or a task that is not an epic is a tool error.
 
 ### Register with Claude Code
 

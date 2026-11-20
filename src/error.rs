@@ -15,7 +15,7 @@ pub enum Error {
     #[error("ambiguous prefix '{prefix}' matches multiple tasks: {matches}")]
     AmbiguousPrefix { prefix: String, matches: String },
 
-    #[error("task {0} is not an epic — plans can only be generated for epics")]
+    #[error("task {0} is not an epic")]
     NotAnEpic(String),
 
     #[error("parent {0} is not an epic — only epics can have child tasks")]

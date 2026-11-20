@@ -15,6 +15,18 @@ use bears::service;
 use bears::store;
 use bears::task::{Priority, Status};
 
+/// Resolve an `--epic` filter value (an ID or a prefix) to the epic's ID.
+async fn resolve_epic(
+    base: &Path,
+    tasks: &std::collections::HashMap<String, bears::Task>,
+    epic: Option<String>,
+) -> Result<Option<String>> {
+    match epic {
+        Some(e) => Ok(Some(service::resolve_epic_filter(base, tasks, &e).await?)),
+        None => Ok(None),
+    }
+}
+
 pub async fn run(cli: Args, base: &Path) -> Result<()> {
     // Handle commands that don't need task data
     match &cli.command {
@@ -81,8 +93,14 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
             epic,
             all,
             archived: false,
-        } => cmd::cmd_list(&tasks, status, priority, tag, epic, all, cli.json),
-        Command::Ready { tag, epic, limit } => cmd::cmd_ready(&tasks, tag, epic, limit, cli.json),
+        } => {
+            let epic = resolve_epic(base, &tasks, epic).await?;
+            cmd::cmd_list(&tasks, status, priority, tag, epic, all, cli.json)
+        }
+        Command::Ready { tag, epic, limit } => {
+            let epic = resolve_epic(base, &tasks, epic).await?;
+            cmd::cmd_ready(&tasks, tag, epic, limit, cli.json)
+        }
         Command::Epics => cmd::cmd_epics(&tasks, cli.json),
         Command::Show { id, plan } => {
             // Try active tasks first; fall back to archive with a clear label.
@@ -143,7 +161,10 @@ pub async fn run(cli: Args, base: &Path) -> Result<()> {
                 let result = cmd::cmd_review(base, &tasks, &id, cli.json);
                 augment_archived_error(base, result, &id).await
             }
-            None => cmd::cmd_review_queue(&tasks, tag.as_deref(), epic.as_deref(), limit, cli.json),
+            None => {
+                let epic = resolve_epic(base, &tasks, epic).await?;
+                cmd::cmd_review_queue(&tasks, tag.as_deref(), epic.as_deref(), limit, cli.json)
+            }
         },
         Command::Reject { id } => {
             let result = cmd::cmd_reject(base, &tasks, &id, cli.json);

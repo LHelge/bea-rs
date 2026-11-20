@@ -111,7 +111,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter to the tasks under this epic ID, nested epics included
+        /// Filter to the tasks under this epic (ID or prefix), nested epics included
         #[arg(long)]
         epic: Option<String>,
 
@@ -130,7 +130,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter to the tasks under this epic ID, nested epics included
+        /// Filter to the tasks under this epic (ID or prefix), nested epics included
         #[arg(long)]
         epic: Option<String>,
 
@@ -220,7 +220,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter to the tasks under this epic ID, nested epics included
+        /// Filter to the tasks under this epic (ID or prefix), nested epics included
         #[arg(long)]
         epic: Option<String>,
 
