@@ -10,9 +10,11 @@ use bears::error::{Error, Result};
 use bears::graph::{DepNode, DepNodeJson};
 use bears::scaffold;
 use bears::service;
+use bears::snapshot;
 use bears::store;
 use bears::task::{self, Priority, Status, Task, TaskType};
 
+use super::SnapshotFormat;
 use super::{
     color_id, color_priority, color_status, color_tags, format_priority, id_cell, id_width, output,
 };
@@ -1198,6 +1200,52 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
         output(&edited.summary(None))?;
     } else {
         println!("Edited task {} — {}", edited.id, edited.title);
+    }
+    Ok(())
+}
+
+/// `bea snapshot [--format html|md] [-o FILE] [--all]` — render the store as
+/// a static artifact, to stdout or to `output`.
+///
+/// The time in the header is the only thing taken from outside the store.
+/// With `output` nothing is printed, so `bea snapshot > f` and
+/// `bea snapshot -o f` write the same bytes. The store is loaded before the
+/// file is opened, so a refused load (not initialized, legacy store) leaves
+/// no file behind.
+pub async fn cmd_snapshot(
+    base: &Path,
+    format: SnapshotFormat,
+    output: Option<&Path>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
+    if json {
+        return Err(Error::InvalidUsage(
+            "`bea snapshot` has no JSON output; use --format md or --format html \
+             (the other commands' --json output covers the data)"
+                .to_string(),
+        ));
+    }
+
+    let options = snapshot::SnapshotOptions {
+        include_all: all,
+        generated_at: Some(Utc::now()),
+        ..Default::default()
+    };
+    let snap = snapshot::load(base, &options).await?;
+    let rendered = match format {
+        SnapshotFormat::Md => snapshot::markdown::render(&snap),
+        SnapshotFormat::Html => snapshot::html::render(&snap),
+    };
+
+    match output {
+        Some(path) => std::fs::write(path, &rendered).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot write {}: {e}", path.display()),
+            ))
+        })?,
+        None => print!("{rendered}"),
     }
     Ok(())
 }
