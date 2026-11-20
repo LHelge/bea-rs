@@ -282,3 +282,32 @@ async fn test_unknown_id_is_tool_error_not_protocol_error() {
 
     client.cancel().await.unwrap();
 }
+
+/// A store written before hierarchical IDs is refused by every tool, as a
+/// tool error, and nothing on disk changes.
+#[tokio::test]
+async fn test_legacy_store_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect(&tmp).await;
+    let path = tmp.path().join(".bears").join("ch-child.md");
+    let content = "---\nid: ch\ntitle: Child\nstatus: open\npriority: P2\n\
+                   created: \"2026-01-01T00:00:00Z\"\nupdated: \"2026-01-01T00:00:00Z\"\n\
+                   parent: ep\n---\n";
+    std::fs::write(&path, content).unwrap();
+
+    for (tool, args) in [
+        ("list_all_tasks", serde_json::json!({})),
+        ("complete_task", serde_json::json!({ "id": "ch" })),
+    ] {
+        let result = client.call_tool(params(tool, args)).await.unwrap();
+        assert_eq!(result.is_error, Some(true), "{tool}");
+        assert!(
+            extract_text(&result).contains("predates hierarchical IDs"),
+            "{tool}: {}",
+            extract_text(&result)
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+
+    client.cancel().await.unwrap();
+}
