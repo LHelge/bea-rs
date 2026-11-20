@@ -201,12 +201,16 @@ There is no `parent` field: a task's parent is derived from its ID (`Task::paren
 A store is **legacy** when any task file in `.bears/` or `.bears/archive/` carries a `parent:` key.
 `store::load_all` and `store::load_archived` both check *both* directories and return
 `Error::LegacyStore { files }` instead of any tasks. The directory a loader parses is checked through
-`legacy_parent`; in the other one only files with a frontmatter line starting at column 0 with
-`parent`, `"parent` or `'parent` are parsed, to confirm the key, so a load does not parse the directory
-it does not return, and both loaders agree on every file (one that does not parse is never legacy). No write path can therefore run on a legacy store and
+`legacy_parent`; in the other one only files whose frontmatter contains the word `parent` anywhere
+(indented frontmatter, quoted and complex keys included) are parsed, to confirm the key, so a load does
+not parse the directory it does not return, and both loaders agree on every file (one that does not
+parse is never legacy) except a quoted key spelled with escapes (`"p\u0061rent"`), which no bears
+version writes. No write path can therefore run on a legacy store and
 silently drop an epic link. This covers the CLI, every MCP tool and the TUI alike; only commands that
 never load the store (`init`, `agent`, `completions`, and `migrate` itself) work on one. The CLI hint
-pointing at `bea migrate` lives in `hint_for()`.
+pointing at `bea migrate` lives in `hint_for()` in `main.rs`; the MCP frontend appends its own
+remediation (run `bea migrate` once from a shell) to the tool error in `mcp/mod.rs` (`tool_ok` /
+`hint_for`), and the server instructions name `bea migrate` too.
 
 `store::migrate(base, dry_run) -> Migration { renamed, orphaned, legacy_files }` converts the store;
 `bea migrate [--dry-run]` is the CLI on top (there is no MCP tool):
@@ -220,7 +224,9 @@ pointing at `bea migrate` lives in `hint_for()`.
   the task keeps its ID and is not lost.
 - All `depends_on` are rewritten in active and archived tasks, `updated` is kept, files with nothing
   to change are not touched, and afterwards no file has a `parent:` key.
-- `--dry-run` prints the same mapping and writes nothing. On a store without `parent:` keys it is a
+- `--dry-run` writes nothing and shows which tasks get renamed and under which parent, but not
+  their final IDs: the new segments are drawn at random on each run, so the real run picks
+  different ones (task `u6v` tracks making them equal). On a store without `parent:` keys it is a
   no-op ("Nothing to migrate", exit 0), so it is idempotent.
 - **Interruption safety.** The renames are written to `.bears/.migrate.json` (`MIGRATION_JOURNAL`)
   before any task file; then new files, then rewritten files, then the old files are removed, and the
