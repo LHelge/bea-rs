@@ -159,18 +159,44 @@ async fn load_dir(dir: &Path, label: &str) -> Result<(HashMap<String, Task>, Vec
     Ok((tasks, legacy))
 }
 
-/// The task files in `dir` that carry a legacy `parent:` key. Files that
-/// cannot be read or parsed are passed over silently: the loader that owns
-/// `dir` warns about them.
+/// The task files in `dir` that carry a legacy `parent:` key, found without
+/// parsing YAML (see [`has_legacy_parent_key`]); a loader uses this for the
+/// directory it does not load. Files that cannot be read are passed over
+/// silently: the loader that owns `dir` warns about them.
 async fn scan_legacy(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(read_dir_contents(dir)
         .await?
         .into_iter()
-        .filter_map(|(path, content)| {
-            let t = task::parse_task(&content.ok()?).ok()?;
-            t.legacy_parent.is_some().then_some(path)
-        })
+        .filter_map(|(path, content)| has_legacy_parent_key(&content.ok()?).then_some(path))
         .collect())
+}
+
+/// Whether the frontmatter of a task file has a top-level `parent:` key with
+/// a non-null value, the line-level equivalent of
+/// `parse_task(content)?.legacy_parent.is_some()`.
+///
+/// Only lines between the opening and closing `---` count, and only a line
+/// that starts with `parent:` at column 0: the body, indented lines (block
+/// scalars, nested values) and quoted text never match, since none of them
+/// can be a top-level key.
+fn has_legacy_parent_key(content: &str) -> bool {
+    let content = content.trim_start_matches('\u{feff}');
+    let mut lines = content.lines().map(|l| l.strip_suffix('\r').unwrap_or(l));
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    let mut found = false;
+    for line in lines {
+        if line.trim_end() == "---" {
+            return found;
+        }
+        if let Some(value) = line.strip_prefix("parent:") {
+            let value = value.split(" #").next().unwrap_or_default().trim();
+            found |= !matches!(value, "" | "~" | "null" | "Null" | "NULL");
+        }
+    }
+    // No closing delimiter: not a task file the loaders accept.
+    false
 }
 
 /// Find the file path for an archived task by its exact ID.
@@ -1640,6 +1666,72 @@ mod tests {
             load_archived(tmp.path()).await,
             Err(Error::LegacyStore { .. })
         ));
+    }
+
+    #[test]
+    fn test_has_legacy_parent_key_reads_only_top_level_frontmatter() {
+        let file = |front: &str, body: &str| format!("---\nid: ab\n{front}---\n\n{body}");
+        assert!(has_legacy_parent_key(&file("parent: ep\n", "")));
+        assert!(has_legacy_parent_key(&file("parent: \"ep\"\n", "")));
+        assert!(has_legacy_parent_key(&file("parent: ep\r\n", "")));
+        assert!(!has_legacy_parent_key(&file("", "parent: ep\n")));
+        assert!(!has_legacy_parent_key(&file(
+            "title: |\n  parent: ep\n",
+            ""
+        )));
+        assert!(!has_legacy_parent_key(&file("tags:\n  - parent: ep\n", "")));
+        assert!(!has_legacy_parent_key(&file("title: \"parent: ep\"\n", "")));
+        assert!(!has_legacy_parent_key(&file("parent:\nparent: ~\n", "")));
+        assert!(!has_legacy_parent_key("---\nparent: ep\n"));
+        assert!(!has_legacy_parent_key("parent: ep\n---\n"));
+    }
+
+    /// The scan of the directory a loader does not load matches the parse of
+    /// the one it does: `parent:` text outside a top-level key is not a key.
+    #[tokio::test]
+    async fn test_loaders_ignore_parent_text_outside_the_key() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        save(tmp.path(), &epic("ep")).unwrap();
+        let mut body = plain("bd");
+        body.body = "parent: ep\n".into();
+        save(tmp.path(), &body).unwrap();
+        archive(
+            tmp.path(),
+            &Task {
+                id: "ab".into(),
+                ..body
+            },
+        );
+        // `parent:` inside a block scalar and a nested value, hand-written.
+        for (dir, id) in [
+            (tasks_dir(tmp.path()), "bs"),
+            (archive_dir(tmp.path()), "as"),
+        ] {
+            let content = format!(
+                "---\nid: {id}\ntitle: |\n  line one\n  parent: ep\nstatus: open\npriority: P2\n\
+                 created: \"2026-01-01T00:00:00Z\"\nupdated: \"2026-01-01T00:00:00Z\"\n\
+                 tags:\n  - \"parent: ep\"\n---\n"
+            );
+            fs::write(dir.join(format!("{id}-block.md")), content).unwrap();
+        }
+        assert_eq!(load_all(tmp.path()).await.unwrap().len(), 3);
+        assert_eq!(load_archived(tmp.path()).await.unwrap().len(), 2);
+
+        // A real key in the other directory is still found, by either loader.
+        write_legacy(tmp.path(), &plain("ac"), "ep", true);
+        let Err(Error::LegacyStore { files }) = load_all(tmp.path()).await else {
+            panic!("legacy archive file not found");
+        };
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("ac-task-ac.md"));
+        fs::remove_file(&files[0]).unwrap();
+        write_legacy(tmp.path(), &plain("ch"), "ep", false);
+        let Err(Error::LegacyStore { files }) = load_archived(tmp.path()).await else {
+            panic!("legacy active file not found");
+        };
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("ch-task-ch.md"));
     }
 
     /// The store the migration tests start from:
