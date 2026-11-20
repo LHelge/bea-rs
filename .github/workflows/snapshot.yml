@@ -9,16 +9,23 @@ on:
   push:
     branches:
       - main
+    # Keep this list the same as the pull_request one below.
     paths:
       - '.bears/**'
+      - 'src/**'
+      - 'templates/snapshot/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/snapshot.yml'
   # `pull_request`, never `pull_request_target`: runs from forks get a
   # read-only token and no secrets, and this workflow needs neither.
   pull_request:
     paths:
       - '.bears/**'
-      - 'src/snapshot/**'
-      - 'src/cli/**'
+      - 'src/**'
+      - 'templates/snapshot/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/snapshot.yml'
   workflow_dispatch:
 

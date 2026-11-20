@@ -55,8 +55,10 @@ runs before building a tag. That workflow has two jobs:
   `cargo audit` locally after changing dependencies.
 
 `.github/workflows/snapshot.yml` dogfoods `bea snapshot` on this repository's own `.bears/`. It runs
-on pushes to `main` that touch `.bears/**` or the workflow, on pull requests that touch `.bears/**`,
-`src/snapshot/**`, `src/cli/**` or the workflow, and on manual dispatch. It builds `bea` from the
+on pushes to `main` and on pull requests that touch `.bears/**`, `src/**`, `templates/snapshot/**`,
+`Cargo.toml`, `Cargo.lock` or the workflow (one path list, written out under both triggers: the
+output depends on the core modules and the embedded HTML template as well as the store, and `main`'s
+snapshot is re-rendered after a renderer change is merged), and on manual dispatch. It builds `bea` from the
 checkout (the released binary may predate the renderers being changed), appends
 `bea snapshot --format md` to `$GITHUB_STEP_SUMMARY`, and uploads
 `bea snapshot --all --format html` as the `bears-snapshot` artifact. It is deliberately separate from
