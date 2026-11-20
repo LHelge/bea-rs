@@ -24,6 +24,12 @@ pub struct ListReviewParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListStaleParams {
+    /// Report in-progress tasks not updated for at least this many hours (default 24)
+    pub hours: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksFilterParams {
     /// Filter by status
     pub status: Option<Status>,

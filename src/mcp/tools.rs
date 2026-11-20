@@ -230,6 +230,30 @@ impl BeaMcp {
         )
     }
 
+    #[tool(
+        description = "List in-progress tasks not updated for `hours` hours (default 24): claims a dead or stuck worker may have left. Each entry adds `updated` and `idle_hours`. Lists only; release a claim with release_task"
+    )]
+    async fn list_stale(
+        &self,
+        Parameters(params): Parameters<ListStaleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok(
+            async {
+                let tasks = store::load_all(&self.base).await?;
+                let hours = params.hours.unwrap_or(service::DEFAULT_STALE_HOURS);
+                let older_than = jiff::SignedDuration::from_hours(i64::from(hours));
+                let stale = service::list_stale(&tasks, jiff::Timestamp::now(), older_than);
+                let eff = service::effective_priorities(&tasks);
+                let summaries: Vec<_> = stale
+                    .iter()
+                    .map(|s| s.summary(eff.get(&s.task.id)))
+                    .collect();
+                ok_json(serde_json::json!(summaries))
+            }
+            .await,
+        )
+    }
+
     #[tool(description = "Submit an in-progress task for review instead of completing it")]
     async fn review_task(
         &self,
@@ -820,6 +844,46 @@ mod tests {
             ready.as_array().unwrap().iter().any(|t| t["id"] == id),
             "released task should be ready again: {ready}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_stale() {
+        let (tmp, mcp) = setup();
+        let now = jiff::Timestamp::now();
+        for (id, status, hours_ago) in [
+            ("old", Status::InProgress, 30),
+            ("new", Status::InProgress, 1),
+            ("opn", Status::Open, 100),
+        ] {
+            let mut t = bears::task::Task::new(id.into(), format!("Task {id}"), Priority::P2);
+            t.status = status;
+            t.assignee = "worker-1".into();
+            t.updated = now - jiff::SignedDuration::from_hours(hours_ago);
+            store::save(tmp.path(), &t).unwrap();
+        }
+
+        let result = mcp
+            .list_stale(Parameters(ListStaleParams { hours: None }))
+            .await
+            .unwrap();
+        let stale = extract_json(&result);
+        let stale = stale.as_array().unwrap();
+        assert_eq!(stale.len(), 1, "default threshold is 24 hours: {stale:?}");
+        assert_eq!(stale[0]["id"], "old");
+        assert_eq!(stale[0]["assignee"], "worker-1");
+        assert_eq!(stale[0]["idle_hours"], 30);
+        assert!(stale[0]["updated"].is_string());
+
+        let result = mcp
+            .list_stale(Parameters(ListStaleParams { hours: Some(0) }))
+            .await
+            .unwrap();
+        assert_eq!(extract_json(&result).as_array().unwrap().len(), 2);
+
+        // Listing releases nothing.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks["old"].status, Status::InProgress);
+        assert_eq!(tasks["old"].assignee, "worker-1");
     }
 
     #[tokio::test]

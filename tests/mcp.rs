@@ -84,6 +84,7 @@ async fn test_handshake_and_tool_list() {
         "start_task",
         "release_task",
         "list_review",
+        "list_stale",
         "review_task",
         "reject_task",
         "propose_task",

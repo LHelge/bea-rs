@@ -267,6 +267,21 @@ is cleared, so the task shows up in `bea ready` again for another worker. It app
 `in_progress` tasks: releasing anything else is an error, so finished work is never silently
 reopened. Use it when a worker gets stuck or is killed mid-task.
 
+### `bea stale`
+Finds claims a dead or stuck worker may have left behind: in-progress tasks whose `updated` time is
+at least `--hours` hours old (default 24).
+
+```sh
+bea stale               # in_progress, not updated for 24 hours
+bea stale --hours 4     # a tighter threshold
+bea stale --json        # summaries plus `updated` and `idle_hours`
+```
+
+It only lists — release a claim you give up on with `bea release <id>`. There is no heartbeat or
+lease: `updated` changes on every write to a task, so a worker that edits its task (a note in the
+body, a status change) restarts the clock, and a live worker on a long task appears once it has been
+quiet for long enough.
+
 When all children of an epic are completed, the epic is automatically marked as done.
 
 ### `bea review` / `bea reject`
@@ -547,6 +562,7 @@ bea mcp   # starts MCP server over stdio
 | `propose_task` | Demote an open task to a proposal (`id`) |
 | `accept_task` | Accept a proposal into the backlog (`id`) |
 | `release_task` | Release an in-progress task: status → `open`, assignee cleared (`id`) |
+| `list_stale` | In-progress tasks not updated for `hours` hours (`hours?`, default 24); adds `updated` and `idle_hours`; releases nothing |
 | `complete_task` | Set status to `done` (`id`) |
 | `cancel_task` | Set status to `cancelled` (`id`) |
 | `prune_tasks` | Permanently delete cancelled tasks (`include_done?`); detaches surviving children |

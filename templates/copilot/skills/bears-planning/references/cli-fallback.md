@@ -72,6 +72,10 @@ bea start <id> --assignee <name> --json
 # Release an in-progress task back to the pool (open, assignee cleared)
 bea release <id> --json
 
+# List in-progress tasks not updated for 24 hours (or --hours N); lists only
+bea stale --json
+bea stale --hours 4 --json
+
 # Complete a task (set done)
 bea done <id> --json
 
