@@ -124,8 +124,9 @@ bea prune --json
 # Prune cancelled and done tasks
 bea prune --done --json
 
-# When a pruned epic's surviving children got new IDs, prune returns
-# { "pruned": [...], "renamed": { ... } } instead of the plain list
+# Prune always returns { "pruned": [...], "renamed": { ... } }: read the deleted
+# tasks from .pruned; "renamed" maps the old to the new ID of each surviving
+# child of a pruned epic, and is empty when nothing moved
 ```
 
 ## Store health

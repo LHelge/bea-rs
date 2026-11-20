@@ -304,8 +304,8 @@ bea prune --done
 ```
 
 Surviving children of a pruned epic are detached to fresh top-level IDs, as with `bea delete`. With
-`--json`, prune prints the list of pruned tasks; when it also renamed tasks it prints
-`{ "pruned": [...], "renamed": { "<old>": "<new>" } }` instead.
+`--json`, prune always prints `{ "pruned": [...], "renamed": { "<old>": "<new>" } }`: `pruned` lists
+the deleted tasks, and `renamed` is empty when nothing was renamed.
 
 ### `bea archive` / `bea restore` / `bea log`
 Move settled work out of the active set into `.bears/archive/`, keeping `list`/`ready`/`search`/`graph`/`epics` focused on active tasks. Unlike `prune`, archiving is **reversible**.
@@ -461,8 +461,8 @@ bea mcp   # starts MCP server over stdio
 
 `create_task` with `parent` returns an ID under the epic's. `update_task` with `parent` (`""` for the
 top level) moves the task: its result carries a `renamed` map of old ID to new ID for the task and its
-subtree. `delete_task` and `prune_tasks` report detached children the same way (`prune_tasks` returns
-`{ pruned, renamed }` instead of a plain list when something was renamed). Agents should take the new
+subtree. `delete_task` and `prune_tasks` report detached children the same way (`prune_tasks` always returns
+`{ pruned, renamed }`, with `renamed` empty when nothing was renamed). Agents should take the new
 IDs from that map rather than reuse IDs they noted earlier.
 
 ### Register with Claude Code
