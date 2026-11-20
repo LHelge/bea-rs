@@ -63,9 +63,11 @@ const CODEX_MD: &str = include_str!("../templates/codex/AGENTS.md");
 pub const PRIME_HOOK_COMMAND: &str =
     "cd \"${CLAUDE_PROJECT_DIR:-.}\" && { test ! -d .bears || bea prime; }";
 
-/// Text by which an existing hook handler is recognised as the bears hook, in
-/// this form or an older one (e.g. `test ! -d .bears || bea prime`).
-const PRIME_HOOK_MARKER: &str = "bea prime";
+/// Every command bears has published for the hook, the current one first.
+/// A handler running one of these (compared with whitespace collapsed) is the
+/// bears hook; any other handler is the user's and is never touched, even when
+/// it runs `bea prime` itself. A future form is added here.
+const PRIME_HOOK_FORMS: &[&str] = &[PRIME_HOOK_COMMAND, "test ! -d .bears || bea prime"];
 
 /// The Claude Code project settings file that carries the hook.
 const CLAUDE_SETTINGS: &str = ".claude/settings.json";
@@ -78,7 +80,8 @@ pub enum HookMerge {
     /// The file already held the hook in its current form; nothing was written.
     Unchanged,
     /// The file was left untouched because it does not have the expected shape
-    /// (the reason says what was wrong); the hook was not added.
+    /// or could not be read or written (the reason says which); the hook was
+    /// not added.
     Skipped(String),
 }
 
@@ -90,36 +93,54 @@ fn prime_hook_group() -> Value {
     })
 }
 
-/// Whether a hook handler is the bears hook, current or older form.
+/// `s` with leading and trailing whitespace removed and every inner run of
+/// whitespace collapsed to one space.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a hook handler runs one of the [`PRIME_HOOK_FORMS`].
 fn is_prime_handler(handler: &Value) -> bool {
-    handler
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| c.contains(PRIME_HOOK_MARKER))
+    let Some(command) = handler.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    let command = collapse_whitespace(command);
+    PRIME_HOOK_FORMS
+        .iter()
+        .any(|form| collapse_whitespace(form) == command)
 }
 
 /// Merge the bears `SessionStart` hook into the Claude Code settings file at
 /// `path`.
 ///
-/// - A missing file is created holding only the hook.
+/// - A missing, empty or whitespace-only file is filled with the hook alone.
 /// - Otherwise every other key, hook event and `SessionStart` entry is kept.
-///   Every handler recognised as the bears hook (its command contains
-///   `bea prime`) is removed, a matcher group left empty by that is dropped,
-///   and the current bears group is put where the first of them was (appended
-///   when there was none). An older form is therefore replaced, and a re-run
-///   finds the same group in the same place and writes nothing.
+///   The first handler running a published form of the bears hook
+///   ([`PRIME_HOOK_FORMS`]) gets the current command in place, keeping its
+///   group (and that group's `matcher`), its position and its other keys;
+///   further such handlers are removed as duplicates, and a group left empty
+///   by that is dropped. With no such handler, the bears group is appended.
+///   Any other handler, even one running `bea prime`, is the user's and is
+///   left alone. A re-run therefore writes nothing.
 /// - A file that is not valid JSON, not an object, or whose `hooks` is not an
-///   object or `hooks.SessionStart` not an array, is left untouched and
-///   reported as [`HookMerge::Skipped`].
+///   object or `hooks.SessionStart` not an array, or that cannot be read or
+///   written, is left untouched and reported as [`HookMerge::Skipped`].
 ///
 /// The file is rewritten pretty-printed (keys in `serde_json`'s order, as the
 /// `.mcp.json` merge does) only when its content changes.
 pub fn merge_session_hook(path: &Path) -> Result<HookMerge> {
     let existing: Option<Value> = if path.exists() {
-        let raw = fs::read_to_string(path)?;
-        match serde_json::from_str(&raw) {
-            Ok(v) => Some(v),
-            Err(e) => return Ok(HookMerge::Skipped(format!("it is not valid JSON ({e})"))),
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) => return Ok(HookMerge::Skipped(format!("it could not be read ({e})"))),
+        };
+        if raw.trim().is_empty() {
+            None
+        } else {
+            match serde_json::from_str(&raw) {
+                Ok(v) => Some(v),
+                Err(e) => return Ok(HookMerge::Skipped(format!("it is not valid JSON ({e})"))),
+            }
         }
     } else {
         None
@@ -148,38 +169,43 @@ pub fn merge_session_hook(path: &Path) -> Result<HookMerge> {
         ));
     };
 
-    // Remove every bears handler, remembering where the first one was.
-    let mut insert_at: Option<usize> = None;
-    let mut kept: Vec<Value> = Vec::with_capacity(groups.len() + 1);
-    for mut group in groups.drain(..) {
-        let handlers = group.get_mut("hooks").and_then(Value::as_array_mut);
-        let Some(handlers) = handlers else {
-            kept.push(group);
-            continue;
+    // Bring the first bears handler up to date in place; drop further copies,
+    // and a group that held nothing but such a copy.
+    let mut found = false;
+    groups.retain_mut(|group| {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
         };
         let before = handlers.len();
-        handlers.retain(|h| !is_prime_handler(h));
-        if handlers.len() == before {
-            kept.push(group);
-            continue;
-        }
-        insert_at.get_or_insert(kept.len());
-        if !handlers.is_empty() {
-            kept.push(group);
-        }
+        handlers.retain_mut(|handler| {
+            if !is_prime_handler(handler) {
+                return true;
+            }
+            if found {
+                return false;
+            }
+            found = true;
+            handler["command"] = Value::String(PRIME_HOOK_COMMAND.to_string());
+            true
+        });
+        handlers.len() == before || !handlers.is_empty()
+    });
+    if !found {
+        groups.push(prime_hook_group());
     }
-    let at = insert_at.unwrap_or(kept.len());
-    kept.insert(at, prime_hook_group());
-    *groups = kept;
 
     if existing.as_ref() == Some(&doc) {
         return Ok(HookMerge::Unchanged);
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let pretty = serde_json::to_string_pretty(&doc)?;
-    fs::write(path, format!("{pretty}\n"))?;
+    let write = match path.parent() {
+        Some(parent) => fs::create_dir_all(parent),
+        None => Ok(()),
+    }
+    .and_then(|()| fs::write(path, format!("{pretty}\n")));
+    if let Err(e) = write {
+        return Ok(HookMerge::Skipped(format!("it could not be written ({e})")));
+    }
     Ok(HookMerge::Written)
 }
 
@@ -543,7 +569,8 @@ pub fn scaffold_category(
             if let Some(target) = harness.session_hook {
                 let target_path = base.join(target);
                 match merge_session_hook(&target_path)? {
-                    HookMerge::Written | HookMerge::Unchanged => written.push(target_path),
+                    HookMerge::Written => written.push(target_path),
+                    HookMerge::Unchanged => {}
                     HookMerge::Skipped(reason) => eprintln!(
                         "warning: leaving {} untouched, {reason}; the bears SessionStart hook was not added",
                         target_path.display()
@@ -725,10 +752,16 @@ mod tests {
 
         // Second scaffold (re-init on existing dir) must succeed
         let written2 = scaffold(tmp.path(), &["claude"]).unwrap();
+        let settings = tmp.path().join(CLAUDE_SETTINGS);
+        assert!(written.contains(&settings));
+        assert!(
+            !written2.contains(&settings),
+            "an unchanged settings file is not reported as written"
+        );
         assert_eq!(
             written.len(),
-            written2.len(),
-            "same number of files on re-scaffold"
+            written2.len() + 1,
+            "same files on re-scaffold, the unchanged settings file aside"
         );
 
         // Contents must be stable
@@ -1120,16 +1153,15 @@ mod tests {
         assert_eq!(doc["permissions"], existing["permissions"]);
         assert_eq!(doc["model"], "opus");
         assert_eq!(doc["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);
-        let groups = doc["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(groups.len(), 3);
         assert_eq!(
-            groups[0],
-            serde_json::json!({ "matcher": "startup", "hooks": [mine] })
-        );
-        assert_eq!(groups[1], prime_hook_group());
-        assert_eq!(
-            groups[2],
-            serde_json::json!({ "hooks": [{ "type": "command", "command": "echo also" }] })
+            doc["hooks"]["SessionStart"],
+            serde_json::json!([
+                { "matcher": "startup", "hooks": [mine] },
+                { "hooks": [
+                    { "type": "command", "command": PRIME_HOOK_COMMAND },
+                    { "type": "command", "command": "echo also" }
+                ] }
+            ])
         );
     }
 
@@ -1150,25 +1182,105 @@ mod tests {
         assert_eq!(prime_commands(&read_json(&path)), [PRIME_HOOK_COMMAND]);
     }
 
-    /// An older form of the hook is replaced in place, and duplicates collapse
-    /// to one.
+    /// An older published form is replaced in place, in its group: the
+    /// group's `matcher`, the handler's position and its other keys are kept,
+    /// and further copies (whitespace aside) collapse into it.
     #[test]
-    fn test_merge_session_hook_replaces_old_form() {
+    fn test_merge_session_hook_replaces_old_form_in_place() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.json");
-        let old = serde_json::json!({ "hooks": [{ "type": "command", "command": "test ! -d .bears || bea prime" }] });
         let other = serde_json::json!({ "hooks": [{ "type": "command", "command": "other" }] });
         let existing = serde_json::json!({
-            "hooks": { "SessionStart": [other.clone(), old.clone(), old] }
+            "hooks": { "SessionStart": [
+                other.clone(),
+                { "matcher": "startup", "hooks": [
+                    { "type": "command", "command": "echo first" },
+                    { "type": "command", "command": "test ! -d .bears || bea prime", "timeout": 30 }
+                ] },
+                { "hooks": [{ "type": "command", "command": "  test ! -d .bears ||   bea prime " }] },
+                { "hooks": [{ "type": "command", "command": PRIME_HOOK_COMMAND }] }
+            ] }
         });
         fs::write(&path, existing.to_string()).unwrap();
 
         assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
-        let doc = read_json(&path);
         assert_eq!(
-            doc["hooks"]["SessionStart"],
-            serde_json::json!([other, prime_hook_group()])
+            read_json(&path)["hooks"]["SessionStart"],
+            serde_json::json!([
+                other,
+                { "matcher": "startup", "hooks": [
+                    { "type": "command", "command": "echo first" },
+                    { "type": "command", "command": PRIME_HOOK_COMMAND, "timeout": 30 }
+                ] }
+            ])
         );
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Unchanged);
+    }
+
+    /// A user's own handler that mentions or runs `bea prime` (with flags,
+    /// piped, in a sentence) is never touched, and the bears hook is added
+    /// beside it.
+    #[test]
+    fn test_merge_session_hook_keeps_users_bea_prime_handlers() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        let groups = serde_json::json!([
+            { "hooks": [{ "type": "command", "command": "echo \"tip: run bea prime to see the queue\"" }] },
+            { "hooks": [{ "type": "command", "command": "bea prime --json | jq . > /tmp/q.json" }] },
+            { "matcher": "startup", "hooks": [{ "type": "command", "command": "bea prime --limit 3" }] }
+        ]);
+        let existing = serde_json::json!({ "hooks": { "SessionStart": groups.clone() } });
+        fs::write(&path, existing.to_string()).unwrap();
+
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+        let mut expected = groups.as_array().unwrap().clone();
+        expected.push(prime_hook_group());
+        assert_eq!(
+            read_json(&path)["hooks"]["SessionStart"],
+            Value::Array(expected)
+        );
+        assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Unchanged);
+    }
+
+    /// An empty or whitespace-only file is filled like a missing one.
+    #[test]
+    fn test_merge_session_hook_fills_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        for raw in ["", "  \n\t"] {
+            fs::write(&path, raw).unwrap();
+            assert_eq!(merge_session_hook(&path).unwrap(), HookMerge::Written);
+            assert_eq!(
+                read_json(&path),
+                serde_json::json!({ "hooks": { "SessionStart": [prime_hook_group()] } })
+            );
+        }
+    }
+
+    /// A settings file that cannot be written is skipped with its reason, and
+    /// the rest of the scaffolding goes on.
+    #[cfg(unix)]
+    #[test]
+    fn test_merge_session_hook_read_only_file_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(CLAUDE_SETTINGS);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"model": "opus"}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        if fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return; // running as root: permissions are not enforced
+        }
+
+        let outcome = merge_session_hook(&path).unwrap();
+        assert!(
+            matches!(&outcome, HookMerge::Skipped(r) if r.contains("could not be written")),
+            "{outcome:?}"
+        );
+        let written = scaffold(tmp.path(), &["claude"]).unwrap();
+        assert!(!written.contains(&path));
+        assert!(written.iter().any(|p| p.ends_with(".mcp.json")));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
     }
 
     /// A file of the wrong shape is left byte for byte as it was.

@@ -2626,8 +2626,39 @@ fn test_init_claude_merges_session_start_hook() {
     bea(&tmp)
         .args(["init", "--claude", "--force"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("settings.json").not());
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), first);
+}
+
+/// A read-only `.claude/settings.json` is left as it was with a warning naming
+/// it, and `bea init --claude` still succeeds.
+#[cfg(unix)]
+#[test]
+fn test_init_claude_read_only_settings_warns_and_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let settings = tmp.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{}").unwrap();
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&settings)
+        .is_ok()
+    {
+        return; // running as root: permissions are not enforced
+    }
+
+    bea(&tmp)
+        .args(["init", "--claude"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("warning: leaving"))
+        .stderr(predicate::str::contains("settings.json"))
+        .stderr(predicate::str::contains("could not be written"));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
+    assert!(tmp.path().join(".mcp.json").exists());
 }
 
 /// The scaffolded hook primes a session in an initialized project and is
