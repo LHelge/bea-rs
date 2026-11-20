@@ -95,7 +95,7 @@ pub fn create_default(base: &Path) -> Result<PathBuf> {
     }
     let config = Config::default();
     let content = crate::task::to_yaml(&config)?;
-    fs::write(&path, content)?;
+    crate::store::write_atomically(&path, content.as_bytes())?;
     Ok(path)
 }
 

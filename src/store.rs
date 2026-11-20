@@ -347,16 +347,81 @@ pub fn save(base: &Path, t: &Task) -> Result<()> {
     Ok(())
 }
 
-/// Write `t` to `path` atomically (temp file + rename in the same
-/// directory), so a crash cannot leave a truncated task behind.
+/// Write `t` to `path` atomically (see [`write_atomically`]), so a crash
+/// cannot leave a truncated task behind and two writers never share a
+/// temporary file.
 fn write_task_file(path: &Path, t: &Task) -> Result<()> {
+    write_atomically(path, task::render_task(t).as_bytes())?;
+    Ok(())
+}
+
+/// Replace the file at `path` with `contents` atomically: a reader sees
+/// either the old file or the new one, never a truncated one.
+///
+/// The contents go to a temporary file in the same directory, named
+/// `.{name}.{pid}-{nanos}-{counter}.tmp` and created with `create_new`
+/// (another name is tried if it exists), so concurrent writers of the same
+/// target, in one process or several, never share it. The file is synced and
+/// then renamed over `path`, so the last rename wins. When writing or
+/// renaming fails the temporary file is removed. An existing regular file's
+/// permissions are carried over; an existing symlink at `path` is replaced by
+/// the new file, not followed. The parent directory must exist.
+///
+/// The temporary name ends in `.tmp`, never `.md`, so the loaders
+/// ([`load_all`], [`load_archived`], [`scan_task_files`]) never read one as a
+/// task, including a stale one left behind by a killed process.
+pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::{Error as IoError, ErrorKind, Write};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
     let name = path
         .file_name()
-        .ok_or_else(|| Error::TaskNotFound(t.id.clone()))?;
-    let tmp_path = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
-    fs::write(&tmp_path, task::render_task(t))?;
-    fs::rename(&tmp_path, path)?;
-    Ok(())
+        .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "not a file name"))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+
+    let mut attempts = 0;
+    let (tmp_path, mut file) = loop {
+        attempts += 1;
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = format!(
+            ".{}.{}-{nanos}-{n}.tmp",
+            name.to_string_lossy(),
+            std::process::id()
+        );
+        let tmp_path = path.with_file_name(tmp_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => break (tmp_path, file),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && attempts < 100 => continue,
+            Err(e) => return Err(e),
+        }
+    };
+
+    let result = (|| {
+        file.write_all(contents)?;
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.is_file()
+        {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 /// Read and parse every task file in `dir`, sorted by path. A missing
@@ -578,9 +643,7 @@ pub fn migrate(base: &Path, dry_run: bool) -> Result<Migration> {
         // run's renames as well as this one's.
         let mut all = prior.clone();
         all.extend(plan.renames.clone());
-        let tmp = dir.join(format!("{MIGRATION_JOURNAL}.tmp"));
-        fs::write(&tmp, serde_json::to_string_pretty(&all)?)?;
-        fs::rename(&tmp, &journal)?;
+        write_atomically(&journal, serde_json::to_string_pretty(&all)?.as_bytes())?;
     }
     // References may name an old ID, or a new ID an interrupted run chose
     // and this run does not keep.
@@ -1124,6 +1187,127 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    /// Every file in `dir` whose name ends in `.tmp`.
+    fn temp_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("tmp"))
+            .collect()
+    }
+
+    /// Two writers of the same task file at once (two agents, or an agent
+    /// and the TUI) each get their own temporary file: neither write fails,
+    /// the file is always one of the two whole versions, and no temporary
+    /// file is left. With one fixed temporary name the second rename found
+    /// its file already renamed away by the first.
+    #[test]
+    fn test_concurrent_writers_of_one_task_file() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let base = tmp.path().to_path_buf();
+        save(
+            &base,
+            &Task::new("cw1".into(), "Shared".into(), Priority::P2),
+        )
+        .unwrap();
+
+        let writers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|who| {
+                let base = base.clone();
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        let mut t = Task::new("cw1".into(), "Shared".into(), Priority::P2);
+                        t.body = format!("{who} {i}\n").repeat(200);
+                        save(&base, &t).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+
+        let t = load_one(&base, "cw1").unwrap();
+        assert!(
+            t.body == "first 99\n".repeat(200) || t.body == "second 99\n".repeat(200),
+            "the file is one writer's last version"
+        );
+        assert!(temp_files(&tasks_dir(&base)).is_empty());
+    }
+
+    /// A failed write removes its temporary file: here the rename fails,
+    /// since the target is a directory that is not empty.
+    #[test]
+    fn test_write_atomically_removes_temp_file_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("occupied");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside"), "x").unwrap();
+
+        assert!(write_atomically(&target, b"new").is_err());
+        assert!(target.is_dir());
+        assert!(temp_files(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn test_write_atomically_replaces_contents() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("file.txt");
+        write_atomically(&target, b"one").unwrap();
+        write_atomically(&target, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "two");
+        assert!(temp_files(tmp.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_atomically_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("file.txt");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomically(&target, b"new").unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    /// A temporary file left behind by a killed writer — in the current
+    /// naming or the fixed `.{name}.tmp` of earlier versions, holding a
+    /// complete task — is never read as a task by either loader or by the
+    /// store check, and `bea doctor` does not report it.
+    #[tokio::test]
+    async fn test_stale_temp_files_are_not_tasks() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let active = Task::new("st1".into(), "Active".into(), Priority::P2);
+        let archived = Task::new("st2".into(), "Archived".into(), Priority::P2);
+        save(tmp.path(), &active).unwrap();
+        save(tmp.path(), &archived).unwrap();
+        move_to_archive(tmp.path(), "st2").unwrap();
+
+        let stray = Task::new("zz9".into(), "Stray".into(), Priority::P0);
+        let content = task::render_task(&stray);
+        for dir in [tasks_dir(tmp.path()), archive_dir(tmp.path())] {
+            fs::write(dir.join(".zz9-stray.md.4242-17-0.tmp"), &content).unwrap();
+            fs::write(dir.join(".zz9-stray.md.tmp"), &content).unwrap();
+        }
+
+        let tasks = load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.keys().collect::<Vec<_>>(), ["st1"]);
+        let archive = load_archived(tmp.path()).await.unwrap();
+        assert_eq!(archive.keys().collect::<Vec<_>>(), ["st2"]);
+        assert!(!archived_id_set(tmp.path()).contains("zz9"));
+        assert_eq!(reserved_ids(tmp.path(), &tasks).len(), 2);
+
+        let files = scan_task_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        let report = crate::service::check_store(tmp.path()).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
     }
 
     #[test]
