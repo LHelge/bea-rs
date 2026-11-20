@@ -556,6 +556,22 @@ impl BeaMcp {
             .await,
         )
     }
+
+    #[tool(
+        description = "Check the task store for inconsistencies, active and archive: \
+        legacy parent: keys, unreadable files, malformed or duplicate IDs, files whose name \
+        does not match their ID, dangling dependencies, tasks whose parent is missing or not \
+        an epic, and dependency cycles. Read-only: returns { ok, files, findings }, each \
+        finding tagged by `kind`. Repairs need the CLI (`bea doctor --fix`)."
+    )]
+    async fn doctor(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        tool_ok((|| {
+            let report = service::check_store(&self.base)?;
+            let mut value = serde_json::to_value(&report)?;
+            value["ok"] = report.is_healthy().into();
+            ok_json(value)
+        })())
+    }
 }
 
 #[tool_handler]
@@ -2641,5 +2657,43 @@ mod tests {
             !new_ids.contains(&archived_id),
             "archived ID {archived_id} must not be reused; new IDs: {new_ids:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_tool_doctor_reports_findings_without_fixing() {
+        let (tmp, mcp) = setup();
+        let healthy = extract_json(&mcp.doctor().await.unwrap());
+        assert_eq!(healthy["ok"], true);
+        assert_eq!(healthy["files"], 0);
+        assert_eq!(healthy["findings"], serde_json::json!([]));
+
+        let mut t = bears::task::Task::new("aaa".into(), "A".into(), Priority::P2);
+        t.depends_on = vec!["gone".into()];
+        let misnamed = store::tasks_dir(tmp.path()).join("zzz-wrong.md");
+        std::fs::write(&misnamed, bears::task::render_task(&t)).unwrap();
+
+        let result = mcp.doctor().await.unwrap();
+        assert_ne!(result.is_error, Some(true), "findings are not a tool error");
+        let json = extract_json(&result);
+        assert_eq!(json["ok"], false);
+        let kinds: Vec<&str> = json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["filename-mismatch", "dangling-dependency"]);
+        assert_eq!(json["findings"][1]["depends_on"], "gone");
+        assert!(json.get("renamed").is_none() && json.get("moved").is_none());
+        assert!(misnamed.exists(), "the tool is read-only");
+    }
+
+    #[tokio::test]
+    async fn test_tool_doctor_not_initialized_is_tool_error() {
+        let tmp = TempDir::new().unwrap();
+        let mcp = BeaMcp::new(tmp.path().to_path_buf());
+        let result = mcp.doctor().await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(extract_text(&result).contains("not initialized"));
     }
 }

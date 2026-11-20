@@ -100,6 +100,7 @@ async fn test_handshake_and_tool_list() {
         "archive_task",
         "restore_task",
         "list_archived",
+        "doctor",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
