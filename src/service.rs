@@ -74,14 +74,19 @@ pub fn create_task(
 /// other ID argument is resolved (an exact ID, or a prefix through
 /// [`store::resolve_prefix`]).
 ///
-/// `tasks` are the active tasks. An exact active ID is taken without reading
-/// the archive. Otherwise the value is resolved against active and archived
-/// IDs together, so an epic that lives only in the archive still filters its
-/// active children, and a prefix of such an epic names the epic rather than
-/// one of those children.
+/// `tasks` are the active tasks, and they are tried first, exactly as `show`
+/// and the mutating commands resolve an ID: an archived task sharing the
+/// prefix does not make it ambiguous. Only when the active tasks name no
+/// task, or a task that is not an epic, is the value resolved again against
+/// active and archived IDs together, so an epic that lives only in the
+/// archive still filters its active children, and a prefix of such an epic
+/// names the epic rather than one of those children.
 ///
-/// Errors: [`Error::InvalidId`] for an empty value, [`Error::TaskNotFound`]
-/// when it names no task, [`Error::AmbiguousPrefix`] when it names several,
+/// Errors: [`Error::InvalidId`] for an empty value; [`Error::AmbiguousPrefix`]
+/// when it names several active tasks (the archive is not consulted then) or,
+/// on the second try, several tasks active and archived;
+/// [`Error::TaskNotFound`] when it names no task, or names a whole ID that
+/// exists only as the ancestor of a task (the missing epic of an orphan);
 /// and [`Error::NotAnEpic`] when the task it names is not an epic (only epics
 /// have tasks below them, so the filter could only ever be empty).
 ///
@@ -95,12 +100,21 @@ pub async fn resolve_epic_filter(
     let is_epic = |t: &Task| {
         if t.task_type.is_epic() {
             Ok(t.id.clone())
+        } else if task::is_descendant(&t.id, epic) {
+            // `epic` is a whole ID above the task, and no task has it.
+            Err(Error::TaskNotFound(epic.to_string()))
         } else {
             Err(Error::NotAnEpic(t.id.clone()))
         }
     };
     if let Some(t) = tasks.get(epic) {
         return is_epic(t);
+    }
+    match store::resolve_prefix(tasks, epic) {
+        Ok(id) if tasks[&id].task_type.is_epic() => return Ok(id),
+        Err(e @ (Error::AmbiguousPrefix { .. } | Error::InvalidId { .. })) => return Err(e),
+        // Nothing active, or a non-epic: the epic may be archived.
+        _ => {}
     }
     let mut all = store::load_archived(base).await?;
     all.extend(tasks.iter().map(|(id, t)| (id.clone(), t.clone())));
@@ -2395,10 +2409,51 @@ mod tests {
         assert!(matches!(resolve("").await, Err(Error::InvalidId { .. })));
     }
 
+    /// The archive is only consulted when the active tasks do not resolve the
+    /// value to an epic, so an archived task sharing the prefix does not make
+    /// a prefix ambiguous that every other command accepts.
+    #[tokio::test]
+    async fn test_resolve_epic_filter_prefers_active_tasks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        let mut archived = vec![make_task("qx", Status::Done), make_epic("wb")];
+        archived[1].status = Status::Done;
+        for t in archived {
+            store::save(base, &t).unwrap();
+            store::move_to_archive(base, &t.id).unwrap();
+        }
+        for t in [
+            make_epic("q7"),
+            make_child("k", "q7", Status::Open),
+            make_task("wa", Status::Open),
+            // An orphan: its epic `zz9` exists nowhere.
+            make_child("a", "zz9", Status::Open),
+        ] {
+            store::save(base, &t).unwrap();
+        }
+        let tasks = store::load_all(base).await.unwrap();
+        let resolve = async |v: &str| resolve_epic_filter(base, &tasks, v).await;
+
+        assert_eq!(resolve("q").await.unwrap(), "q7");
+        // Active resolution gives a non-epic, so the archive is consulted, and
+        // the value turns out to name two tasks.
+        assert!(matches!(
+            resolve("w").await,
+            Err(Error::AmbiguousPrefix { .. })
+        ));
+        assert_eq!(resolve("wb").await.unwrap(), "wb");
+        // Naming the missing epic of an orphan is "not found", not "zz9.a is
+        // not an epic".
+        assert!(matches!(resolve("zz9").await, Err(Error::TaskNotFound(id)) if id == "zz9"));
+        assert!(matches!(resolve("zz9.a").await, Err(Error::NotAnEpic(id)) if id == "zz9.a"));
+        assert!(matches!(resolve("qx").await, Err(Error::NotAnEpic(id)) if id == "qx"));
+    }
+
     /// An epic that lives only in the archive still filters its active
-    /// children, by its full ID or a prefix: the prefix resolves against
-    /// active and archived IDs together, so it names the epic and not its
-    /// one active child.
+    /// children, by its full ID or a prefix: the active tasks alone resolve the
+    /// prefix to the child, which is no epic, so it is resolved again against
+    /// active and archived IDs together and names the epic.
     #[tokio::test]
     async fn test_resolve_epic_filter_finds_an_archived_epic() {
         let tmp = tempfile::TempDir::new().unwrap();
