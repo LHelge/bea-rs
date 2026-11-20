@@ -363,7 +363,8 @@ file, parse errors included, prints nothing), so it sees them.
   copy that keeps the ID listed first, with each copy's title, and the `dependents` / `descendants`
   that refer to the ID), `filename-mismatch` (the filename's ID differs from the
   task's; a stale slug is not a finding), `dangling-dependency` (names no task, active or archived),
-  `missing-parent`, `parent-not-epic`, `dependency-cycle`. Paths are relative to the base.
+  `missing-parent` (delete and prune detach an epic's children, so this comes from hand edits or
+  merges), `parent-not-epic`, `dependency-cycle`. Paths are relative to the base.
 - `service::repair_store(base)` fixes the two `Finding::is_fixable()` kinds, then checks again and
   returns what remains. **Duplicates:** the copy that keeps the ID is the active one before an
   archived one, then the one whose filename starts with the ID, then the first by path (what
