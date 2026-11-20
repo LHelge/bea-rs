@@ -1,10 +1,10 @@
 ---
 id: 8ur
 title: Get bincode 1.3.3 out of the lockfile (RUSTSEC-2025-0141, unmaintained)
-status: open
+status: blocked
 priority: P3
 created: "2026-11-20T13:22:09.661487727Z"
-updated: "2026-11-20T22:29:54.503904520Z"
+updated: "2026-11-20T22:40:45.201472456Z"
 tags:
   - deps
 attempts: 1
