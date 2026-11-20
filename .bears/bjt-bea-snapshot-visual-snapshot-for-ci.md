@@ -2,10 +2,10 @@
 id: bjt
 title: "bea snapshot: visual snapshot for CI"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-20T12:52:25.739881625Z"
-updated: "2026-11-20T12:52:25.739881625Z"
+updated: "2026-11-20T21:05:51.023595674Z"
 tags:
   - snapshot
 ---
