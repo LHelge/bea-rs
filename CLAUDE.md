@@ -185,7 +185,45 @@ Markdown body here.
 
 Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
 
-There is no `parent` field: a task's parent is derived from its ID (`Task::parent()`; `x9k.a1` above is a child of epic `x9k`). Files written before hierarchical IDs carry a `parent:` key. It still parses, into `Task::legacy_parent`, which is never written back and has no effect on the parent; it exists so that legacy stores can be detected and migrated. Any write of such a task drops the key.
+There is no `parent` field: a task's parent is derived from its ID (`Task::parent()`; `x9k.a1` above is a child of epic `x9k`). Files written before hierarchical IDs carry a `parent:` key. It still parses, into `Task::legacy_parent`, which is never written back and has no effect on the parent; it exists so that legacy stores can be detected and migrated. Any write of such a task drops the key — which is why a legacy store is refused outright (next section).
+
+### Legacy stores and `bea migrate`
+
+A store is **legacy** when any task file in `.bears/` or `.bears/archive/` carries a `parent:` key.
+`store::load_all` and `store::load_archived` both check *both* directories and return
+`Error::LegacyStore { files }` instead of any tasks, so no write path can run on a legacy store and
+silently drop an epic link. This covers the CLI, every MCP tool and the TUI alike; only commands that
+never load the store (`init`, `agent`, `completions`, and `migrate` itself) work on one. The CLI hint
+pointing at `bea migrate` lives in `hint_for()`.
+
+`store::migrate(base, dry_run) -> Migration { renamed, orphaned, legacy_files }` converts the store;
+`bea migrate [--dry-run]` is the CLI on top (there is no MCP tool):
+
+- Every task whose `parent:` names an epic (active or archived, by exact ID) gets a fresh child ID
+  under that epic's *new* ID via `generate_child_id`, parents first, so nested epics carry the whole
+  chain. Roots keep their IDs. A task found below a renamed task by its ID alone keeps its last
+  segment under the new prefix.
+- A `parent:` that names no task (`MissingParent`), a non-epic (`ParentNotEpic`) or leads round a
+  cycle (`ParentCycle`; the cycle is broken at one task) is **dropped and reported** in `orphaned`;
+  the task keeps its ID and is not lost.
+- All `depends_on` are rewritten in active and archived tasks, `updated` is kept, files with nothing
+  to change are not touched, and afterwards no file has a `parent:` key.
+- `--dry-run` prints the same mapping and writes nothing. On a store without `parent:` keys it is a
+  no-op ("Nothing to migrate", exit 0), so it is idempotent.
+- **Interruption safety.** The renames are written to `.bears/.migrate.json` (`MIGRATION_JOURNAL`)
+  before any task file; then new files, then rewritten files, then the old files are removed, and the
+  journal last. While unfinished, old files and their `parent:` keys remain, so the store still
+  refuses to load, and a re-run reuses the journal's IDs (recognising files already written under a
+  new ID as copies, and an already-removed epic's new ID through the journal) to finish the job
+  without duplicating or losing a task. It does not use `rename_ids`, which refuses a half-applied
+  rename (`IdTaken`) and cannot resume.
+
+CLI output: one `  renamed <old> → <new>` line per rename (as `bea update` prints), one
+`  kept <id> as is: its parent <p> does not exist | is not an epic | is part of a parent cycle, so the
+link was dropped` line per orphan, then a summary line. `--json` prints
+`{ "dry_run", "renamed": {old: new}, "orphaned": [{ "id", "parent", "reason" }], "legacy_files" }`,
+`reason` being `missing-parent`, `parent-not-epic` or `parent-cycle`. Exit status 0 on success
+(including nothing to do), 1 on an error (e.g. `NotInitialized`).
 
 ### ID generation
 
@@ -218,8 +256,8 @@ That guarantee rests on the precondition that old and new IDs are disjoint: swap
 chains (`a → b, b → c`) and identity entries are refused with `IdTaken`, since renaming onto an ID
 still being renamed away could overwrite its file before its own new file exists. Callers rename to
 fresh IDs.
-Reparenting is built on it; `bea migrate`, `bea doctor --fix` and detaching an epic's children on
-delete are meant to be too.
+Reparenting is built on it; `bea doctor --fix` and detaching an epic's children on delete are meant
+to be too. `bea migrate` is not: it needs to resume a half-applied rename (see below).
 
 ### `ready` command
 
@@ -390,6 +428,7 @@ Keep the dependency tree small. Compilation should be fast.
 ## Error handling
 
 - `.bears/` not found → suggest `bea init`
+- Legacy store (`parent:` keys) → `Error::LegacyStore` at load time, CLI hint suggests `bea migrate`
 - Task ID not found → clear error
 - Cycle detected → reject with explanation
 - Invalid frontmatter → warn and skip (don't crash), report which file
@@ -404,7 +443,7 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write)
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
 - Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)
 - Unit tests in `task.rs`: parent derived from the ID, no `parent:` key written, legacy `parent:` key read into `legacy_parent` but never written or used as the parent
@@ -413,8 +452,9 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
 - Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)
 - Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves; legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map, orphan report, idempotent re-run, not initialized) (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
-  list/schemas, tool calls, and protocol- vs tool-level error semantics
+  list/schemas, tool calls, protocol- vs tool-level error semantics, and a legacy store refused as a
+  tool error
 - MCP tools also verified end-to-end via live MCP sessions
