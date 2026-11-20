@@ -422,6 +422,52 @@ markup, scripts or `@`-mentions. The header says when the snapshot was taken; ot
 store always gives the same output. `bea snapshot` has no `--json` output: the other commands'
 `--json` already covers the data.
 
+#### Publishing the snapshot from GitHub Actions
+
+`bea snapshot` needs the first release of `bea` that includes it; with an older `bea` the workflow
+fails at the snapshot step. This workflow writes the Markdown snapshot to the job summary and keeps
+the HTML page, settled work included, as a build artifact whenever `.bears/` changes:
+
+```yaml
+# .github/workflows/snapshot.yml
+name: Snapshot
+
+on:
+  push:
+    branches: [main]
+    paths: ['.bears/**']
+  pull_request:
+    paths: ['.bears/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install bea
+        run: curl -fsSL https://raw.githubusercontent.com/LHelge/bea-rs/main/install.sh | sh
+
+      - name: Write Markdown snapshot to the job summary
+        run: bea snapshot --format md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render HTML snapshot
+        run: bea snapshot --all --format html -o snapshot.html
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bears-snapshot
+          path: snapshot.html
+```
+
+The install step uses the [pre-built binary](#pre-built-binary) installer; `cargo install bea-rs`
+works too, but compiles `bea` on every run. The workflow only reads the repository, so it is safe on
+pull requests from forks.
+
 ### `bea edit`
 Open a task's `.md` file in your `$EDITOR` for direct editing. Falls back to `$VISUAL`, then `vi`. After the editor exits, the file is re-parsed and validated.
 
