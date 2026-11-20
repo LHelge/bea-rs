@@ -134,6 +134,18 @@ fn create_task(app: &App, title: &str, terminal: &mut DefaultTerminal) -> Result
     Ok(id)
 }
 
+/// Delete a task, reload, and show the IDs the deletion changed.
+///
+/// Deleting an epic detaches its children to fresh root IDs; the renames are
+/// shown in a modal so the user learns the new IDs (nothing when none moved).
+fn delete_task(app: &mut App, id: &str) -> Result<()> {
+    let (_, task_map) = load_tasks_sync(&app.base)?;
+    let deleted = bears::service::delete_task(&app.base, &task_map, id)?;
+    reload(app)?;
+    app.show_renames(&deleted.renamed);
+    Ok(())
+}
+
 /// Read one crossterm event asynchronously via spawn_blocking.
 ///
 /// Returns `None` if the blocking thread panicked or was cancelled.
@@ -215,12 +227,7 @@ async fn run_loop(
                         }
                     }
                     Action::DeleteTask(id) => {
-                        match (|| -> Result<()> {
-                            let (_, task_map) = load_tasks_sync(&app.base)?;
-                            bears::service::delete_task(&app.base, &task_map, &id)?;
-                            reload(app)?;
-                            Ok(())
-                        })() {
+                        match delete_task(app, &id) {
                             Ok(()) => app.error_message = None,
                             Err(e) => app.error_message = Some(e.to_string()),
                         }
@@ -595,6 +602,73 @@ mod tests {
             bears::graph::is_task_ready(&app.task_map, app.task_map.get("t04").unwrap()),
             "t04 has no deps, so it must be ready"
         );
+    }
+
+    // ── Delete reports renames ───────────────────────────────────────────
+
+    use crate::tui::app::Mode;
+
+    fn create(base: &std::path::Path, title: &str, parent: Option<&str>, epic: bool) -> Task {
+        use bears::task::TaskType;
+        let (_, tasks) = load_tasks_sync(base).unwrap();
+        bears::service::create_task(
+            base,
+            &tasks,
+            title.to_string(),
+            Priority::P2,
+            Vec::new(),
+            Vec::new(),
+            parent.map(String::from),
+            String::new(),
+            if epic { TaskType::Epic } else { TaskType::Task },
+        )
+        .unwrap()
+    }
+
+    /// Deleting an epic in the TUI shows every detached child's old and new
+    /// ID in the renames modal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_epic_shows_renamed_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        bears::store::init(tmp.path()).unwrap();
+        let epic = create(tmp.path(), "Epic", None, true);
+        let a = create(tmp.path(), "Child A", Some(&epic.id), false);
+        let b = create(tmp.path(), "Child B", Some(&epic.id), false);
+
+        let (list, map) = load_tasks_sync(tmp.path()).unwrap();
+        let mut app = App::new(list, map, tmp.path().to_path_buf());
+        delete_task(&mut app, &epic.id).unwrap();
+
+        let Mode::ShowRenames { renamed, scroll } = &app.mode else {
+            panic!("expected the renames modal, got {:?}", app.mode);
+        };
+        assert_eq!(*scroll, 0);
+        let old: Vec<&str> = renamed.iter().map(|(o, _)| o.as_str()).collect();
+        let mut expected = vec![a.id.as_str(), b.id.as_str()];
+        expected.sort();
+        assert_eq!(old, expected);
+        for (_, new) in renamed {
+            assert!(
+                app.task_map.contains_key(new),
+                "new ID {new} must be a task after the reload"
+            );
+            assert!(!new.contains('.'), "detached children get root IDs");
+        }
+    }
+
+    /// Deleting a task that moves nothing leaves the TUI in normal mode.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_without_renames_shows_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        bears::store::init(tmp.path()).unwrap();
+        let task = create(tmp.path(), "Plain", None, false);
+
+        let (list, map) = load_tasks_sync(tmp.path()).unwrap();
+        let mut app = App::new(list, map, tmp.path().to_path_buf());
+        delete_task(&mut app, &task.id).unwrap();
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.task_map.is_empty());
     }
 
     /// When a task gains a dependency on an incomplete task after reload,

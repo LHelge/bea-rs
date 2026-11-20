@@ -43,6 +43,7 @@ impl App {
             Mode::CreateInput { .. } => self.handle_create_input_key(key),
             Mode::FilterInput { .. } => self.handle_filter_input_key(key),
             Mode::ConfirmDelete { .. } => self.handle_confirm_delete_key(key),
+            Mode::ShowRenames { .. } => self.handle_show_renames_key(key),
         };
         self.check_scroll_reset();
         action
@@ -268,6 +269,27 @@ impl App {
         }
     }
 
+    /// Renames modal: j/k (arrows, PgUp/PgDn, Home/End) scroll the list,
+    /// Esc, Enter or q dismiss it. Other keys are ignored, so the list cannot
+    /// be dismissed by accident before it is read.
+    fn handle_show_renames_key(&mut self, key: KeyEvent) -> Action {
+        let max = self.renames_max_scroll;
+        let Mode::ShowRenames { scroll, .. } = &mut self.mode else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.mode = Mode::Normal,
+            KeyCode::Char('j') | KeyCode::Down => *scroll = (*scroll + 1).min(max),
+            KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::PageDown => *scroll = (*scroll + 10).min(max),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => *scroll = max,
+            _ => {}
+        }
+        Action::None
+    }
+
     pub(super) fn select_next(&mut self) {
         if self.tasks.is_empty() {
             return;
@@ -491,6 +513,84 @@ mod tests {
         let action = app.handle_key(make_key(KeyCode::Char('y')));
         assert!(matches!(action, Action::DeleteTask(_)));
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    // ── Renames modal ────────────────────────────────────────────────────
+
+    fn renames(n: usize) -> std::collections::BTreeMap<String, String> {
+        (0..n)
+            .map(|i| (format!("ep.c{i:02}"), format!("r{i:02}")))
+            .collect()
+    }
+
+    #[test]
+    fn test_show_renames_empty_stays_normal() {
+        let mut app = make_app();
+        app.show_renames(&renames(0));
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn test_show_renames_lists_every_rename_by_old_id() {
+        let mut app = make_app();
+        app.show_renames(&renames(3));
+        let Mode::ShowRenames { renamed, scroll } = &app.mode else {
+            panic!("expected renames modal");
+        };
+        assert_eq!(*scroll, 0);
+        assert_eq!(
+            renamed,
+            &vec![
+                ("ep.c00".to_string(), "r00".to_string()),
+                ("ep.c01".to_string(), "r01".to_string()),
+                ("ep.c02".to_string(), "r02".to_string()),
+            ]
+        );
+    }
+
+    fn renames_scroll(app: &App) -> usize {
+        match &app.mode {
+            Mode::ShowRenames { scroll, .. } => *scroll,
+            other => panic!("expected renames modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_renames_modal_scrolls_within_bounds() {
+        let mut app = make_app();
+        app.show_renames(&renames(20));
+        // As measured by a render that fits 15 of the 20 rows.
+        app.renames_max_scroll = 5;
+
+        app.handle_key(make_key(KeyCode::Char('k')));
+        assert_eq!(renames_scroll(&app), 0, "no scrolling above the top");
+        app.handle_key(make_key(KeyCode::Char('j')));
+        app.handle_key(make_key(KeyCode::Down));
+        assert_eq!(renames_scroll(&app), 2);
+        app.handle_key(make_key(KeyCode::PageDown));
+        assert_eq!(renames_scroll(&app), 5, "clamped to the last page");
+        app.handle_key(make_key(KeyCode::Home));
+        assert_eq!(renames_scroll(&app), 0);
+        app.handle_key(make_key(KeyCode::End));
+        assert_eq!(renames_scroll(&app), 5);
+        app.handle_key(make_key(KeyCode::Up));
+        assert_eq!(renames_scroll(&app), 4);
+    }
+
+    #[test]
+    fn test_renames_modal_dismissed_only_by_close_keys() {
+        for close in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
+            let mut app = make_app();
+            app.show_renames(&renames(2));
+            // Unrelated keys neither close the modal nor reach normal mode.
+            let action = app.handle_key(make_key(KeyCode::Char('d')));
+            assert!(matches!(action, Action::None));
+            assert!(matches!(app.mode, Mode::ShowRenames { .. }));
+
+            let action = app.handle_key(make_key(close));
+            assert!(matches!(action, Action::None), "closing must not quit");
+            assert_eq!(app.mode, Mode::Normal);
+        }
     }
 
     // ── Focus & scroll tests ─────────────────────────────────────────────
