@@ -640,7 +640,9 @@ service::set_status(base, &tasks, &task.id, Status::Done)?;
 | `task` | `Task`, the frontmatter format, ID and slug generation |
 | `graph` | Dependency graph, readiness, effective priority, cycle detection |
 | `service` | Business logic — create, update, reparent, archive, epic progress and auto-close |
+| `snapshot` | A deterministic picture of the store (`snapshot::load` / `build`), rendered by `snapshot::markdown::render` (Markdown with Mermaid) or `snapshot::html::render` (one self-contained page) — what `bea snapshot` prints |
 | `scaffold` | Write coding-agent integration files (`CLAUDE.md`, skills, MCP config) |
+| `config` | `.bears.yml` settings (`id-length`, `child-id-length`) |
 | `error` | `Error` and `Result` |
 
 Most callers want `service`. It takes `&HashMap<String, Task>` from
@@ -684,12 +686,12 @@ locally with `cargo install --locked cargo-audit && cargo audit`.
 
 ```
 src/
-  lib.rs         Library root — public API (store, task, graph, service, ...)
+  lib.rs         Library root — public API (store, task, graph, service, snapshot, ...)
   main.rs        `bea` binary entry point — dispatch to CLI, MCP server, or TUI
   cli/
     mod.rs       CLI module root and dispatch
     args.rs      clap command and argument definitions
-    cmd.rs       Command handlers (list, show, create, edit, graph, etc.)
+    cmd.rs       Command handlers (list, show, create, edit, graph, snapshot, etc.)
   mcp/
     mod.rs       MCP module root and server setup
     params.rs    Tool parameter structs (serde + JSON Schema)
@@ -699,11 +701,15 @@ src/
   store.rs       Read/write .bears/ directory, incl. the archive layer
   task.rs        Task struct, frontmatter parse/render, ID & slug
   graph.rs       Dependency graph, ready computation, cycle detection
+  snapshot/      `bea snapshot`: store picture (mod.rs) and its renderers
+    markdown.rs  Markdown with a Mermaid graph, bounded for PR comments
+    html.rs      Self-contained HTML page with an SVG graph
   scaffold.rs    `bea init` harness scaffolding (Claude/Copilot/Codex)
   config.rs      .bears.yml configuration
   editor.rs      $EDITOR integration for `bea edit` (binary-only)
   error.rs       Error types
-templates/       Embedded harness templates for init scaffolding
+templates/       Embedded templates: harness files for init scaffolding,
+  snapshot/      and the HTML page of `bea snapshot --format html`
 .bears/          Task files (created by `bea init`)
   archive/       Archived task files
 ```
