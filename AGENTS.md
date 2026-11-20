@@ -57,27 +57,47 @@ The server must be launched from the project root (where `.bears/` lives).
 
 | Tool | Description |
 |------|-------------|
-| `list_ready` | Tasks that are open with all dependencies done |
-| `list_all_tasks` | List tasks with optional status/priority/tag/epic filters |
+| `list_ready` | Tasks that are open with all dependencies done (`limit?`, `tag?`, `epic?`) |
+| `list_all_tasks` | List tasks with optional status/priority/tag/epic filters (`active_only?`, `include_proposed?`) |
 | `list_epics` | List all epics with progress (done/total children) |
-| `get_task` | Full details of a single task |
-| `create_task` | Create a new task or epic |
-| `update_task` | Update task fields (status, priority, tags, assignee, body) |
+| `get_task` | Full details of a single task (falls back to the archive, marked `archived`) |
+| `create_task` | Create a new task or epic; with `parent`, the new ID is created under the epic's |
+| `update_task` | Update task fields (title, status, priority, tags, assignee, body); a new `parent` (`""` for none) moves the task and its subtree to new IDs |
 | `start_task` | Set status to in_progress, optionally claiming it for an assignee |
 | `release_task` | Release an in-progress task back to the pool (status → open, assignee cleared) |
 | `list_review` | Tasks awaiting review — review work, not new work |
 | `review_task` | Submit in-progress work for review instead of completing it |
-| `reject_task` | Send a task under review back for changes (→ open, assignee kept) |
+| `reject_task` | Send a task under review back for changes (→ open, assignee cleared) |
 | `propose_task` | Demote an open task to a proposal awaiting acceptance |
 | `accept_task` | Accept a proposal into the backlog (→ open) |
 | `complete_task` | Set status to done |
 | `cancel_task` | Set status to cancelled |
-| `prune_tasks` | Delete cancelled tasks (optionally also done tasks) |
+| `prune_tasks` | Delete cancelled tasks (optionally also done tasks); returns `{ pruned, renamed }` |
 | `add_dependency` | Add a dependency (cycle-safe) |
 | `remove_dependency` | Remove a dependency |
-| `delete_task` | Permanently delete a task |
+| `delete_task` | Permanently delete a task; deleting an epic gives its children new top-level IDs |
 | `search_tasks` | Search by text across titles, bodies, tags, and IDs |
-| `get_graph` | Full dependency graph as an adjacency list |
+| `plan_epic` | An epic's children in dependency order |
+| `get_graph` | Bounded dependency graph as an adjacency list (`include_done?`, `epic?`, `limit?`) |
+| `archive_task` | Archive a finished task (omit `id` to archive everything archivable) |
+| `restore_task` | Bring an archived task back, with its archived dependencies and epic |
+| `list_archived` | Archived tasks, most recent first |
+| `doctor` | Read-only store check: duplicate IDs, misnamed files, dangling dependencies, cycles |
+
+## Task IDs
+
+IDs are hierarchical: a task created under an epic gets the epic's ID plus a segment (epic `a1b2`,
+child `a1b2.c3`, grandchild `a1b2.c3.d4`), so the ID itself names the parent. There is no `parent`
+field in the task files. Never edit a task's `id`, add a `parent:` key or rename a `.bears/` file by
+hand: move a task with `update_task(id, parent=...)` instead.
+
+Moving a task (`update_task` with a new `parent`), deleting an epic or pruning one renames tasks: the
+result carries a `renamed` map of old ID → new ID. Use the new IDs from then on and do not reuse an
+ID you noted before.
+
+A store written before bears 0.10 still has `parent:` keys; bears refuses to load it until it is
+converted once with `bea migrate` in a shell (`bea migrate --dry-run` previews the renames). There is
+no MCP tool for this.
 
 ## The agentic loop
 
@@ -118,18 +138,23 @@ Break a large feature into smaller tasks with dependencies. Use epics to group r
    → returns id "a1b2"
 
 2. create_task("Design API schema", priority="P1", tags=["backend"], parent="a1b2")
-   → returns id "c3d4"
+   → returns id "a1b2.c3"
 
-3. create_task("Implement endpoints", priority="P1", depends_on=["c3d4"], parent="a1b2")
-   → returns id "e5f6"
+3. create_task("Implement endpoints", priority="P1", depends_on=["a1b2.c3"], parent="a1b2")
+   → returns id "a1b2.e5"
 
-4. create_task("Add integration tests", priority="P1", depends_on=["e5f6"], parent="a1b2")
-   → returns id "g7h8"
+4. create_task("Add integration tests", priority="P1", depends_on=["a1b2.e5"], parent="a1b2")
+   → returns id "a1b2.g7"
 ```
 
 Now `list_ready` only shows "Design API schema" until it's completed. Epics never appear in `list_ready` — they track progress automatically. When all children are done, the epic auto-closes.
 
-Use `list_epics()` to see progress across all epics, or `list_ready(epic="a1b2")` to focus on tasks within a specific epic.
+Use `list_epics()` to see progress across all epics, or `list_ready(epic="a1b2")` to focus on tasks within a specific epic (the filter takes an ID or a
+unique prefix and covers every task below the epic, nested epics included).
+
+To move a task to another epic later, call `update_task(id, parent="<epic-id>")`: it and its subtree
+get new IDs, every `depends_on` pointing at them is rewritten, and the result's `renamed` map tells
+you the new IDs.
 
 ### Triage the backlog
 
@@ -157,6 +182,8 @@ Understand what's blocking progress:
 - **Always start with `list_ready`** — it respects priorities and dependencies so you work on the right thing.
 - **Use tags** to scope work: `list_ready(tag="backend")` focuses on one area.
 - **Use `limit`** on `list_ready` to avoid overwhelming context: `list_ready(limit=3)`.
-- **Use epics** to plan larger features: create an epic, add child tasks with `parent`, and track progress with `list_epics`.
+- **Use epics** to plan larger features: create an epic, add child tasks with `parent` (their IDs extend the epic's), and track progress with `list_epics`.
+- **Follow renames** — after a move, delete or prune, use the IDs in the `renamed` map.
+- **Check the store** with `doctor` (or `bea doctor`) after a merge or hand edits.
 - **Keep tasks small** — a task should be completable in a single focused session.
 - **Add dependencies** to encode ordering constraints, not just for tracking.
