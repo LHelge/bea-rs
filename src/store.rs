@@ -2166,17 +2166,19 @@ mod tests {
         assert_eq!(snapshot(tmp.path()), end);
     }
 
-    /// A copy of this repository's own store migrates cleanly: it loads, and
-    /// every former `parent:` link survives as the prefix of the child's ID.
+    /// This repository's own store is already migrated: a copy of it loads,
+    /// carries no `parent:` key, `migrate` has nothing to do on it, every
+    /// task's parent (derived from its ID) is an existing epic, and every
+    /// `depends_on` names a task. The migration itself is covered by the
+    /// synthetic `migrate` tests above.
     #[tokio::test]
-    async fn test_migrate_a_copy_of_this_repository_store() {
+    async fn test_this_repository_store_is_migrated_and_consistent() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(BEARS_DIR);
         if !src.is_dir() {
             return;
         }
         let tmp = TempDir::new().unwrap();
         init(tmp.path()).unwrap();
-        let mut parents = Vec::new();
         for (from, to) in [
             (src.clone(), tasks_dir(tmp.path())),
             (src.join(ARCHIVE_SUBDIR), archive_dir(tmp.path())),
@@ -2189,27 +2191,24 @@ mod tests {
                 if path.extension().is_none_or(|e| e != "md") {
                     continue;
                 }
-                let content = fs::read_to_string(&path).unwrap();
-                let t = task::parse_task(&content).unwrap();
-                if let Some(p) = t.legacy_parent {
-                    parents.push((t.id, p));
-                }
-                fs::write(to.join(path.file_name().unwrap()), content).unwrap();
+                fs::copy(&path, to.join(path.file_name().unwrap())).unwrap();
             }
         }
 
-        let m = migrate(tmp.path(), false).unwrap();
-        assert!(m.orphaned.is_empty(), "{:?}", m.orphaned);
         no_parent_keys(tmp.path());
         let mut all = load_all(tmp.path()).await.unwrap();
         all.extend(load_archived(tmp.path()).await.unwrap());
-        let new = |id: &str| m.renamed.get(id).cloned().unwrap_or_else(|| id.to_string());
-        for (child, parent) in &parents {
-            let id = new(child);
-            assert!(all.contains_key(&id), "{child} → {id} missing");
-            assert_eq!(task::parent_of(&id), Some(new(parent).as_str()), "{child}");
-        }
+        assert!(migrate(tmp.path(), false).unwrap().is_noop());
         for t in all.values() {
+            if let Some(parent) = t.parent() {
+                let p = all.get(parent);
+                assert!(p.is_some(), "{} has no parent {parent}", t.id);
+                assert!(
+                    p.unwrap().task_type.is_epic(),
+                    "{}'s parent {parent} is not an epic",
+                    t.id
+                );
+            }
             for dep in &t.depends_on {
                 assert!(all.contains_key(dep), "{} depends on missing {dep}", t.id);
             }
