@@ -267,6 +267,8 @@ is cleared, so the task shows up in `bea ready` again for another worker. It app
 `in_progress` tasks: releasing anything else is an error, so finished work is never silently
 reopened. Use it when a worker gets stuck or is killed mid-task.
 
+When all children of an epic are completed, the epic is automatically marked as done.
+
 ### `bea stale`
 Finds claims a dead or stuck worker may have left behind: in-progress tasks whose `updated` time is
 at least `--hours` hours old (default 24).
@@ -281,8 +283,6 @@ It only lists — release a claim you give up on with `bea release <id>`. There 
 lease: `updated` changes on every write to a task, so a worker that edits its task (a note in the
 body, a status change) restarts the clock, and a live worker on a long task appears once it has been
 quiet for long enough.
-
-When all children of an epic are completed, the epic is automatically marked as done.
 
 ### `bea review` / `bea reject`
 Review is the step between "I finished it" and "it's done":
