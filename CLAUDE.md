@@ -254,15 +254,23 @@ Markdown body here.
 
 Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted in the form of `task::timestamp` (RFC 3339, UTC with `Z`, and no, 3, 6 or 9 fractional digits, whichever is the shortest exact one — what `chrono` wrote, kept so that rewriting a file never changes its timestamps; any offset or precision is read), strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. A parse error's text is that of `Error::Yaml`'s `Display` (`yaml_message` in `error.rs`), worded for whoever edits the file: what is wrong and `at line L, column C`, the line being the file's as an editor numbers it (`parse_task` sets `Error::Yaml`'s `line_offset` to 1 for the opening `---`; a BOM or CRLF endings change no line; `.bears.yml`, parsed whole, has offset 0), never the YAML library's advice to its Rust caller (`use Option<String>`, `set DuplicateKeyPolicy in Options`, `invalid u32`). The cases a hand edit is likely to hit are reworded by the library's error variant and its fields, never by matching its message text (``expected a value, found null``, ``duplicate key `title` ``, ``expected a list``, ``unknown value `started`, expected one of …``, ``expected a whole number from 0 to 4294967295`` (the field type's range, so it is true of a number too large as well), ``expected a single value, not a list or mapping`` (also for a list or mapping given for `status`, `priority` or `type`), ``invalid timestamp `yesterday`, expected a date and time such as `2026-03-15T10:30:00Z` ``); anything else goes to the library's `UserMessageFormatter`, so an unknown error still says what went wrong. The library error is not the `source()`, so walking the chain cannot bring the advice back. Load warnings, `bea doctor`'s `unreadable-file`, `bea edit`, `.bears.yml` and MCP all show this text. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read; so is `type` when it is `task`.
 
-**Writing files.** Every whole-file write in the core — task files (`save`, `rename_ids`,
-`migrate`, `rewrite_task_file`), the migration journal and `.bears.yml` — goes through
+**Writing files.** Every write to `.bears/` and `.bears.yml` — task files (`save`, `rename_ids`,
+`migrate`, `rewrite_task_file`), the migration journal and the config — goes through
 `store::write_atomically(path, bytes) -> std::io::Result<()>` (std only), and so does
-`bea snapshot -o`. It writes a fresh temporary file `.{name}.{pid}-{nanos}-{counter}.tmp` beside the
+`bea snapshot -o`. The exception is scaffolding (`scaffold.rs`): the agent instruction and skill
+files and the merged `.mcp.json` / `.github/mcp.json` are written in place with `fs::write`, so the
+`.mcp.json` merge is not atomic. `write_atomically` writes a fresh temporary file `.{name}.{pid}-{nanos}-{counter}.tmp` beside the
 target, created with `create_new` (another name is tried if it exists, so two writers of one file,
 in one process or several, never share it), syncs it and renames it over the target (the last
 rename wins; a reader sees the old file or the new one, never a truncated one). The temporary file
-is removed if writing or renaming fails; a regular target's permissions are carried over, a symlink
-at the target is replaced, not followed. The routine only replaces one file, so the documented order
+is removed if writing or renaming fails; a regular target's permission bits are carried over (task
+files included, so a read-only task file stays read-only and is still replaced, since the rename
+needs only write access to the directory), a symlink at the target is replaced, not followed. The
+`sync_all` before the rename is deliberate: with it a file is whole after a power loss as well as
+after a killed process (the parent directory is not synced, so the rename itself may still be lost).
+It costs about 0.7–0.8 ms per file on ext4 and nothing on tmpfs: a single write (`bea start`) does
+not notice it, a subtree move of about 19 children went from 39 to 92 ms and `bea migrate` of a
+400-task store from 36 to about 630 ms (release build), which is accepted. The routine only replaces one file, so the documented order
 of writes of `rename_ids`, `migrate` and `repair_store` is unchanged; the archive moves are plain
 renames and do not use it. A temporary name ends in `.tmp`, never `.md`, so no loader
 (`load_all`, `load_archived`, `scan_task_files`, `archived_id_set`) reads one as a task: a stale one
