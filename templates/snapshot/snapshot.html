@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>bears snapshot</title>
+<style>
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --fg: #1f2328;
+  --muted: #656d76;
+  --border: #d8dee4;
+  --track: #e6e8eb;
+  --accent: #2f6feb;
+  --edge: #8c959f;
+  --cyclic: #cf222e;
+  --s-proposed: #8250df;
+  --s-open: #2f6feb;
+  --s-blocked: #cf222e;
+  --s-in_progress: #bf8700;
+  --s-review: #0a7ea4;
+  --s-done: #1a7f37;
+  --s-cancelled: #8c959f;
+  --p-P0: #cf222e;
+  --p-P1: #bc4c00;
+  --p-P2: #2f6feb;
+  --p-P3: #656d76;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --fg: #e6edf3;
+    --muted: #8d96a0;
+    --border: #30363d;
+    --track: #262c36;
+    --accent: #4493f8;
+    --edge: #6e7681;
+    --cyclic: #f85149;
+    --s-proposed: #ab7df8;
+    --s-open: #4493f8;
+    --s-blocked: #f85149;
+    --s-in_progress: #d29922;
+    --s-review: #39c5cf;
+    --s-done: #3fb950;
+    --s-cancelled: #6e7681;
+    --p-P0: #f85149;
+    --p-P1: #f0883e;
+    --p-P2: #4493f8;
+    --p-P3: #8d96a0;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 90rem; margin: 0 auto; }
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+h2 { font-size: 1.15rem; margin: 2rem 0 .75rem; }
+h3 { font-size: .95rem; margin: 0 0 .5rem; }
+.muted, .empty { color: var(--muted); }
+.empty { font-style: italic; }
+.id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .75rem 1rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .75rem; margin-top: 1rem; }
+.stat .n { font-size: 1.6rem; font-weight: 600; }
+.stat .l { color: var(--muted); font-size: .85rem; }
+.bar { display: flex; height: .6rem; border-radius: .3rem; overflow: hidden; background: var(--track); }
+.bar > span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin-top: .5rem; font-size: .85rem; }
+.dot { display: inline-block; width: .65rem; height: .65rem; border-radius: 50%; margin-right: .3rem; vertical-align: baseline; }
+.badge { display: inline-block; padding: 0 .4em; border-radius: .3em; font-size: .78em; font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
+.tag { display: inline-block; padding: 0 .45em; border-radius: 1em; font-size: .78em; background: var(--track); color: var(--muted); margin-right: .2em; }
+.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: .75rem; margin-top: .75rem; }
+.epics { list-style: none; margin: 0; padding: 0; }
+.epics li { display: grid; grid-template-columns: minmax(12rem, 2fr) minmax(8rem, 3fr) 6.5rem; gap: .75rem; align-items: center; padding: .35rem 0; border-bottom: 1px solid var(--border); }
+.epics li:last-child { border-bottom: 0; }
+.epics .bar { height: .5rem; }
+.epics .count { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+.queues { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: .75rem; }
+.queues ul, .card-list { list-style: none; margin: 0; padding: 0; }
+.queues li { padding: .25rem 0; border-bottom: 1px solid var(--border); }
+.queues li:last-child { border-bottom: 0; }
+.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .75rem; align-items: start; }
+.column h3 { display: flex; justify-content: space-between; }
+.card { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid var(--edge); border-radius: 6px; padding: .4rem .55rem; margin-bottom: .45rem; }
+.card .meta { font-size: .8rem; color: var(--muted); margin-top: .2rem; }
+.graph { overflow: auto; }
+.graph svg { display: block; }
+.graph .node rect { fill: var(--panel); stroke: var(--edge); stroke-width: 1.5; }
+.graph .node.epic rect { stroke-dasharray: 5 3; }
+.graph .node.cyclic rect { stroke: var(--cyclic); stroke-width: 2.5; }
+.graph .node .nid { font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: var(--muted); }
+.graph .node .ntitle { font: 12px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--fg); }
+.graph .edge { fill: none; stroke: var(--edge); stroke-width: 1.4; }
+.graph .edge.cyclic { stroke: var(--cyclic); stroke-dasharray: 4 3; }
+.graph marker path { fill: var(--edge); }
+.graph marker.cyclic path { fill: var(--cyclic); }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+footer { margin-top: 2rem; font-size: .8rem; color: var(--muted); }
+.s-proposed { color: var(--s-proposed); --c: var(--s-proposed); }
+.s-open { color: var(--s-open); --c: var(--s-open); }
+.s-blocked { color: var(--s-blocked); --c: var(--s-blocked); }
+.s-in_progress { color: var(--s-in_progress); --c: var(--s-in_progress); }
+.s-review { color: var(--s-review); --c: var(--s-review); }
+.s-done { color: var(--s-done); --c: var(--s-done); }
+.s-cancelled { color: var(--s-cancelled); --c: var(--s-cancelled); }
+.p-P0 { color: var(--p-P0); --c: var(--p-P0); }
+.p-P1 { color: var(--p-P1); --c: var(--p-P1); }
+.p-P2 { color: var(--p-P2); --c: var(--p-P2); }
+.p-P3 { color: var(--p-P3); --c: var(--p-P3); }
+.dot, .bar > span { background: var(--c, var(--accent)); }
+.card[class*=" p-"] { color: inherit; border-left-color: var(--c); }
+.graph .node rect { stroke: var(--c, var(--edge)); }
+.graph .node .nid { fill: var(--c, var(--muted)); }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>bears snapshot</h1>
+<p class="muted">{{generated}}</p>
+</header>
+{{sections}}
+</main>
+</body>
+</html>

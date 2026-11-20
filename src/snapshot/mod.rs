@@ -30,6 +30,7 @@ use crate::service::{self, EpicProgress};
 use crate::store;
 use crate::task::{self, Priority, Status, Task, TaskType};
 
+pub mod html;
 pub mod markdown;
 
 /// How many archive entries a snapshot lists by default.

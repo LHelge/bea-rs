@@ -2538,6 +2538,7 @@ fn test_template_source_files_exist_on_disk() {
         "templates/copilot/skills/bears-planning/references/cli-fallback.md",
         "templates/copilot/agents/planner.agent.md",
         "templates/codex/AGENTS.md",
+        "templates/snapshot/snapshot.html",
     ];
 
     for rel_path in &expected_templates {
