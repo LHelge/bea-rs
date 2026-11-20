@@ -224,6 +224,17 @@ pub fn move_from_archive(base: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Every ID a new task must not take: the IDs of `tasks` (the active store)
+/// and of the archive, plus every ancestor of each.
+///
+/// Ancestors count even when their task no longer exists, since a new task
+/// with that ID would adopt the orphans below it. This is the collision pool
+/// for [`task::generate_id`] and [`task::generate_child_id`].
+pub fn reserved_ids(base: &Path, tasks: &HashMap<String, Task>) -> HashSet<String> {
+    let archived = archived_id_set(base);
+    task::with_ancestors(tasks.keys().chain(archived.iter()))
+}
+
 /// Return archived task IDs by scanning filenames only (no YAML parsing).
 /// Used synchronously to extend the collision set during task creation.
 pub fn archived_id_set(base: &Path) -> HashSet<String> {

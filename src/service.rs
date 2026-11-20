@@ -52,9 +52,9 @@ pub fn create_task(
         None => None,
     };
 
-    let mut existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-    // Also exclude archived IDs so new tasks never reuse an archived ID.
-    existing_ids.extend(store::archived_id_set(base));
+    // Active and archived IDs and their ancestors, so a new task never reuses
+    // an archived ID or the ID of a deleted epic whose children remain.
+    let existing_ids = store::reserved_ids(base, tasks);
     let id = match &parent {
         Some(parent_id) => task::generate_child_id(parent_id, &existing_ids, &config),
         None => task::generate_id(&existing_ids, config.id_length as usize),
@@ -1309,6 +1309,10 @@ mod tests {
         assert!(matches!(err, Error::FenceViolation { .. }));
     }
 
+    // Deleting an epic leaves its children orphaned (their parent is part of
+    // their ID). That is a known interim state until reparenting exists, and
+    // is tracked as its own task; this test only pins the dependency scrub
+    // and that the orphan's ID stays reserved.
     #[tokio::test]
     async fn test_delete_scrubs_dangling_references() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1329,8 +1333,11 @@ mod tests {
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert!(tasks["bbb"].depends_on.is_empty(), "dep should be scrubbed");
-        // The parent is part of the child's ID, so the child keeps it.
+        // Known interim state, not the intended end state: the child is
+        // orphaned under the deleted epic's ID, which stays reserved so that
+        // no new task can take it and adopt the child.
         assert_eq!(tasks["aaa.cc"].parent(), Some("aaa"));
+        assert!(store::reserved_ids(tmp.path(), &tasks).contains("aaa"));
         // And the dependent is now ready instead of silently blocked.
         let ready = list_ready(&tasks, None, None, None);
         assert!(ready.iter().any(|t| t.id == "bbb"));
@@ -2073,6 +2080,79 @@ mod tests {
         assert_eq!(created.parent(), Some("eee"));
         assert_eq!(task::leaf_segment(&created.id).len(), 1, "{}", created.id);
         assert!(!archived.contains(&created.id), "{}", created.id);
+    }
+
+    #[tokio::test]
+    async fn test_create_root_task_skips_ancestor_of_orphan() {
+        // Every two-char root except `kk` is the deleted parent of an orphan,
+        // half of them active and half archived: the only root left is `kk`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".bears.yml"), "id-length: 2\n").unwrap();
+        let chars = "abcdefghjkmnpqrstuvwxyz23456789";
+        let roots = chars
+            .chars()
+            .flat_map(|a| chars.chars().map(move |b| format!("{a}{b}")))
+            .filter(|root| root != "kk");
+        for (i, root) in roots.enumerate() {
+            let orphan = make_task(&format!("{root}.aa"), Status::Done);
+            store::save(tmp.path(), &orphan).unwrap();
+            if i % 2 == 0 {
+                store::move_to_archive(tmp.path(), &orphan.id).unwrap();
+            }
+        }
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let created = create_task(
+            tmp.path(),
+            &tasks,
+            "Root".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            None,
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(created.id, "kk");
+    }
+
+    #[tokio::test]
+    async fn test_reserved_ids_include_ancestors_of_orphans() {
+        // Orphans `abc.c2.d7` (active) and `abc.c3.d1` (archived) were left
+        // behind when nested epics `abc.c2` and `abc.c3` were deleted: a new
+        // child of `abc` must take neither ID.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_epic("abc")).unwrap();
+        store::save(tmp.path(), &make_task("abc.c2.d7", Status::Open)).unwrap();
+        store::save(tmp.path(), &make_task("abc.c3.d1", Status::Done)).unwrap();
+        store::move_to_archive(tmp.path(), "abc.c3.d1").unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let reserved = store::reserved_ids(tmp.path(), &tasks);
+        for id in ["abc", "abc.c2", "abc.c2.d7", "abc.c3", "abc.c3.d1"] {
+            assert!(reserved.contains(id), "{id} should be reserved");
+        }
+        // The reserved slots count as used siblings, and the generator never
+        // returns a reserved ID.
+        for _ in 0..20 {
+            let created = create_task(
+                tmp.path(),
+                &store::load_all(tmp.path()).await.unwrap(),
+                "Child".into(),
+                Priority::P2,
+                vec![],
+                vec![],
+                Some("abc".into()),
+                String::new(),
+                TaskType::Task,
+            )
+            .unwrap();
+            assert_eq!(created.parent(), Some("abc"));
+            assert!(!["abc.c2", "abc.c3"].contains(&created.id.as_str()));
+        }
     }
 
     #[tokio::test]

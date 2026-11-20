@@ -474,6 +474,37 @@ pub fn is_descendant(id: &str, ancestor: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(ID_SEPARATOR) && rest.len() > 1)
 }
 
+/// The ancestors of `id`, nearest first: `a1b.c2`, then `a1b`, for
+/// `a1b.c2.d7`. A root ID has none.
+pub fn ancestors(id: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(parent_of(id), |p| parent_of(p))
+}
+
+/// `ids` together with every ancestor of each of them.
+///
+/// An ancestor need not exist as a task (its task may have been deleted), but
+/// its ID is still taken: a new task given that ID would silently become the
+/// parent of the orphans below it. Use this to build the collision pool for
+/// [`generate_id`] and [`generate_child_id`].
+pub fn with_ancestors<I, S>(ids: I) -> HashSet<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut pool = HashSet::new();
+    for id in ids {
+        let id = id.as_ref();
+        for ancestor in ancestors(id) {
+            if !pool.insert(ancestor.to_string()) {
+                // Its ancestors are already in the pool too.
+                break;
+            }
+        }
+        pool.insert(id.to_string());
+    }
+    pool
+}
+
 /// The IDs in `ids` whose parent is exactly `parent`.
 fn direct_children<'a>(
     parent: &'a str,
@@ -722,6 +753,53 @@ mod tests {
         assert_eq!(id_depth("a1b"), 0);
         assert_eq!(id_depth("a1b.c2"), 1);
         assert_eq!(id_depth("a1b.c2.d7"), 2);
+    }
+
+    #[test]
+    fn test_ancestors_nearest_first() {
+        assert_eq!(ancestors("a1b").count(), 0);
+        assert_eq!(ancestors("a1b.c2").collect::<Vec<_>>(), ["a1b"]);
+        assert_eq!(
+            ancestors("a1b.c2.d7").collect::<Vec<_>>(),
+            ["a1b.c2", "a1b"]
+        );
+    }
+
+    #[test]
+    fn test_with_ancestors_reserves_missing_ancestors() {
+        // Order matters for the early exit: the deeper ID comes second, after
+        // its grandparent is already in the pool.
+        let pool = with_ancestors(["a1b.c2", "a1b.c3.d7", "xyz.e4.f5", "k2m"]);
+        let mut sorted: Vec<_> = pool.iter().map(String::as_str).collect();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [
+                "a1b",
+                "a1b.c2",
+                "a1b.c3",
+                "a1b.c3.d7",
+                "k2m",
+                "xyz",
+                "xyz.e4",
+                "xyz.e4.f5"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_generate_id_skips_ancestor_of_orphan() {
+        // Every two-char root except `kk` is the missing parent of an orphan:
+        // the only free root is `kk`.
+        let chars = std::str::from_utf8(ID_CHARSET).unwrap();
+        let orphans: Vec<String> = chars
+            .chars()
+            .flat_map(|a| chars.chars().map(move |b| format!("{a}{b}")))
+            .filter(|root| root != "kk")
+            .map(|root| format!("{root}.aa"))
+            .collect();
+        let pool = with_ancestors(&orphans);
+        assert_eq!(generate_id(&pool, 2), "kk");
     }
 
     #[test]
