@@ -1,10 +1,10 @@
 ---
 id: zhk
 title: Check the snapshot's Mermaid output in a real GitHub renderer
-status: open
+status: done
 priority: P3
 created: "2026-11-20T22:27:34.191015630Z"
-updated: "2026-11-20T22:27:34.191015630Z"
+updated: "2026-11-20T22:49:37.260589498Z"
 tags:
   - snapshot
   - manual
