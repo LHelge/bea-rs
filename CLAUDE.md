@@ -250,7 +250,9 @@ MCP and TUI agree) takes an exact ID first. Otherwise every ID starting with the
 when all matches are one task and its descendants it resolves to that shallowest task: `8p` is the
 epic `8ph` even with `8ph.c2` present, and `8ph.c` (ending inside a child segment) is `8ph.c2` even
 with `8ph.c2.d7` present. Matches that are genuinely different tasks — siblings, separate roots, or
-the orphaned children of a deleted parent — are still `AmbiguousPrefix`.
+the orphaned children of a deleted parent — are still `AmbiguousPrefix`. An empty or blank prefix
+would match everything and is rejected with `InvalidId`; callers that give `""` a meaning (the
+"no parent" of `create`/`update --parent ""`) handle it before resolving.
 
 **Renaming.** `store::rename_ids(base, &BTreeMap<old, new>)` is the one primitive that changes IDs on
 disk. Each key's task is rewritten under its new ID in the directory it lives in (active or archive),

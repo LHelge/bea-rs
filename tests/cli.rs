@@ -956,6 +956,13 @@ fn test_prefix_of_epic_resolves_past_its_children() {
         .success();
     assert_eq!(get_task_status(&tmp, &child), "done");
 
+    // An empty ID matches everything and is rejected, not resolved to the root.
+    bea(&tmp)
+        .args(["show", ""])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must not be empty"));
+
     // Two different tasks under one prefix are still ambiguous.
     create_child_task(&tmp, "Second child", &epic_id);
     bea(&tmp)
