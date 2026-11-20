@@ -346,6 +346,40 @@ Epics group child tasks by ID: a task's parent is the epic its ID is under (`Tas
 ### Cycle detection
 
 Validate on `dep add` that the new edge doesn't create a cycle. Reject with a clear error if it would.
+Cycles that got in anyway (hand edits, merges) are found by `Graph::cycles()` (iterative Tarjan,
+O(V+E)), which `bea doctor` reports.
+
+### `bea doctor` — store check and repair
+
+The loaders paper over some inconsistencies (a duplicate ID collapses to one task, an unparsable
+file is skipped with a warning), and a git merge of two branches can produce others. The doctor
+reads every task file itself, active and archive, through `store::scan_task_files` (keeps every
+file, parse errors included, prints nothing), so it sees them.
+
+- `service::check_store(base) -> StoreReport { files, findings, renamed, moved }` is read-only.
+  `Finding` is an enum serialized with a kebab-case `kind` tag, reported in this order: `legacy-store`
+  (any `parent:` key: reported **alone**, nothing else is checked, `bea migrate` is the fix),
+  `unreadable-file`, `malformed-id` (`validate_id`), `duplicate-id` (across active and archive; the
+  copy that keeps the ID listed first), `filename-mismatch` (the filename's ID differs from the
+  task's; a stale slug is not a finding), `dangling-dependency` (names no task, active or archived),
+  `missing-parent`, `parent-not-epic`, `dependency-cycle`. Paths are relative to the base.
+- `service::repair_store(base)` fixes the two `Finding::is_fixable()` kinds, then checks again and
+  returns what remains. **Duplicates:** the copy that keeps the ID is the active one before an
+  archived one, then the one whose filename starts with the ID, then the first by path (what
+  `find_task_path` already finds); every other copy gets a fresh ID at the same place in the
+  hierarchy (child ID under the same parent, or a root ID), in its own directory, keeping title,
+  body and `updated` (`store::rewrite_task_file`, path-addressed, since `rename_ids` cannot tell two
+  files with one ID apart). References are ambiguous and stay with the kept task, as do any tasks
+  below the ID; each renumbering is reported as `Renumbered { from, to, file }`. Duplicates of a
+  malformed ID are left alone. **Filenames:** a misnamed file is renamed to `{id}-{slug}.md`
+  (`MovedFile { id, from, to }`) unless a file is already there. A legacy store is not touched.
+  Everything else is report-only.
+- `bea doctor [--fix]` prints the findings (with `--fix`, first `  renamed <old> → <new> (<file>)`
+  and `  moved <from> → <to>` lines) and **exits 1 when problems are found** — after `--fix`, only
+  when problems remain — so it can gate CI. `--json` prints the report plus `ok`; with `--fix`,
+  `renamed` (a list, since one old ID can have several copies) and `moved` are always present. It
+  runs before `load_all`, so it works on a legacy store. The MCP `doctor` tool returns
+  `{ ok, files, findings }` and has no fix parameter.
 
 ### Archive
 
@@ -414,6 +448,7 @@ Archived tasks are **hidden** from all default-listing tools (`list_all_tasks`, 
 | `archive_task` | `id?` |
 | `restore_task` | `id` |
 | `list_archived` | `limit?` |
+| `doctor` | — (read-only store check) |
 
 On `update_task`, a `parent` other than the current one (`""` for none) moves the task and its subtree to new IDs; the result then carries `renamed: { old: new }`. `delete_task` adds the same `renamed` key when a deleted epic's children were detached, and `prune_tasks` then returns `{ pruned, renamed }` instead of the summary array. `get_task`'s `parent` is derived from the ID. `active_only?` (on `list_all_tasks` / `search_tasks`) excludes done/cancelled tasks. `get_task` resolves active tasks first and **falls back to the archive** when the id isn't active, marking the returned detail with `"archived": true` (read-only — restore before mutating).
 
@@ -456,6 +491,14 @@ Keep the dependency tree small. Compilation should be fast.
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
 - Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
+- Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
+  `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
+  and untouched by a repair, not initialized; `repair_store`: root and child duplicates renumbered in
+  place with references and `updated` kept, active copy kept over archived, filename-matching copy
+  kept, misnamed file renamed, report-only findings and an occupied target left as they were);
+  `mcp/tools.rs` (`doctor` read-only, findings are not a tool error); `tests/cli.rs` (`bea doctor`
+  exit status 0/1, `--fix` and `--json` output, problems remaining after `--fix`, legacy store with
+  migrate hint, not initialized); `tests/mcp.rs` (tool listed)
 - Unit tests in `task.rs`/`store.rs` for hierarchical IDs: validation (flat and dotted, malformed rejected), segments/depth/`parent_of`/`root_of`/`leaf_segment`/`is_descendant`, `id_from_filename`, child-segment growth threshold (only direct children of that length count; lengths coexist after growth), collision avoidance, skipping YAML-unsafe IDs, dotted-ID round-trip, and dotted IDs in `find_task_path`/`resolve_prefix`/`archived_id_set`
 - Unit tests in `config.rs`: `id-length` and `child-id-length` defaults, loading, bounds validation, and serialisation (`child-id-length` written only when not the default)
 - Unit tests in `task.rs`: parent derived from the ID, no `parent:` key written, legacy `parent:` key read into `legacy_parent` but never written or used as the parent
