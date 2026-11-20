@@ -54,6 +54,17 @@ runs before building a tag. That workflow has two jobs:
   ignored there by its id, with a comment giving the reason; never add a blanket ignore. Run
   `cargo audit` locally after changing dependencies.
 
+`.github/workflows/snapshot.yml` dogfoods `bea snapshot` on this repository's own `.bears/`. It runs
+on pushes to `main` that touch `.bears/**` or the workflow, on pull requests that touch `.bears/**`,
+`src/snapshot/**`, `src/cli/**` or the workflow, and on manual dispatch. It builds `bea` from the
+checkout (the released binary may predate the renderers being changed), appends
+`bea snapshot --format md` to `$GITHUB_STEP_SUMMARY`, and uploads
+`bea snapshot --all --format html` as the `bears-snapshot` artifact. It is deliberately separate from
+`quality-checks.yml`, so a snapshot problem never blocks the quality gate or a release, and runs with
+`permissions: contents: read`, no secrets and no PR comments, on `pull_request` (never
+`pull_request_target`), so it is safe for forks. The README's user-facing example installs a released
+`bea` instead; keep the two in step when the snapshot flags change.
+
 ## Commit style
 
 Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`. Common types: `feat`, `fix`, `ci`, `docs`, `chore`, `refactor`, `test`. Release notes are generated from commit messages, so keep them accurate and descriptive.
