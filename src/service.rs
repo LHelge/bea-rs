@@ -1283,13 +1283,21 @@ pub async fn get_archived_task(base: &Path, id_or_prefix: &str) -> Result<Task> 
 /// If `limit` is `Some(n)`, at most `n` tasks are returned.
 pub async fn list_archive(base: &Path, limit: Option<usize>) -> Result<Vec<Task>> {
     let archived = store::load_archived(base).await?;
-    let mut tasks: Vec<Task> = archived.into_values().collect();
+    Ok(archive_log(&archived, limit))
+}
+
+/// The archive log of already loaded archived tasks: sorted by `updated`
+/// descending (most recently updated first), then by ID, at most `limit` long.
+///
+/// This is the order of [`list_archive`] and `bea log`.
+pub fn archive_log(archived: &HashMap<String, Task>, limit: Option<usize>) -> Vec<Task> {
+    let mut tasks: Vec<Task> = archived.values().cloned().collect();
     // Sort by updated descending (most recent first), then id for stability
     tasks.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.id.cmp(&b.id)));
     if let Some(n) = limit {
         tasks.truncate(n);
     }
-    Ok(tasks)
+    tasks
 }
 
 /// Compute effective priorities for all tasks in a single O(V+E) pass.
@@ -1298,7 +1306,7 @@ pub fn effective_priorities(tasks: &HashMap<String, Task>) -> HashMap<String, Pr
 }
 
 /// Progress of an epic: how many children are done vs total.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EpicProgress {
     pub done: usize,
     pub total: usize,
