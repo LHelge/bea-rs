@@ -93,6 +93,17 @@ pub enum Error {
     #[error("task not found in archive: {0}")]
     NotArchived(String),
 
+    /// The store was written before hierarchical IDs: some task files, active
+    /// or archived, still carry a `parent:` key. Loading it is refused so
+    /// that no write can drop the key and lose the epic link; the store has
+    /// to be converted with [`store::migrate`](crate::store::migrate) first.
+    #[error(
+        "the task store predates hierarchical IDs: {} task file(s) carry a legacy `parent:` key{}",
+        files.len(),
+        files.first().map(|f| format!(", e.g. {}", f.display())).unwrap_or_default()
+    )]
+    LegacyStore { files: Vec<PathBuf> },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

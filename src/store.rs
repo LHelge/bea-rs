@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::task::JoinSet;
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::task::{self, Task};
 
@@ -31,23 +32,65 @@ pub fn init(base: &Path) -> Result<PathBuf> {
 
 /// Load all tasks from the `.bears/` directory.
 /// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
+///
+/// Refuses a legacy store with [`Error::LegacyStore`]: when any task file,
+/// active or archived, carries a `parent:` key, nothing is returned, so no
+/// caller can go on to write such a task and drop its epic link. [`migrate`]
+/// converts the store.
 pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
     let dir = tasks_dir(base);
     if !dir.exists() {
         return Err(Error::NotInitialized);
     }
+    let (tasks, mut legacy) = load_dir(&dir, "").await?;
+    legacy.extend(scan_legacy(&archive_dir(base)).await?);
+    refuse_legacy(legacy)?;
+    Ok(tasks)
+}
 
-    // Collect .md file paths (directory listing is fast, no need to parallelize)
+/// Load all archived tasks from the `.bears/archive/` directory.
+/// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
+/// Returns an empty map (not an error) if the archive dir does not exist yet.
+///
+/// Refuses a legacy store with [`Error::LegacyStore`], as [`load_all`] does.
+pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
+    let mut legacy = scan_legacy(&tasks_dir(base)).await?;
+    let dir = archive_dir(base);
+    let tasks = if dir.exists() {
+        let (tasks, archived_legacy) = load_dir(&dir, "archived ").await?;
+        legacy.extend(archived_legacy);
+        tasks
+    } else {
+        HashMap::new()
+    };
+    refuse_legacy(legacy)?;
+    Ok(tasks)
+}
+
+/// [`Error::LegacyStore`] when `legacy` names any file.
+fn refuse_legacy(mut legacy: Vec<PathBuf>) -> Result<()> {
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    legacy.sort();
+    Err(Error::LegacyStore { files: legacy })
+}
+
+/// Read the contents of every `.md` file in `dir` in parallel, sorted by
+/// path. A missing directory yields nothing.
+async fn read_dir_contents(dir: &Path) -> Result<Vec<(PathBuf, std::io::Result<String>)>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    // Directory listing is fast, no need to parallelize
     let mut paths = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md") {
             paths.push(path);
         }
     }
 
-    // Read all files in parallel
     let mut join_set = JoinSet::new();
     for path in paths {
         join_set.spawn(async move {
@@ -61,24 +104,38 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
     // the deterministic rule used by find_task_path.
     let mut results = Vec::new();
     while let Some(result) = join_set.join_next().await {
-        let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        results.push((path, content));
+        results.push(result.map_err(|e| std::io::Error::other(e.to_string()))?);
     }
     results.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(results)
+}
 
+/// Parse every task file in `dir`, warning about and skipping files that
+/// cannot be read or parsed and later duplicates of an ID. `label` prefixes
+/// the warnings (`"archived "`). Also returns the files that carry a legacy
+/// `parent:` key.
+async fn load_dir(dir: &Path, label: &str) -> Result<(HashMap<String, Task>, Vec<PathBuf>)> {
     let mut tasks = HashMap::new();
-    for (path, content) in results {
+    let mut legacy = Vec::new();
+    for (path, content) in read_dir_contents(dir).await? {
         let content = match content {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("warning: skipping {}: {e}", path.display());
+                eprintln!("warning: skipping {label}{}: {e}", path.display());
                 continue;
             }
         };
         match task::parse_task(&content) {
             Ok(t) => {
+                if t.legacy_parent.is_some() {
+                    legacy.push(path.clone());
+                }
                 if tasks.contains_key(&t.id) {
-                    eprintln!("warning: duplicate task ID {} in {}", t.id, path.display());
+                    eprintln!(
+                        "warning: duplicate {label}task ID {} in {}",
+                        t.id,
+                        path.display()
+                    );
                     continue;
                 }
                 tasks.insert(t.id.clone(), t);
@@ -95,83 +152,25 @@ pub async fn load_all(base: &Path) -> Result<HashMap<String, Task>> {
                     },
                     other => other,
                 };
-                eprintln!("warning: skipping {}: {e}", path.display());
+                eprintln!("warning: skipping {label}{}: {e}", path.display());
             }
         }
     }
-
-    Ok(tasks)
+    Ok((tasks, legacy))
 }
 
-/// Load all archived tasks from the `.bears/archive/` directory.
-/// Reads files in parallel using tokio. Warns and skips files with invalid frontmatter.
-/// Returns an empty map (not an error) if the archive dir does not exist yet.
-pub async fn load_archived(base: &Path) -> Result<HashMap<String, Task>> {
-    let dir = archive_dir(base);
-    if !dir.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            paths.push(path);
-        }
-    }
-
-    let mut join_set = JoinSet::new();
-    for path in paths {
-        join_set.spawn(async move {
-            let content = tokio::fs::read_to_string(&path).await;
-            (path, content)
-        });
-    }
-
-    // Collect and sort by path for the same determinism as load_all.
-    let mut results = Vec::new();
-    while let Some(result) = join_set.join_next().await {
-        let (path, content) = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        results.push((path, content));
-    }
-    results.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    let mut tasks = HashMap::new();
-    for (path, content) in results {
-        let content = match content {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("warning: skipping archived {}: {e}", path.display());
-                continue;
-            }
-        };
-        match task::parse_task(&content) {
-            Ok(t) => {
-                if tasks.contains_key(&t.id) {
-                    eprintln!(
-                        "warning: duplicate archived task ID {} in {}",
-                        t.id,
-                        path.display()
-                    );
-                    continue;
-                }
-                tasks.insert(t.id.clone(), t);
-            }
-            Err(e) => {
-                let e = match e {
-                    Error::InvalidFrontmatter { reason, .. } => Error::InvalidFrontmatter {
-                        path: path.clone(),
-                        reason,
-                    },
-                    other => other,
-                };
-                eprintln!("warning: skipping archived {}: {e}", path.display());
-            }
-        }
-    }
-
-    Ok(tasks)
+/// The task files in `dir` that carry a legacy `parent:` key. Files that
+/// cannot be read or parsed are passed over silently: the loader that owns
+/// `dir` warns about them.
+async fn scan_legacy(dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(read_dir_contents(dir)
+        .await?
+        .into_iter()
+        .filter_map(|(path, content)| {
+            let t = task::parse_task(&content.ok()?).ok()?;
+            t.legacy_parent.is_some().then_some(path)
+        })
+        .collect())
 }
 
 /// Find the file path for an archived task by its exact ID.
@@ -427,6 +426,360 @@ pub fn rename_ids(base: &Path, renames: &BTreeMap<String, String>) -> Result<()>
         fs::remove_file(&path)?;
     }
     Ok(())
+}
+
+/// File in `.bears/` that records the renames of a [`migrate`] in progress.
+/// It is not a `.md` file, so no loader reads it as a task.
+pub const MIGRATION_JOURNAL: &str = ".migrate.json";
+
+/// Why [`migrate`] left a task with a legacy `parent:` key as a root task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanReason {
+    /// The `parent:` names no task, active or archived.
+    MissingParent,
+    /// The `parent:` names a task that is not an epic.
+    ParentNotEpic,
+    /// Following `parent:` keys from the task leads back to itself.
+    ParentCycle,
+}
+
+impl std::fmt::Display for OrphanReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingParent => "missing-parent",
+            Self::ParentNotEpic => "parent-not-epic",
+            Self::ParentCycle => "parent-cycle",
+        })
+    }
+}
+
+/// A task whose legacy `parent:` could not become part of its ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedTask {
+    /// The task's ID, which it keeps.
+    pub id: String,
+    /// The value of its `parent:` key, which is dropped.
+    pub parent: String,
+    pub reason: OrphanReason,
+}
+
+/// What [`migrate`] did, or would do on a dry run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Migration {
+    /// Old ID → new ID for every task given a hierarchical ID.
+    pub renamed: BTreeMap<String, String>,
+    /// Tasks whose `parent:` was dropped without a rename; each stays where
+    /// its ID puts it (a root task, for a flat ID).
+    pub orphaned: Vec<OrphanedTask>,
+    /// How many task files, active and archived, carried a `parent:` key.
+    pub legacy_files: usize,
+}
+
+impl Migration {
+    /// Whether the store was already in the current format.
+    pub fn is_noop(&self) -> bool {
+        self.renamed.is_empty() && self.orphaned.is_empty() && self.legacy_files == 0
+    }
+}
+
+/// Convert a store written before hierarchical IDs, active and archive alike.
+///
+/// Every task whose legacy `parent:` key names an epic gets a fresh child ID
+/// under that epic's (new) ID, from [`task::generate_child_id`]; parents are
+/// placed before their children, so nested epics carry their whole chain.
+/// Root tasks keep their IDs. A task found below a renamed task by its ID
+/// alone keeps its last segment under the new prefix. Every `depends_on` is
+/// rewritten, `updated` is kept, and every file that carried a `parent:` key
+/// is written without it. A `parent:` naming no task, a task that is not an
+/// epic, or leading round a cycle is dropped and reported in
+/// [`Migration::orphaned`]; that task keeps its ID.
+///
+/// With `dry_run` nothing is written. On a store with no `parent:` keys left
+/// this does nothing.
+///
+/// The renames are recorded in [`MIGRATION_JOURNAL`] before any task file is
+/// written, and the journal is removed last. New files are written first,
+/// then rewritten references, and old files are removed last, so while the
+/// job is unfinished the old files and their `parent:` keys are still there:
+/// the store keeps failing to load with [`Error::LegacyStore`], and running
+/// `migrate` again reuses the journal's renames and finishes the job without
+/// duplicating or losing a task.
+pub fn migrate(base: &Path, dry_run: bool) -> Result<Migration> {
+    let dir = tasks_dir(base);
+    if !dir.exists() {
+        return Err(Error::NotInitialized);
+    }
+    let config = crate::config::load(base)?;
+    let journal = dir.join(MIGRATION_JOURNAL);
+    let prior: BTreeMap<String, String> = if journal.exists() {
+        serde_json::from_str(&fs::read_to_string(&journal)?)?
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut files = read_task_files(&dir)?;
+    files.extend(read_task_files(&archive_dir(base))?);
+
+    let plan = MigrationPlan::new(&files, &prior, &config);
+    let migration = Migration {
+        renamed: plan.renames.clone(),
+        orphaned: plan.orphaned.clone(),
+        legacy_files: files
+            .iter()
+            .filter(|(_, t)| t.legacy_parent.is_some())
+            .count(),
+    };
+    if dry_run {
+        return Ok(migration);
+    }
+
+    if !plan.renames.is_empty() {
+        // Everything a resumed run needs to rewrite references: the earlier
+        // run's renames as well as this one's.
+        let mut all = prior.clone();
+        all.extend(plan.renames.clone());
+        let tmp = dir.join(format!("{MIGRATION_JOURNAL}.tmp"));
+        fs::write(&tmp, serde_json::to_string_pretty(&all)?)?;
+        fs::rename(&tmp, &journal)?;
+    }
+    // References may name an old ID, or a new ID an interrupted run chose
+    // and this run does not keep.
+    let mut references = BTreeMap::new();
+    for (old, new) in &prior {
+        if let Some(now) = plan.renames.get(old).filter(|now| *now != new) {
+            references.insert(new.clone(), now.clone());
+        }
+    }
+    references.extend(prior);
+    references.extend(plan.renames.clone());
+
+    let mut moved = Vec::new();
+    let mut rewritten = Vec::new();
+    let mut old_paths = Vec::new();
+    let mut copies = Vec::new();
+    for (i, (path, t)) in files.into_iter().enumerate() {
+        if plan.copies.contains(&i) {
+            // Rewritten from the file it was copied from.
+            copies.push(path);
+            continue;
+        }
+        let mut t = t;
+        let mut changed = t.legacy_parent.take().is_some();
+        for dep in &mut t.depends_on {
+            if let Some(new) = references.get(dep) {
+                *dep = new.clone();
+                changed = true;
+            }
+        }
+        match plan
+            .renames
+            .get(&t.id)
+            .filter(|_| plan.winners.contains(&i))
+        {
+            Some(new) => {
+                t.id = new.clone();
+                moved.push((path.with_file_name(task::filename(&t)), t));
+                old_paths.push(path);
+            }
+            None if changed => rewritten.push((path, t)),
+            None => {}
+        }
+    }
+    // A copy normally sits where its task is written again; one that does
+    // not (its task now goes elsewhere) is stale and goes with the old files.
+    let written: HashSet<&PathBuf> = moved.iter().map(|(p, _)| p).collect();
+    old_paths.extend(copies.into_iter().filter(|p| !written.contains(p)));
+    for (path, t) in moved.iter().chain(rewritten.iter()) {
+        write_task_file(path, t)?;
+    }
+    for path in old_paths {
+        fs::remove_file(&path)?;
+    }
+    if journal.exists() {
+        fs::remove_file(&journal)?;
+    }
+    Ok(migration)
+}
+
+/// The renames [`migrate`] makes, worked out from the parsed task files.
+struct MigrationPlan {
+    renames: BTreeMap<String, String>,
+    orphaned: Vec<OrphanedTask>,
+    /// Indices of the files a task's ID is taken from (the first file for
+    /// each ID).
+    winners: HashSet<usize>,
+    /// Indices of files an interrupted run already wrote under a new ID,
+    /// while the file it copied is still there.
+    copies: HashSet<usize>,
+}
+
+impl MigrationPlan {
+    fn new(files: &[(PathBuf, Task)], prior: &BTreeMap<String, String>, config: &Config) -> Self {
+        let all_ids: HashSet<&str> = files.iter().map(|(_, t)| t.id.as_str()).collect();
+        // A file is a copy when an earlier run renamed some task to its ID
+        // and the renamed task's own file still exists.
+        let copy_ids: HashSet<&str> = prior
+            .iter()
+            .filter(|(old, _)| all_ids.contains(old.as_str()))
+            .map(|(_, new)| new.as_str())
+            .collect();
+
+        let mut index: HashMap<&str, usize> = HashMap::new();
+        let mut copies = HashSet::new();
+        for (i, (_, t)) in files.iter().enumerate() {
+            if copy_ids.contains(t.id.as_str()) {
+                copies.insert(i);
+            } else {
+                index.entry(t.id.as_str()).or_insert(i);
+            }
+        }
+        let winners: HashSet<usize> = index.values().copied().collect();
+
+        let reserved = task::with_ancestors(
+            all_ids
+                .iter()
+                .copied()
+                .chain(prior.values().map(|s| s.as_str())),
+        );
+        let mut planner = Planner {
+            files,
+            prior,
+            config,
+            index,
+            reserved,
+            new_ids: vec![None; files.len()],
+            visiting: vec![false; files.len()],
+            orphaned: Vec::new(),
+        };
+        let mut order: Vec<usize> = winners.iter().copied().collect();
+        order.sort_by(|&a, &b| files[a].1.id.cmp(&files[b].1.id));
+        for &i in &order {
+            planner.assign(i);
+        }
+
+        let renames = order
+            .iter()
+            .filter_map(|&i| {
+                let old = &files[i].1.id;
+                let new = planner.new_ids[i].as_ref()?;
+                (new != old).then(|| (old.clone(), new.clone()))
+            })
+            .collect();
+        let mut orphaned = planner.orphaned;
+        orphaned.sort_by(|a, b| a.id.cmp(&b.id));
+        Self {
+            renames,
+            orphaned,
+            winners,
+            copies,
+        }
+    }
+}
+
+/// Assigns new IDs top-down for [`MigrationPlan::new`].
+struct Planner<'a> {
+    files: &'a [(PathBuf, Task)],
+    prior: &'a BTreeMap<String, String>,
+    config: &'a Config,
+    /// Task ID → index of its file, copies excluded.
+    index: HashMap<&'a str, usize>,
+    /// The collision pool: every ID on disk or planned, and their ancestors.
+    reserved: HashSet<String>,
+    new_ids: Vec<Option<String>>,
+    visiting: Vec<bool>,
+    orphaned: Vec<OrphanedTask>,
+}
+
+impl Planner<'_> {
+    /// The new ID of the task in file `i`, assigning its parent's first.
+    fn assign(&mut self, i: usize) -> String {
+        if let Some(id) = &self.new_ids[i] {
+            return id.clone();
+        }
+        self.visiting[i] = true;
+        let t = &self.files[i].1;
+        let parent = match self.parent(t) {
+            Ok(Some(j)) if self.visiting[j] => {
+                self.orphan(t, OrphanReason::ParentCycle);
+                None
+            }
+            Ok(parent) => parent,
+            Err(reason) => {
+                self.orphan(t, reason);
+                None
+            }
+        };
+        let id = match parent {
+            None => t.id.clone(),
+            Some(j) => {
+                let parent_id = self.assign(j);
+                self.child_id(t, &parent_id)
+            }
+        };
+        self.reserved.insert(id.clone());
+        self.visiting[i] = false;
+        self.new_ids[i] = Some(id.clone());
+        id
+    }
+
+    /// The file index of `t`'s parent: the task its `parent:` key names when
+    /// it has one, else the task its ID is under, if that exists.
+    fn parent(&self, t: &Task) -> std::result::Result<Option<usize>, OrphanReason> {
+        let Some(name) = t.legacy_parent.as_deref().filter(|p| !p.is_empty()) else {
+            return Ok(task::parent_of(&t.id).and_then(|p| self.index.get(p).copied()));
+        };
+        // An interrupted run may already have removed a renamed epic's old
+        // file; its journal says where the epic went.
+        let j = self
+            .index
+            .get(name)
+            .or_else(|| {
+                self.prior
+                    .get(name)
+                    .and_then(|new| self.index.get(new.as_str()))
+            })
+            .copied()
+            .ok_or(OrphanReason::MissingParent)?;
+        if self.files[j].1.task_type != task::TaskType::Epic {
+            return Err(OrphanReason::ParentNotEpic);
+        }
+        Ok(Some(j))
+    }
+
+    /// The ID `t` gets as a child of the task now called `parent_id`.
+    fn child_id(&self, t: &Task, parent_id: &str) -> String {
+        if task::parent_of(&t.id) == Some(parent_id) {
+            return t.id.clone();
+        }
+        if let Some(new) = self.prior.get(&t.id)
+            && task::parent_of(new) == Some(parent_id)
+        {
+            return new.clone();
+        }
+        if t.legacy_parent.is_none() {
+            let kept = format!(
+                "{parent_id}{}{}",
+                task::ID_SEPARATOR,
+                task::leaf_segment(&t.id)
+            );
+            if !self.reserved.contains(&kept) {
+                return kept;
+            }
+        }
+        task::generate_child_id(parent_id, &self.reserved, self.config)
+    }
+
+    fn orphan(&mut self, t: &Task, reason: OrphanReason) {
+        self.orphaned.push(OrphanedTask {
+            id: t.id.clone(),
+            parent: t
+                .legacy_parent
+                .clone()
+                .or_else(|| task::parent_of(&t.id).map(String::from))
+                .unwrap_or_default(),
+            reason,
+        });
+    }
 }
 
 /// Resolve a task ID or unique prefix to a full task ID.
@@ -1108,5 +1461,348 @@ mod tests {
         fs::create_dir_all(tasks_dir(tmp.path())).unwrap();
         let archived = load_archived(tmp.path()).await.unwrap();
         assert!(archived.is_empty());
+    }
+
+    // -- Legacy stores and `migrate` ----------------------------------------
+
+    /// A task file as written before hierarchical IDs: `t` with a `parent:`
+    /// key, in the active store or the archive.
+    fn write_legacy(base: &Path, t: &Task, parent: &str, archived: bool) {
+        let dir = if archived {
+            archive_dir(base)
+        } else {
+            tasks_dir(base)
+        };
+        let rendered = task::render_task(t);
+        let content = format!("---\nparent: {parent}\n{}", &rendered[4..]);
+        fs::write(dir.join(task::filename(t)), content).unwrap();
+    }
+
+    fn epic(id: &str) -> Task {
+        let mut t = Task::new(id.into(), format!("Epic {id}"), Priority::P1);
+        t.task_type = TaskType::Epic;
+        t
+    }
+
+    fn plain(id: &str) -> Task {
+        Task::new(id.into(), format!("Task {id}"), Priority::P2)
+    }
+
+    /// Every file under `.bears/` (journal included), by path relative to it.
+    fn snapshot(base: &Path) -> BTreeMap<String, String> {
+        let mut files = BTreeMap::new();
+        for dir in [tasks_dir(base), archive_dir(base)] {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    let rel = path.strip_prefix(tasks_dir(base)).unwrap();
+                    files.insert(
+                        rel.display().to_string(),
+                        fs::read_to_string(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        files
+    }
+
+    fn no_parent_keys(base: &Path) {
+        for (path, content) in snapshot(base) {
+            assert!(
+                !content.lines().any(|l| l.starts_with("parent:")),
+                "{path} still has a parent: key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_loaders_refuse_a_legacy_store() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        save(tmp.path(), &epic("ep")).unwrap();
+        write_legacy(tmp.path(), &plain("ch"), "ep", false);
+
+        let err = load_all(tmp.path()).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::LegacyStore { files } if files.len() == 1
+                && files[0].ends_with("ch-task-ch.md")),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("parent:"), "{err}");
+        assert!(matches!(
+            load_archived(tmp.path()).await,
+            Err(Error::LegacyStore { .. })
+        ));
+
+        // A legacy file in the archive alone is enough, for both loaders.
+        fs::remove_file(find_task_path(tmp.path(), "ch").unwrap()).unwrap();
+        load_all(tmp.path()).await.unwrap();
+        write_legacy(tmp.path(), &plain("ac"), "ep", true);
+        assert!(matches!(
+            load_all(tmp.path()).await,
+            Err(Error::LegacyStore { files }) if files.len() == 1
+        ));
+        assert!(matches!(
+            load_archived(tmp.path()).await,
+            Err(Error::LegacyStore { .. })
+        ));
+    }
+
+    /// The store the migration tests start from:
+    ///
+    /// - `ep` (epic) with children `ch` and nested epic `ne`, which has `gc`
+    /// - `ac`, an archived child of `ep`
+    /// - `ae`, an archived epic with an active child `ax`
+    /// - `us` depends on `gc` and `ac`; archived `au` depends on `ch`
+    /// - `rt` a plain root, untouched
+    fn legacy_store(base: &Path) -> Task {
+        init(base).unwrap();
+        save(base, &epic("ep")).unwrap();
+        write_legacy(base, &plain("ch"), "ep", false);
+        write_legacy(base, &epic("ne"), "ep", false);
+        let mut gc = plain("gc");
+        gc.depends_on = vec!["ch".into()];
+        write_legacy(base, &gc, "ne", false);
+        write_legacy(base, &plain("ac"), "ep", true);
+        archive(base, &epic("ae"));
+        write_legacy(base, &plain("ax"), "ae", false);
+        let mut us = plain("us");
+        us.depends_on = vec!["gc".into(), "ac".into(), "rt".into()];
+        save(base, &us).unwrap();
+        let mut au = plain("au");
+        au.depends_on = vec!["ch".into()];
+        archive(base, &au);
+        save(base, &plain("rt")).unwrap();
+        gc
+    }
+
+    #[tokio::test]
+    async fn test_migrate_gives_children_hierarchical_ids() {
+        let tmp = TempDir::new().unwrap();
+        let gc = legacy_store(tmp.path());
+        let rt_path = find_task_path(tmp.path(), "rt").unwrap();
+        let rt_before = fs::read_to_string(&rt_path).unwrap();
+
+        let m = migrate(tmp.path(), false).unwrap();
+        assert_eq!(m.legacy_files, 5);
+        assert!(m.orphaned.is_empty());
+        let keys: Vec<_> = m.renamed.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["ac", "ax", "ch", "gc", "ne"]);
+        let new = |id: &str| m.renamed[id].clone();
+        assert_eq!(task::parent_of(&new("ch")), Some("ep"));
+        assert_eq!(task::parent_of(&new("ne")), Some("ep"));
+        assert_eq!(task::parent_of(&new("gc")), Some(new("ne").as_str()));
+        assert_eq!(task::parent_of(&new("ac")), Some("ep"));
+        assert_eq!(task::parent_of(&new("ax")), Some("ae"));
+        assert_eq!(task::leaf_segment(&new("ch")).len(), 2);
+
+        no_parent_keys(tmp.path());
+        assert!(!tasks_dir(tmp.path()).join(MIGRATION_JOURNAL).exists());
+        let active = load_all(tmp.path()).await.unwrap();
+        let archived = load_archived(tmp.path()).await.unwrap();
+        let mut ids: Vec<_> = active.keys().cloned().collect();
+        ids.sort();
+        let mut expected = vec![
+            "ep".to_string(),
+            "rt".into(),
+            "us".into(),
+            new("ch"),
+            new("ne"),
+            new("gc"),
+            new("ax"),
+        ];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(archived.contains_key(&new("ac")) && archived.contains_key("ae"));
+        assert_eq!(active[&new("gc")].parent(), Some(new("ne").as_str()));
+        assert_eq!(active[&new("gc")].depends_on, [new("ch")]);
+        assert_eq!(active["us"].depends_on, [new("gc"), new("ac"), "rt".into()]);
+        assert_eq!(archived["au"].depends_on, [new("ch")]);
+        // A migration is not an edit, and a file with nothing to change stays.
+        assert_eq!(active[&new("gc")].updated, gc.updated);
+        assert_eq!(fs::read_to_string(&rt_path).unwrap(), rt_before);
+
+        // A second run finds nothing to do and changes nothing.
+        let before = snapshot(tmp.path());
+        let again = migrate(tmp.path(), false).unwrap();
+        assert!(again.is_noop(), "{again:?}");
+        assert_eq!(snapshot(tmp.path()), before);
+    }
+
+    #[test]
+    fn test_migrate_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        legacy_store(tmp.path());
+        let before = snapshot(tmp.path());
+        let m = migrate(tmp.path(), true).unwrap();
+        assert_eq!(m.renamed.len(), 5);
+        assert_eq!(m.legacy_files, 5);
+        assert_eq!(snapshot(tmp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn test_migrate_keeps_unplaceable_tasks_as_roots() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        save(tmp.path(), &plain("nt")).unwrap();
+        write_legacy(tmp.path(), &plain("mp"), "gone", false);
+        write_legacy(tmp.path(), &plain("np"), "nt", true);
+        // Two epics naming each other, and one naming itself.
+        write_legacy(tmp.path(), &epic("ca"), "cb", false);
+        write_legacy(tmp.path(), &epic("cb"), "ca", false);
+        write_legacy(tmp.path(), &epic("cs"), "cs", false);
+
+        let m = migrate(tmp.path(), false).unwrap();
+        let orphaned: Vec<_> = m
+            .orphaned
+            .iter()
+            .map(|o| (o.id.as_str(), o.parent.as_str(), o.reason))
+            .collect();
+        assert_eq!(
+            orphaned,
+            [
+                ("cb", "ca", OrphanReason::ParentCycle),
+                ("cs", "cs", OrphanReason::ParentCycle),
+                ("mp", "gone", OrphanReason::MissingParent),
+                ("np", "nt", OrphanReason::ParentNotEpic),
+            ]
+        );
+        // The cycle is broken at one task; the other goes below it.
+        assert_eq!(m.renamed.len(), 1);
+        assert_eq!(task::parent_of(&m.renamed["ca"]), Some("cb"));
+
+        no_parent_keys(tmp.path());
+        let active = load_all(tmp.path()).await.unwrap();
+        assert!(active.contains_key("mp") && active.contains_key("cs"));
+        assert!(load_archived(tmp.path()).await.unwrap().contains_key("np"));
+    }
+
+    /// An interrupted migration — at any point of its writes — is finished by
+    /// the next run, with the journal's renames and nothing duplicated or lost.
+    #[tokio::test]
+    async fn test_migrate_resumes_after_an_interruption() {
+        let orig = TempDir::new().unwrap();
+        legacy_store(orig.path());
+        let start = snapshot(orig.path());
+        let done = TempDir::new().unwrap();
+        legacy_store(done.path());
+        // Same files as `orig`, so the finished state can be compared.
+        for (rel, content) in &start {
+            fs::write(tasks_dir(done.path()).join(rel), content).unwrap();
+        }
+        let m = migrate(done.path(), false).unwrap();
+        let end = snapshot(done.path());
+        let journal = serde_json::to_string(&m.renamed).unwrap();
+
+        let restore = |state: &BTreeMap<String, String>| {
+            let tmp = TempDir::new().unwrap();
+            init(tmp.path()).unwrap();
+            for (rel, content) in state {
+                fs::write(tasks_dir(tmp.path()).join(rel), content).unwrap();
+            }
+            fs::write(tasks_dir(tmp.path()).join(MIGRATION_JOURNAL), &journal).unwrap();
+            tmp
+        };
+        let written: Vec<&String> = end
+            .keys()
+            .filter(|k| start.get(*k) != end.get(*k))
+            .collect();
+        let removed: Vec<&String> = start.keys().filter(|k| !end.contains_key(*k)).collect();
+        assert!(!written.is_empty() && !removed.is_empty());
+
+        let mut states = Vec::new();
+        // Interrupted while writing: some of the new files are in place.
+        for n in 0..=written.len() {
+            let mut state = start.clone();
+            for rel in written.iter().take(n) {
+                state.insert((*rel).clone(), end[*rel].clone());
+            }
+            states.push(state);
+        }
+        // Interrupted while removing old files, in either order: the old
+        // file of renamed epic `ne` may already be gone while its child's
+        // remains, whose `parent:` then names it only through the journal.
+        for n in 0..removed.len() {
+            for kept in [
+                removed.iter().skip(n).collect::<Vec<_>>(),
+                removed.iter().take(n + 1).collect(),
+            ] {
+                let mut state = end.clone();
+                for rel in kept {
+                    state.insert((*rel).clone(), start[*rel].clone());
+                }
+                states.push(state);
+            }
+        }
+        for state in states {
+            let tmp = restore(&state);
+            assert!(matches!(
+                load_all(tmp.path()).await,
+                Err(Error::LegacyStore { .. })
+            ));
+            let resumed = migrate(tmp.path(), false).unwrap();
+            assert_eq!(snapshot(tmp.path()), end);
+            assert!(
+                resumed
+                    .renamed
+                    .iter()
+                    .all(|(old, new)| m.renamed[old] == *new)
+            );
+        }
+
+        // A journal left behind after the last removal is cleared quietly.
+        let tmp = restore(&end);
+        assert!(migrate(tmp.path(), false).unwrap().is_noop());
+        assert_eq!(snapshot(tmp.path()), end);
+    }
+
+    /// A copy of this repository's own store migrates cleanly: it loads, and
+    /// every former `parent:` link survives as the prefix of the child's ID.
+    #[tokio::test]
+    async fn test_migrate_a_copy_of_this_repository_store() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(BEARS_DIR);
+        if !src.is_dir() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        let mut parents = Vec::new();
+        for (from, to) in [
+            (src.clone(), tasks_dir(tmp.path())),
+            (src.join(ARCHIVE_SUBDIR), archive_dir(tmp.path())),
+        ] {
+            let Ok(entries) = fs::read_dir(&from) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+                let content = fs::read_to_string(&path).unwrap();
+                let t = task::parse_task(&content).unwrap();
+                if let Some(p) = t.legacy_parent {
+                    parents.push((t.id, p));
+                }
+                fs::write(to.join(path.file_name().unwrap()), content).unwrap();
+            }
+        }
+
+        let m = migrate(tmp.path(), false).unwrap();
+        assert!(m.orphaned.is_empty(), "{:?}", m.orphaned);
+        no_parent_keys(tmp.path());
+        let mut all = load_all(tmp.path()).await.unwrap();
+        all.extend(load_archived(tmp.path()).await.unwrap());
+        let new = |id: &str| m.renamed.get(id).cloned().unwrap_or_else(|| id.to_string());
+        for (child, parent) in &parents {
+            let id = new(child);
+            assert!(all.contains_key(&id), "{child} → {id} missing");
+            assert_eq!(task::parent_of(&id), Some(new(parent).as_str()), "{child}");
+        }
+        for t in all.values() {
+            for dep in &t.depends_on {
+                assert!(all.contains_key(dep), "{} depends on missing {dep}", t.id);
+            }
+        }
     }
 }
