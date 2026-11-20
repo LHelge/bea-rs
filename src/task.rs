@@ -804,10 +804,21 @@ pub fn parse_task(content: &str) -> Result<Task> {
     let body_raw = remaining.join("\n");
     let body = body_raw.trim_start_matches('\n').to_string();
 
-    let mut task: Task = from_yaml(&yaml_str)?;
+    // Error positions are the file's lines: the YAML starts on the line after
+    // the opening `---`. The BOM and CRLF handling above change no line.
+    let mut task: Task = from_yaml(&yaml_str).map_err(|err| match err {
+        Error::Yaml { error, .. } => Error::Yaml {
+            error,
+            line_offset: FRONTMATTER_LINE_OFFSET,
+        },
+        other => other,
+    })?;
     task.body = body;
     Ok(task)
 }
+
+/// Lines of a task file before its frontmatter's YAML: the opening `---`.
+const FRONTMATTER_LINE_OFFSET: u64 = 1;
 
 /// Render a task back to markdown with YAML frontmatter.
 pub fn render_task(task: &Task) -> String {
@@ -1407,8 +1418,9 @@ updated: 2026-03-15T10:30:00Z
 
     /// The whole message of a frontmatter that fails to parse: a valid
     /// frontmatter without the field that `lines` starts with, and `lines`
-    /// appended. Positions count from the first line after `---`, so `lines`
-    /// start at line 6 (replacing a required field) or 7 (an optional one).
+    /// appended. Positions are the file's lines, the opening `---` being line
+    /// 1, so `lines` start at line 7 (replacing a required field) or 8 (an
+    /// optional one).
     fn frontmatter_error(lines: &str) -> String {
         let key = format!("{}:", lines.split(':').next().unwrap());
         let yaml: Vec<&str> = [
@@ -1424,7 +1436,7 @@ updated: 2026-03-15T10:30:00Z
         .collect();
         let content = format!("---\n{}\n{lines}\n---\n", yaml.join("\n"));
         let err = parse_task(&content).expect_err(&content);
-        assert!(matches!(err, Error::Yaml(_)), "{err:?}");
+        assert!(matches!(err, Error::Yaml { .. }), "{err:?}");
         err.to_string()
     }
 
@@ -1437,89 +1449,89 @@ updated: 2026-03-15T10:30:00Z
             // Null into a string field.
             (
                 "assignee: ~",
-                "expected a value, found null at line 7, column 11",
+                "expected a value, found null at line 8, column 11",
             ),
             (
                 "title: ~",
-                "expected a value, found null at line 6, column 8",
+                "expected a value, found null at line 7, column 8",
             ),
             // A key given twice.
             (
                 "tags: [a]\ntags: [b]",
-                "duplicate key `tags` at line 8, column 1",
+                "duplicate key `tags` at line 9, column 1",
             ),
             // A single value where a list belongs, and the reverse.
-            ("tags: backend", "expected a list at line 7, column 7"),
-            ("depends_on: abc", "expected a list at line 7, column 13"),
+            ("tags: backend", "expected a list at line 8, column 7"),
+            ("depends_on: abc", "expected a list at line 8, column 13"),
             (
                 "tags:\n  - [a, b]",
-                "expected a single value, not a list or mapping at line 8, column 5",
+                "expected a single value, not a list or mapping at line 9, column 5",
             ),
             (
                 "assignee: [alice]",
-                "expected a single value, not a list or mapping at line 7, column 11",
+                "expected a single value, not a list or mapping at line 8, column 11",
             ),
             // A list or mapping for a field with a fixed set of values.
             (
                 "priority: [P1]",
-                "expected a single value, not a list or mapping at line 6, column 11",
+                "expected a single value, not a list or mapping at line 7, column 11",
             ),
             (
                 "status: [open]",
-                "expected a single value, not a list or mapping at line 6, column 9",
+                "expected a single value, not a list or mapping at line 7, column 9",
             ),
             (
                 "status: {open: x}",
-                "expected a single value, not a list or mapping at line 6, column 16",
+                "expected a single value, not a list or mapping at line 7, column 16",
             ),
             (
                 "type: {epic: x}",
-                "expected a single value, not a list or mapping at line 7, column 14",
+                "expected a single value, not a list or mapping at line 8, column 14",
             ),
             // Unknown status, priority and type values.
             (
                 "status: started",
                 "unknown value `started`, expected one of proposed, open, in_progress, \
-                 review, done, blocked, cancelled at line 6, column 9",
+                 review, done, blocked, cancelled at line 7, column 9",
             ),
             (
                 "priority: P9",
-                "unknown value `P9`, expected one of P0, P1, P2, P3 at line 6, column 11",
+                "unknown value `P9`, expected one of P0, P1, P2, P3 at line 7, column 11",
             ),
             (
                 "type: story",
-                "unknown value `story`, expected one of task, epic at line 7, column 7",
+                "unknown value `story`, expected one of task, epic at line 8, column 7",
             ),
             // A number field that is not a number.
             (
                 "attempts: lots",
-                "expected a whole number from 0 to 4294967295 at line 7, column 11",
+                "expected a whole number from 0 to 4294967295 at line 8, column 11",
             ),
             (
                 "attempts: -1",
-                "expected a whole number from 0 to 4294967295 at line 7, column 11",
+                "expected a whole number from 0 to 4294967295 at line 8, column 11",
             ),
             (
                 "attempts: 99999999999",
-                "expected a whole number from 0 to 4294967295 at line 7, column 11",
+                "expected a whole number from 0 to 4294967295 at line 8, column 11",
             ),
             // A bad or empty timestamp.
             (
                 "created: yesterday",
                 "invalid timestamp `yesterday`, expected a date and time such as \
-                 `2026-03-15T10:30:00Z` at line 6, column 10",
+                 `2026-03-15T10:30:00Z` at line 7, column 10",
             ),
             (
                 "updated: 2026-03-15",
                 "invalid timestamp `2026-03-15`, expected a date and time such as \
-                 `2026-03-15T10:30:00Z` at line 6, column 10",
+                 `2026-03-15T10:30:00Z` at line 7, column 10",
             ),
             (
                 "created: ~",
-                "expected a value, found null at line 6, column 10",
+                "expected a value, found null at line 7, column 10",
             ),
             // Broken YAML itself: the parser's own wording, with the position.
-            ("tags: [a", "unclosed bracket '[' at line 7, column 7"),
+            ("tags: [a", "unclosed bracket '[' at line 8, column 7"),
         ];
         for (lines, expected) in cases {
             assert_eq!(frontmatter_error(lines), expected, "{lines}");
@@ -1532,7 +1544,48 @@ updated: 2026-03-15T10:30:00Z
                        created: \"2026-03-15T10:30:00Z\"\nupdated: \"2026-03-15T10:30:00Z\"\n---\n";
         assert_eq!(
             parse_task(content).unwrap_err().to_string(),
-            "missing field `title` at line 5, column 1"
+            "missing field `title` at line 6, column 1"
+        );
+    }
+
+    /// The line reported is the file's line as an editor numbers it, also
+    /// when the file starts with a BOM or uses CRLF line endings; YAML parsed
+    /// on its own (`.bears.yml`) keeps its own numbering.
+    #[test]
+    fn test_frontmatter_error_line_is_the_files_line() {
+        let lines = [
+            "---",
+            "id: ab2",
+            "title: Fix the login page",
+            "status: open",
+            "priority: P2",
+            "created: \"2026-03-15T10:30:00Z\"",
+            "updated: \"2026-03-15T10:30:00Z\"",
+            "assignee: ~",
+            "---",
+            "",
+        ];
+        assert_eq!(lines[7], "assignee: ~", "file line 8");
+        let expected = "expected a value, found null at line 8, column 11";
+        let lf = lines.join("\n");
+        let crlf = lines.join("\r\n");
+        for content in [
+            lf.clone(),
+            crlf.clone(),
+            format!("\u{feff}{lf}"),
+            format!("\u{feff}{crlf}"),
+        ] {
+            assert_eq!(
+                parse_task(&content).unwrap_err().to_string(),
+                expected,
+                "{content:?}"
+            );
+        }
+
+        let yaml = lines[1..8].join("\n");
+        assert_eq!(
+            from_yaml::<Task>(&yaml).unwrap_err().to_string(),
+            "expected a value, found null at line 7, column 11"
         );
     }
 

@@ -3242,7 +3242,7 @@ fn test_unparsable_frontmatter_is_reported_for_the_file() {
          assignee: ~\n---\n",
     )
     .unwrap();
-    let message = "expected a value, found null at line 7, column 11";
+    let message = "expected a value, found null at line 8, column 11";
 
     let out = bea(&tmp).arg("list").output().unwrap();
     assert!(out.status.success());

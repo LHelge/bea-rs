@@ -114,8 +114,16 @@ pub enum Error {
     /// words, which give advice to the Rust developer calling it. The
     /// library's error is kept but is deliberately not the `source()`, so
     /// nothing that walks the error chain brings that advice back.
-    #[error("{}", yaml_message(.0))]
-    Yaml(serde_saphyr::Error),
+    ///
+    /// `line_offset` is the number of lines of the file before the YAML that
+    /// was parsed, added to the line shown, so the position is the file's
+    /// line: 1 for task frontmatter (the opening `---`), 0 for a whole YAML
+    /// file such as `.bears.yml` (what [`From`] gives).
+    #[error("{}", yaml_message(error, *line_offset))]
+    Yaml {
+        error: serde_saphyr::Error,
+        line_offset: u64,
+    },
 
     /// A value could not be written as YAML.
     #[error(transparent)]
@@ -126,10 +134,12 @@ pub enum Error {
 }
 
 /// Render a YAML parse error for whoever edits the file: one line, ending
-/// with the position (`at line L, column C`), with no source snippet.
-fn yaml_message(err: &serde_saphyr::Error) -> String {
+/// with the position (`at line L, column C`), with no source snippet. The line
+/// is counted in the file, `line_offset` lines before the YAML's first one.
+fn yaml_message(err: &serde_saphyr::Error, line_offset: u64) -> String {
     let mut options = serde_saphyr::RenderOptions::new(&FileMessages);
     options.snippets = serde_saphyr::SnippetMode::Off;
+    options.line_offset = line_offset;
     err.render_with_options(options)
 }
 
@@ -201,6 +211,9 @@ impl serde_saphyr::MessageFormatter for FileMessages {
 
 impl From<serde_saphyr::Error> for Error {
     fn from(err: serde_saphyr::Error) -> Self {
-        Error::Yaml(err)
+        Error::Yaml {
+            error: err,
+            line_offset: 0,
+        }
     }
 }
