@@ -258,8 +258,8 @@ Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the
 `migrate`, `rewrite_task_file`), the migration journal and the config — goes through
 `store::write_atomically(path, bytes) -> std::io::Result<()>` (std only), and so does
 `bea snapshot -o`. The exception is scaffolding (`scaffold.rs`): the agent instruction and skill
-files and the merged `.mcp.json` / `.github/mcp.json` are written in place with `fs::write`, so the
-`.mcp.json` merge is not atomic. `write_atomically` writes a fresh temporary file `.{name}.{pid}-{nanos}-{counter}.tmp` beside the
+files, the merged `.mcp.json` / `.github/mcp.json` and the merged `.claude/settings.json` (the
+`SessionStart` hook) are written in place with `fs::write`, so those merges are not atomic. `write_atomically` writes a fresh temporary file `.{name}.{pid}-{nanos}-{counter}.tmp` beside the
 target, created with `create_new` (another name is tried if it exists, so two writers of one file,
 in one process or several, never share it), syncs it and renames it over the target (the last
 rename wins; a reader sees the old file or the new one, never a truncated one). The temporary file
