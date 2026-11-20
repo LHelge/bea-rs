@@ -30,6 +30,7 @@ If MCP tools are not loaded or fail, **fall back to the `bea` CLI** with `--json
 | List ready | `list_ready(limit, tag, epic)` | `bea ready --json` |
 | List all tasks | `list_all_tasks(status, priority, tag, epic)` | `bea list --json` |
 | List epics | `list_epics()` | `bea epics --json` |
+| Plan an epic | `plan_epic(id)` | `bea show <id> --plan --json` |
 | Get task | `get_task(id)` | `bea show <id> --json` |
 | Search tasks | `search_tasks(query)` | `bea search "query" --json` |
 | Move a task | `update_task(id, parent)` | `bea update <id> --parent <epic-id> --json` |
@@ -127,7 +128,7 @@ After creating a task, update its body with detailed content using `update_task(
 ### 6. Verify and present the plan
 
 - Use `list_all_tasks(epic="<id>")` or `bea list --epic <id> --json` to review all tasks (the `epic` filter takes an ID or prefix and matches every task below the epic, nested epics and their tasks included)
-- Confirm dependency ordering makes sense — `list_ready(epic="<id>")` should show only the first unblocked task(s)
+- Confirm dependency ordering makes sense — `list_ready(epic="<id>")` should show only the first unblocked task(s), and `plan_epic(id)` gives the execution order of the epic's direct children (a nested epic is one step, with its `progress`; plan it on its own ID to see its tasks)
 - Present a summary table to the user:
 
 ```

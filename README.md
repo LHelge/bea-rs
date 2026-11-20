@@ -220,7 +220,14 @@ bea ready --epic <epic-id>
 ### `bea show`
 ```sh
 bea show <id>
+bea show <epic-id> --plan    # the epic's direct children in execution order, as Markdown
 ```
+
+`--plan` lists an epic's **direct children** as steps, ordered by their dependencies. A nested epic
+is one step: it is marked as a nested epic with its progress (`1/3 done`), and
+`bea show <nested-id> --plan` shows its own steps. With `--json`, each step is the task's detail, and
+a nested epic's step adds `"progress": { "done", "total" }`. (`--epic` filters, by contrast, reach every
+task below an epic.)
 
 ### `bea update`
 ```sh
@@ -599,7 +606,7 @@ bea mcp   # starts MCP server over stdio
 | `remove_dependency` | Remove a dependency (`id`, `depends_on`) |
 | `delete_task` | Permanently delete a task (`id`); an epic's children get fresh root IDs |
 | `search_tasks` | Full-text search (`query`, `limit?`, `active_only?`) |
-| `plan_epic` | An epic's child tasks in topological execution order (`id`) |
+| `plan_epic` | An epic's direct children in topological execution order (`id`); a nested epic is one step with `progress` |
 | `get_graph` | Bounded dependency adjacency list (`include_done?`, `epic?`, `limit?`) |
 | `archive_task` | Archive a task (and settled children), or sweep all archivable tasks (`id?`) |
 | `restore_task` | Restore an archived task and its cascade (`id`) |

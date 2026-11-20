@@ -59,6 +59,10 @@ bea epics --json
 # Show a single task
 bea show <id> --json
 
+# An epic's plan: its direct children in execution order. A nested epic is one
+# step with "progress": { done, total }; run --plan on its ID for its own steps
+bea show <epic-id> --plan --json
+
 # Search tasks
 bea search "query" --json
 

@@ -468,6 +468,22 @@ mod tests {
         }
     }
 
+    /// The planning skill and CLI fallback describe an epic's plan as its
+    /// direct children, a nested epic being one step.
+    #[test]
+    fn test_templates_describe_plan_as_direct_children() {
+        for (name, text) in [
+            ("claude SKILL.md", CLAUDE_SKILL_MD),
+            ("claude cli-fallback.md", CLAUDE_SKILL_CLI_FALLBACK),
+            ("copilot SKILL.md", COPILOT_SKILL_MD),
+            ("copilot cli-fallback.md", COPILOT_SKILL_CLI_FALLBACK),
+        ] {
+            assert!(text.contains("direct children"), "{name}");
+            assert!(text.contains("nested epic is one"), "{name}");
+            assert!(text.contains("--plan"), "{name}");
+        }
+    }
+
     /// Merging preserves other servers already present in the file.
     #[test]
     fn test_merge_mcp_json_preserves_other_servers() {
