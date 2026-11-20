@@ -67,9 +67,21 @@ checkout (the released binary may predate the renderers being changed), appends
 `pull_request_target`), so it is safe for forks. The README's user-facing example installs a released
 `bea` instead; keep the two in step when the snapshot flags change.
 
+**Release notes.** `release.yml` writes the GitHub release body with `git-cliff --latest`, configured
+by `cliff.toml` at the repository root (not packaged). Its release job checks out with
+`fetch-depth: 0`, since git-cliff needs the history and tags back to the previous release. The
+notes start with a "Breaking changes" section: every breaking commit (`type!:` or a
+`BREAKING CHANGE:` footer), each followed by its footer's text, the upgrade step, as an indented
+paragraph. Breaking commits are listed there only, not again under their type; the other commits
+follow grouped by type (Features, Bug Fixes, Documentation, …), and `protect_breaking_commits`
+keeps a breaking commit even where a parser would skip it (`chore(deps)`). The footer is taken
+from the raw message, from `BREAKING CHANGE:` to the next blank line, because git-cliff's own
+footer parser cuts it at any `word:` inside (`Error::Yaml`). Preview the notes of the next
+release with `git-cliff --unreleased --tag vX.Y.Z` (or `git-cliff vA..vB` for a past range).
+
 ## Commit style
 
-Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`. Common types: `feat`, `fix`, `ci`, `docs`, `chore`, `refactor`, `test`. Release notes are generated from commit messages, so keep them accurate and descriptive.
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`. Common types: `feat`, `fix`, `ci`, `docs`, `chore`, `refactor`, `test`. Release notes are generated from commit messages, so keep them accurate and descriptive. Mark a breaking change with `!` and give it a `BREAKING CHANGE:` footer that tells the user what to do; the footer is printed under the change in the release notes. End the footer with a blank line before any trailers (`Co-Authored-By:` …), or the trailers become part of it.
 
 ## Architecture
 
