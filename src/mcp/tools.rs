@@ -104,7 +104,10 @@ impl BeaMcp {
         )
     }
 
-    #[tool(description = "Create a new task")]
+    #[tool(
+        description = "Create a new task. With `parent`, the new ID is created under \
+        that epic's (`a1b` → `a1b.c2`)"
+    )]
     async fn create_task(
         &self,
         Parameters(params): Parameters<CreateTaskParams>,
@@ -581,6 +584,11 @@ impl ServerHandler for BeaMcp {
             .with_server_info(Implementation::new("bears", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "bears is a file-based task tracker. Use tools to manage tasks and dependencies. \
+                Task IDs are hierarchical: a task created under an epic gets an ID that extends \
+                the epic's (`a1b` → `a1b.c2`), so the ID names the parent. Moving a task \
+                (update_task with `parent`) renames it and its subtree, and deleting or pruning \
+                an epic gives its surviving children new root IDs; those results carry a \
+                `renamed` map of old ID to new ID — use the new IDs and do not reuse old ones. \
                 Completed or cancelled tasks can be archived with archive_task to keep the active \
                 list clean. Use list_archived to browse the archive and restore_task to bring a \
                 task back to active."

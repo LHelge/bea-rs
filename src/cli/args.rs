@@ -111,7 +111,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter by parent epic ID
+        /// Filter to the direct children of this epic ID
         #[arg(long)]
         epic: Option<String>,
 
@@ -130,7 +130,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter by parent epic ID
+        /// Filter to the direct children of this epic ID
         #[arg(long)]
         epic: Option<String>,
 
@@ -220,7 +220,7 @@ pub enum Command {
         #[arg(long)]
         tag: Option<String>,
 
-        /// Filter by parent epic ID
+        /// Filter to the direct children of this epic ID
         #[arg(long)]
         epic: Option<String>,
 
