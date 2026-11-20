@@ -136,14 +136,20 @@ pub struct Task {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub assignee: String,
     /// How many attempts have been started on this task. A missing field means
     /// zero — the counter only appears once a task has actually been started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<u32>,
+    /// The `parent:` key of a file written before hierarchical IDs, read but
+    /// never written back.
+    ///
+    /// A task's parent is derived from its ID (see [`Task::parent`]); this
+    /// value has no effect on it. It is kept only so that a legacy store can
+    /// be recognised and converted to hierarchical IDs.
+    #[serde(default, rename = "parent", skip_serializing)]
+    pub legacy_parent: Option<String>,
     #[serde(skip)]
     pub body: String,
 }
@@ -206,11 +212,22 @@ impl Task {
             updated: now,
             tags: Vec::new(),
             depends_on: Vec::new(),
-            parent: None,
             assignee: String::new(),
             attempts: None,
+            legacy_parent: None,
             body: String::new(),
         }
+    }
+
+    /// The ID of this task's parent epic, derived from its ID: `a1b` for
+    /// `a1b.c2`, `None` for a root task.
+    pub fn parent(&self) -> Option<&str> {
+        parent_of(&self.id)
+    }
+
+    /// Whether this task is a direct child of `parent_id`.
+    pub fn is_child_of(&self, parent_id: &str) -> bool {
+        self.parent() == Some(parent_id)
     }
 
     /// Attempts started on this task, treating a missing counter as zero.
@@ -241,7 +258,7 @@ impl Task {
             summary: self.summary(effective_priority),
             body: self.body.clone(),
             depends_on: self.depends_on.clone(),
-            parent: self.parent.clone(),
+            parent: self.parent().map(String::from),
             created: self.created,
             updated: self.updated,
         }
@@ -1035,16 +1052,15 @@ updated: 2026-03-15T10:30:00Z
 
     #[test]
     fn test_detail_has_all_fields() {
-        let mut t = Task::new("gh78".into(), "Detail test".into(), Priority::P1);
+        let mut t = Task::new("zz99.gh".into(), "Detail test".into(), Priority::P1);
         t.body = "Some body".into();
         t.depends_on = vec!["ab12".into()];
-        t.parent = Some("zz99".into());
         t.assignee = "alice".into();
 
         let d = t.detail(Some(&Priority::P0));
         let json = serde_json::to_value(&d).unwrap();
         // Flattened summary fields
-        assert_eq!(json["id"], "gh78");
+        assert_eq!(json["id"], "zz99.gh");
         assert_eq!(json["title"], "Detail test");
         assert_eq!(json["priority"], "P1");
         assert_eq!(json["effective_priority"], "P0");
@@ -1348,7 +1364,6 @@ updated: 2026-03-15T10:30:00Z
         assert_eq!(a.updated, b.updated, "{context}");
         assert_eq!(a.tags, b.tags, "{context}");
         assert_eq!(a.depends_on, b.depends_on, "{context}");
-        assert_eq!(a.parent, b.parent, "{context}");
         assert_eq!(a.assignee, b.assignee, "{context}");
         assert_eq!(a.attempts, b.attempts, "{context}");
         assert_eq!(a.body, b.body, "{context}");
@@ -1372,7 +1387,6 @@ tags:
 depends_on:
   - 2j2
   - f4c
-parent: 8ph
 assignee: alice
 attempts: 2
 ---
@@ -1381,6 +1395,42 @@ Body text.
 ";
         let task = parse_task(content).unwrap();
         assert_eq!(render_task(&task), content);
+    }
+
+    #[test]
+    fn test_parent_is_derived_from_id() {
+        let root = Task::new("a1b".into(), "Root".into(), Priority::P2);
+        assert_eq!(root.parent(), None);
+        let child = Task::new("a1b.c2".into(), "Child".into(), Priority::P2);
+        assert_eq!(child.parent(), Some("a1b"));
+        assert!(child.is_child_of("a1b"));
+        let grandchild = Task::new("a1b.c2.d7".into(), "Grandchild".into(), Priority::P2);
+        assert_eq!(grandchild.parent(), Some("a1b.c2"));
+        assert!(grandchild.is_child_of("a1b.c2"));
+        assert!(!grandchild.is_child_of("a1b"));
+        assert!(!root.is_child_of("a1b"));
+    }
+
+    #[test]
+    fn test_parent_is_not_written() {
+        let t = Task::new("a1b.c2".into(), "Child".into(), Priority::P2);
+        let rendered = render_task(&t);
+        assert!(!rendered.contains("parent"), "{rendered}");
+    }
+
+    #[test]
+    fn test_legacy_parent_is_read_but_not_written() {
+        // Files written before hierarchical IDs carry a `parent:` key. It must
+        // still load, stay visible for migration, and never act as the parent.
+        let content = "---\nid: c3d\ntitle: Legacy child\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\nparent: 8ph\n---\n";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.legacy_parent.as_deref(), Some("8ph"));
+        assert_eq!(task.parent(), None);
+        assert_eq!(task.detail(None).parent, None);
+
+        let rendered = render_task(&task);
+        assert!(!rendered.contains("parent"), "{rendered}");
+        assert_eq!(parse_task(&rendered).unwrap().legacy_parent, None);
     }
 
     #[test]
@@ -1459,8 +1509,10 @@ Body.
     #[test]
     fn test_repository_store_roundtrips() {
         // Every task this repository tracks, active and archived, must load
-        // and survive a render/parse cycle unchanged. `.bears/` is not part
-        // of the published crate, so the test has nothing to check there.
+        // and survive a render/parse cycle unchanged, except for a legacy
+        // `parent:` key, which is read but never written back. `.bears/` is
+        // not part of the published crate, so the test has nothing to check
+        // there.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".bears");
         if !root.is_dir() {
             return;
@@ -1481,6 +1533,11 @@ Body.
                 let rendered = render_task(&task);
                 let reparsed = parse_task(&rendered).unwrap_or_else(|e| panic!("{context}: {e}"));
                 assert_same_task(&reparsed, &task, &context);
+                assert!(
+                    !rendered.lines().any(|l| l.starts_with("parent:")),
+                    "{context}"
+                );
+                assert_eq!(reparsed.legacy_parent, None, "{context}");
                 assert_eq!(render_task(&reparsed), rendered, "{context}");
                 checked += 1;
             }

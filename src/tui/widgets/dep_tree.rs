@@ -143,7 +143,7 @@ fn render_children<'a>(
 ) {
     let mut children: Vec<&Task> = task_map
         .values()
-        .filter(|t| t.parent.as_deref() == Some(parent_id))
+        .filter(|t| t.is_child_of(parent_id))
         .collect();
     children.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
 
@@ -247,20 +247,17 @@ mod tests {
         // epic e → c1, e2(epic) ; e2 → g
         let mut e = task("e", "Epic");
         e.task_type = TaskType::Epic;
-        let mut c1 = task("c1", "Child one");
-        c1.parent = Some("e".into());
-        let mut e2 = task("e2", "Inner epic");
+        let c1 = task("e.c1", "Child one");
+        let mut e2 = task("e.e2", "Inner epic");
         e2.task_type = TaskType::Epic;
-        e2.parent = Some("e".into());
-        let mut g = task("g", "Grandchild");
+        let mut g = task("e.e2.g", "Grandchild");
         g.status = Status::Done;
-        g.parent = Some("e2".into());
 
         let map: HashMap<String, Task> = [
             ("e".into(), e.clone()),
-            ("c1".into(), c1),
-            ("e2".into(), e2),
-            ("g".into(), g),
+            ("e.c1".into(), c1),
+            ("e.e2".into(), e2),
+            ("e.e2.g".into(), g),
         ]
         .into();
 
@@ -269,7 +266,7 @@ mod tests {
 
         assert!(text.contains("Subtasks"));
         // Every descendant appears exactly once.
-        for id in ["[c1]", "[e2]", "[g]"] {
+        for id in ["[e.c1]", "[e.e2]", "[e.e2.g]"] {
             assert_eq!(
                 text.matches(id).count(),
                 1,

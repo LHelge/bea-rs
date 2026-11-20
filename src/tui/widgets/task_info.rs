@@ -91,10 +91,10 @@ impl<'a> TaskInfoWidget<'a> {
         }
 
         // Parent
-        if let Some(ref parent) = self.task.parent {
+        if let Some(parent) = self.task.parent() {
             lines.push(Line::from(vec![
                 Span::styled("Parent:   ", label_style),
-                Span::raw(parent.as_str()),
+                Span::raw(parent.to_string()),
             ]));
         }
 
@@ -158,11 +158,10 @@ mod tests {
 
     #[test]
     fn optional_fields_shown_when_present() {
-        let mut task = Task::new("abc".into(), "Tagged".into(), Priority::P2);
+        let mut task = Task::new("xyz.ab".into(), "Tagged".into(), Priority::P2);
         task.tags = vec!["backend".into(), "auth".into()];
         task.assignee = "alice".into();
-        task.parent = Some("xyz".into());
-        let map: HashMap<String, Task> = [("abc".into(), task.clone())].into();
+        let map: HashMap<String, Task> = [("xyz.ab".into(), task.clone())].into();
         let theme = Theme::default();
         let widget = TaskInfoWidget::new(&task, &map, &theme);
         let lines = widget.lines();
@@ -204,17 +203,15 @@ mod tests {
         let mut epic = Task::new("e1".into(), "My Epic".into(), Priority::P0);
         epic.task_type = TaskType::Epic;
 
-        let mut child1 = Task::new("c1".into(), "Child 1".into(), Priority::P1);
-        child1.parent = Some("e1".into());
+        let mut child1 = Task::new("e1.c1".into(), "Child 1".into(), Priority::P1);
         child1.status = Status::Done;
 
-        let mut child2 = Task::new("c2".into(), "Child 2".into(), Priority::P1);
-        child2.parent = Some("e1".into());
+        let child2 = Task::new("e1.c2".into(), "Child 2".into(), Priority::P1);
 
         let map: HashMap<String, Task> = [
             ("e1".into(), epic.clone()),
-            ("c1".into(), child1),
-            ("c2".into(), child2),
+            ("e1.c1".into(), child1),
+            ("e1.c2".into(), child2),
         ]
         .into();
         let theme = Theme::default();

@@ -84,7 +84,7 @@ pub enum Command {
         #[arg(long = "depends-on", value_delimiter = ',')]
         depends_on: Vec<String>,
 
-        /// Parent task ID
+        /// Parent epic ID; the new task's ID is created under it
         #[arg(long)]
         parent: Option<String>,
 
@@ -181,7 +181,8 @@ pub enum Command {
         #[arg(long)]
         title: Option<String>,
 
-        /// Set parent epic ID (use empty string "" to clear)
+        /// Parent epic ID (empty string "" for none). Must match the current
+        /// parent: changing a task's parent is not supported yet
         #[arg(long)]
         parent: Option<String>,
     },

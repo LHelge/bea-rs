@@ -58,7 +58,7 @@ pub struct CreateTaskParams {
     pub tags: Option<Vec<String>>,
     /// IDs of tasks this depends on
     pub depends_on: Option<Vec<String>>,
-    /// Parent task ID
+    /// Parent epic ID; the new task's ID is created under it
     pub parent: Option<String>,
     /// Task body (markdown)
     pub body: Option<String>,
@@ -83,7 +83,8 @@ pub struct UpdateTaskParams {
     pub assignee: Option<String>,
     /// New body (markdown)
     pub body: Option<String>,
-    /// Set parent epic ID (use empty string "" to clear parent)
+    /// Parent epic ID (empty string "" for none). Must match the current
+    /// parent: changing a task's parent is not supported yet
     pub parent: Option<String>,
 }
 

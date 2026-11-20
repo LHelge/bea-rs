@@ -24,11 +24,6 @@ pub fn create_task(
     task_type: TaskType,
 ) -> Result<Task> {
     let config = config::load(base)?;
-    let mut existing_ids: HashSet<String> = tasks.keys().cloned().collect();
-    // Also exclude archived IDs so new tasks never reuse an archived ID.
-    existing_ids.extend(store::archived_id_set(base));
-    let id = task::generate_id(&existing_ids, config.id_length as usize);
-
     // Resolve dependency IDs (prefixes allowed, like every other command)
     let mut resolved_deps = Vec::with_capacity(depends_on.len());
     let mut unknown = Vec::new();
@@ -43,10 +38,9 @@ pub fn create_task(
         return Err(Error::UnknownDependency { ids: unknown });
     }
 
-    // Treat empty-string parent as "no parent", and resolve a prefix to the
-    // full id so the stored parent matches the canonical task id (otherwise
-    // epic_progress / reparenting lookups by full id would miss it).
-    // The parent must exist and be an epic.
+    // Treat an empty-string parent as "no parent" and resolve a prefix to the
+    // full id. The parent must exist and be an epic; it becomes the prefix of
+    // the new task's ID, which is where the parent is recorded.
     let parent = match parent.filter(|p| !p.is_empty()) {
         Some(pid) => {
             let parent_id = store::resolve_prefix(tasks, &pid)?;
@@ -58,11 +52,18 @@ pub fn create_task(
         None => None,
     };
 
+    let mut existing_ids: HashSet<String> = tasks.keys().cloned().collect();
+    // Also exclude archived IDs so new tasks never reuse an archived ID.
+    existing_ids.extend(store::archived_id_set(base));
+    let id = match &parent {
+        Some(parent_id) => task::generate_child_id(parent_id, &existing_ids, &config),
+        None => task::generate_id(&existing_ids, config.id_length as usize),
+    };
+
     let mut t = Task::new(id, title, priority);
     t.task_type = task_type;
     t.tags = tags;
     t.depends_on = resolved_deps;
-    t.parent = parent;
     t.body = body;
 
     store::save(base, &t)?;
@@ -100,7 +101,7 @@ pub fn list_tasks(
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
         .filter(|t| task::matches_tag(t, tag))
-        .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
+        .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
         .cloned()
         .collect();
     task::sort_by_priority_owned(&mut filtered);
@@ -134,7 +135,7 @@ pub fn list_review(
         .values()
         .filter(|t| t.status == Status::Review)
         .filter(|t| task::matches_tag(t, tag))
-        .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
+        .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
         .cloned()
         .collect();
     task::sort_by_priority_owned(&mut queue);
@@ -245,8 +246,12 @@ pub fn get_task(tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Tas
 ///
 /// The `parent` parameter uses a double-Option to distinguish three states:
 /// - `None`           → leave parent unchanged
-/// - `Some(None)`     → clear parent (detach from any epic)
-/// - `Some(Some(id))` → set parent to the given epic ID (must exist)
+/// - `Some(None)`     → make the task a root task
+/// - `Some(Some(id))` → put the task under the given epic (must exist)
+///
+/// A task's parent is part of its ID, so a parent that differs from the
+/// current one returns [`Error::ReparentUnsupported`] before anything is
+/// written; naming the current parent is accepted and changes nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn update_task(
     base: &Path,
@@ -262,6 +267,19 @@ pub fn update_task(
 ) -> Result<Task> {
     let id = store::resolve_prefix(tasks, id_or_prefix)?;
     let mut t = tasks[&id].clone();
+
+    if let Some(new_parent) = parent {
+        let new_parent = new_parent
+            .filter(|p| !p.is_empty())
+            .map(|p| store::resolve_prefix(tasks, &p))
+            .transpose()?;
+        if new_parent.as_deref() != t.parent() {
+            return Err(Error::ReparentUnsupported {
+                id: t.id,
+                parent: new_parent,
+            });
+        }
+    }
 
     let previous_status = t.status;
     let status_changed = status.as_ref().is_some_and(|s| *s != t.status);
@@ -283,17 +301,6 @@ pub fn update_task(
     }
     if let Some(title) = title {
         t.title = title;
-    }
-    // Reparenting: None = leave unchanged, Some(None) = clear, Some(Some(id)) = set
-    if let Some(new_parent) = parent {
-        match new_parent {
-            None => t.parent = None,
-            Some(ref pid) => {
-                // Validate parent exists and store its canonical full id (not the
-                // typed prefix) so epic_progress lookups by full id match.
-                t.parent = Some(store::resolve_prefix(tasks, pid)?);
-            }
-        }
     }
     t.updated = Utc::now();
 
@@ -638,7 +645,7 @@ fn maybe_close_parent_epic(
         return Ok(());
     }
 
-    let Some(ref parent_id) = t.parent else {
+    let Some(parent_id) = t.parent() else {
         return Ok(());
     };
     let Some(parent) = tasks.get(parent_id) else {
@@ -657,7 +664,7 @@ fn maybe_close_parent_epic(
     // up-to-date statuses written during this recursive call.
     let children: Vec<_> = tasks
         .values()
-        .filter(|c| c.parent.as_deref() == Some(parent_id))
+        .filter(|c| c.is_child_of(parent_id))
         .collect();
     let has_children = !children.is_empty();
     let all_resolved = children.iter().all(|c| {
@@ -670,7 +677,7 @@ fn maybe_close_parent_epic(
         closed_parent.status = Status::Done;
         closed_parent.updated = Utc::now();
         store::save(base, &closed_parent)?;
-        overrides.insert(parent_id.clone(), Status::Done);
+        overrides.insert(parent_id.to_string(), Status::Done);
 
         // Cascade: re-run the check for the newly-closed epic's own parent.
         maybe_close_parent_epic(base, tasks, parent, overrides)?;
@@ -775,8 +782,11 @@ pub fn prune_tasks(
 }
 
 /// Remove dangling references to deleted tasks: drop deleted IDs from
-/// `depends_on` lists and clear `parent` fields pointing at deleted tasks.
-/// Without this, dependents would silently never become ready.
+/// `depends_on` lists. Without this, dependents would silently never become
+/// ready.
+///
+/// A child's parent is part of its ID and is left as it is: deleting an epic
+/// leaves its children with a parent that no longer exists.
 ///
 /// Only applies to hard deletion (delete/prune) — archived tasks keep their
 /// IDs reserved and still resolve via the archive, so no scrubbing there.
@@ -789,14 +799,9 @@ fn scrub_references(
         if deleted.contains(&t.id) {
             continue;
         }
-        let dangling_dep = t.depends_on.iter().any(|d| deleted.contains(d));
-        let dangling_parent = t.parent.as_ref().is_some_and(|p| deleted.contains(p));
-        if dangling_dep || dangling_parent {
+        if t.depends_on.iter().any(|d| deleted.contains(d)) {
             let mut t = t.clone();
             t.depends_on.retain(|d| !deleted.contains(d));
-            if dangling_parent {
-                t.parent = None;
-            }
             t.updated = Utc::now();
             store::save(base, &t)?;
         }
@@ -891,8 +896,7 @@ pub fn archive_task(
         let settled_children: Vec<String> = tasks
             .values()
             .filter(|c| {
-                c.parent.as_deref() == Some(id.as_str())
-                    && (c.status == Status::Done || c.status == Status::Cancelled)
+                c.is_child_of(&id) && (c.status == Status::Done || c.status == Status::Cancelled)
             })
             .map(|c| c.id.clone())
             .collect();
@@ -971,11 +975,11 @@ pub async fn restore_task(base: &Path, id_or_prefix: &str) -> Result<Vec<String>
 
         if let Some(task) = archived.get(&current) {
             // Restore parent epic if archived
-            if let Some(ref parent_id) = task.parent
+            if let Some(parent_id) = task.parent()
                 && archived.contains_key(parent_id)
                 && !visited.contains(parent_id)
             {
-                queue.push(parent_id.clone());
+                queue.push(parent_id.to_string());
             }
             // Restore depends_on that are archived
             for dep_id in &task.depends_on {
@@ -1038,7 +1042,8 @@ pub struct EpicSummary {
     pub progress: EpicProgress,
 }
 
-/// Compute progress for an epic by counting children (tasks with parent == epic_id).
+/// Compute progress for an epic by counting its direct children (tasks whose
+/// ID derives `epic_id` as their parent).
 ///
 /// Semantics: cancelled children are treated as resolved and non-blocking.
 /// - `total` = non-cancelled children (active workload)
@@ -1050,7 +1055,7 @@ pub fn epic_progress(tasks: &HashMap<String, Task>, epic_id: &str) -> EpicProgre
     let mut done = 0;
     let mut total = 0;
     for t in tasks.values() {
-        if t.parent.as_deref() == Some(epic_id) {
+        if t.is_child_of(epic_id) {
             if t.status == Status::Cancelled {
                 // Cancelled = resolved but not counted in the active workload.
                 continue;
@@ -1087,7 +1092,7 @@ pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Resul
     // Collect child IDs
     let child_ids: HashSet<String> = tasks
         .values()
-        .filter(|t| t.parent.as_deref() == Some(resolved.as_str()))
+        .filter(|t| t.is_child_of(&resolved))
         .map(|t| t.id.clone())
         .collect();
 
@@ -1115,10 +1120,9 @@ mod tests {
         t
     }
 
-    fn make_child(id: &str, parent: &str, status: Status) -> Task {
-        let mut t = make_task(id, status);
-        t.parent = Some(parent.to_string());
-        t
+    /// A task whose ID puts it directly under `parent`: `{parent}.{leaf}`.
+    fn make_child(leaf: &str, parent: &str, status: Status) -> Task {
+        make_task(&format!("{parent}.{leaf}"), status)
     }
 
     fn task_map(tasks: Vec<Task>) -> HashMap<String, Task> {
@@ -1317,7 +1321,7 @@ mod tests {
         let mut b = make_task("bbb", Status::Open);
         b.depends_on = vec!["aaa".into()];
         store::save(tmp.path(), &b).unwrap();
-        let c = make_child("ccc", "aaa", Status::Open);
+        let c = make_child("cc", "aaa", Status::Open);
         store::save(tmp.path(), &c).unwrap();
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
@@ -1325,7 +1329,8 @@ mod tests {
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert!(tasks["bbb"].depends_on.is_empty(), "dep should be scrubbed");
-        assert_eq!(tasks["ccc"].parent, None, "parent should be cleared");
+        // The parent is part of the child's ID, so the child keeps it.
+        assert_eq!(tasks["aaa.cc"].parent(), Some("aaa"));
         // And the dependent is now ready instead of silently blocked.
         let ready = list_ready(&tasks, None, None, None);
         assert!(ready.iter().any(|t| t.id == "bbb"));
@@ -1896,14 +1901,14 @@ mod tests {
         let mut c1 = make_child("c1", "e1", Status::Open);
         c1.depends_on = vec![];
         let mut c2 = make_child("c2", "e1", Status::Open);
-        c2.depends_on = vec!["c1".to_string()];
+        c2.depends_on = vec!["e1.c1".to_string()];
         let mut c3 = make_child("c3", "e1", Status::Open);
-        c3.depends_on = vec!["c2".to_string()];
+        c3.depends_on = vec!["e1.c2".to_string()];
 
         let tasks = task_map(vec![make_epic("e1"), c1, c2, c3]);
         let plan = plan_epic(&tasks, "e1").unwrap();
         let ids: Vec<&str> = plan.tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["c1", "c2", "c3"]);
+        assert_eq!(ids, vec!["e1.c1", "e1.c2", "e1.c3"]);
         assert!(plan.cyclic.is_empty());
     }
 
@@ -1947,40 +1952,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parent_prefix_stored_as_canonical_id() {
-        // A parent passed as a prefix must be stored as the resolved full id, so
-        // epic_progress (which matches children on the full id) counts them.
+    async fn test_create_child_gets_hierarchical_id() {
+        // A parent passed as a prefix is resolved to the full id, which becomes
+        // the prefix of the child's ID, so epic_progress counts the child.
         let tmp = tempfile::TempDir::new().unwrap();
         store::init(tmp.path()).unwrap();
 
         let mut epic = Task::new("epicid".into(), "Epic".into(), Priority::P1);
         epic.task_type = TaskType::Epic;
         store::save(tmp.path(), &epic).unwrap();
-        let child = Task::new("chld".into(), "Existing child".into(), Priority::P2);
-        store::save(tmp.path(), &child).unwrap();
 
-        // update_task reparenting with a prefix ("epi" → "epicid").
-        let tasks = store::load_all(tmp.path()).await.unwrap();
-        let updated = update_task(
-            tmp.path(),
-            &tasks,
-            "chld",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(Some("epi".into())),
-        )
-        .unwrap();
-        assert_eq!(
-            updated.parent.as_deref(),
-            Some("epicid"),
-            "update_task should store the resolved full parent id, not the prefix"
-        );
-
-        // create_task with a prefix parent ("epi" → "epicid").
         let tasks = store::load_all(tmp.path()).await.unwrap();
         let created = create_task(
             tmp.path(),
@@ -1994,15 +1975,193 @@ mod tests {
             TaskType::Task,
         )
         .unwrap();
-        assert_eq!(
-            created.parent.as_deref(),
-            Some("epicid"),
-            "create_task should store the resolved full parent id, not the prefix"
-        );
+        assert_eq!(created.parent(), Some("epicid"), "{}", created.id);
+        let segment = task::leaf_segment(&created.id);
+        assert_eq!(segment.len(), 2, "default child-id-length: {}", created.id);
 
-        // Both children are now visible to the epic via its full id.
+        // A nested epic's child is a grandchild of the top epic.
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let nested = create_task(
+            tmp.path(),
+            &tasks,
+            "Nested epic".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some("epicid".into()),
+            String::new(),
+            TaskType::Epic,
+        )
+        .unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let grandchild = create_task(
+            tmp.path(),
+            &tasks,
+            "Grandchild".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(nested.id.clone()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(grandchild.parent(), Some(nested.id.as_str()));
+        assert_eq!(task::id_depth(&grandchild.id), 2);
+
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(epic_progress(&tasks, "epicid").total, 2);
+        assert_eq!(epic_progress(&tasks, &nested.id).total, 1);
+        // The file carries no `parent:` key.
+        let path = store::find_task_path(tmp.path(), &created.id).unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(!content.contains("parent"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn test_create_root_task_uses_id_length() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        let created = create_task(
+            tmp.path(),
+            &HashMap::new(),
+            "Root".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some(String::new()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(created.parent(), None);
+        assert_eq!(created.id.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_create_child_avoids_archived_ids() {
+        // With child-id-length 1 an epic has 31 possible one-char children.
+        // Seven of them sit in the archive (under the growth limit, so the
+        // segment stays one char): a new child must take none of them.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".bears.yml"), "child-id-length: 1\n").unwrap();
+        store::save(tmp.path(), &make_epic("eee")).unwrap();
+        let archived: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|leaf| {
+                let child = make_child(leaf, "eee", Status::Done);
+                store::save(tmp.path(), &child).unwrap();
+                store::move_to_archive(tmp.path(), &child.id).unwrap();
+                child.id
+            })
+            .collect();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let created = create_task(
+            tmp.path(),
+            &tasks,
+            "Child".into(),
+            Priority::P2,
+            vec![],
+            vec![],
+            Some("eee".into()),
+            String::new(),
+            TaskType::Task,
+        )
+        .unwrap();
+        assert_eq!(created.parent(), Some("eee"));
+        assert_eq!(task::leaf_segment(&created.id).len(), 1, "{}", created.id);
+        assert!(!archived.contains(&created.id), "{}", created.id);
+    }
+
+    #[tokio::test]
+    async fn test_update_task_rejects_parent_change() {
+        // Changing the parent means renaming the task (reparenting is not
+        // implemented yet): it must fail before anything is written.
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_epic("e1")).unwrap();
+        store::save(tmp.path(), &make_epic("e2")).unwrap();
+        store::save(tmp.path(), &make_child("c1", "e1", Status::Open)).unwrap();
+        store::save(tmp.path(), &make_task("rrr", Status::Open)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        let update = |id: &str, parent: Option<&str>| {
+            update_task(
+                tmp.path(),
+                &tasks,
+                id,
+                Some(Status::InProgress),
+                None,
+                None,
+                None,
+                None,
+                Some("Renamed".into()),
+                Some(parent.map(String::from)),
+            )
+        };
+
+        // Move under another epic, detach, or attach a root task.
+        for (id, parent, expected) in [
+            ("e1.c1", Some("e2"), Some("e2")),
+            ("e1.c1", None, None),
+            ("rrr", Some("e1"), Some("e1")),
+        ] {
+            let err = update(id, parent).unwrap_err();
+            match &err {
+                Error::ReparentUnsupported { id: got, parent } => {
+                    assert_eq!(got, id);
+                    assert_eq!(parent.as_deref(), expected);
+                }
+                other => panic!("{id}: {other:?}"),
+            }
+            assert!(err.to_string().contains(id), "{err}");
+        }
+        // Nothing was written.
+        let reloaded = store::load_all(tmp.path()).await.unwrap();
+        for id in ["e1.c1", "rrr"] {
+            assert_eq!(reloaded[id].status, Status::Open);
+            assert_ne!(reloaded[id].title, "Renamed");
+        }
+
+        // An unknown parent is still reported as such.
+        assert!(matches!(
+            update("e1.c1", Some("zzz")),
+            Err(Error::TaskNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_accepts_unchanged_parent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_epic("e1")).unwrap();
+        store::save(tmp.path(), &make_child("c1", "e1", Status::Open)).unwrap();
+        store::save(tmp.path(), &make_task("rrr", Status::Open)).unwrap();
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+
+        for (id, parent) in [
+            ("e1.c1", Some("e1".to_string())),
+            ("rrr", None),
+            ("rrr", Some(String::new())),
+        ] {
+            let updated = update_task(
+                tmp.path(),
+                &tasks,
+                id,
+                None,
+                Some(Priority::P0),
+                None,
+                None,
+                None,
+                None,
+                Some(parent),
+            )
+            .unwrap();
+            assert_eq!(updated.id, id);
+            assert_eq!(updated.priority, Priority::P0);
+        }
     }
 
     // ─── Archive service tests ────────────────────────────────────────────────
@@ -3131,7 +3290,7 @@ mod tests {
         store::save(tmp.path(), &make_child("bbb", "eee", Status::InProgress)).unwrap();
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
-        review_task(tmp.path(), &tasks, "bbb").unwrap();
+        review_task(tmp.path(), &tasks, "eee.bbb").unwrap();
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert_eq!(

@@ -75,7 +75,7 @@ impl Graph {
             .values()
             .filter(|t| is_task_ready(tasks, t))
             .filter(|t| task::matches_tag(t, tag))
-            .filter(|t| epic.is_none_or(|e| t.parent.as_deref() == Some(e)))
+            .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
             .collect();
 
         // Sort by effective priority (P0 first), then by creation date (oldest first).
@@ -429,7 +429,7 @@ impl Graph {
                 }
                 // Epic filter: if specified, include only direct children + the epic itself
                 if let Some(e) = epic {
-                    return t.id == e || t.parent.as_deref() == Some(e);
+                    return t.id == e || t.is_child_of(e);
                 }
                 true
             })
@@ -545,9 +545,9 @@ mod tests {
             updated: Utc::now(),
             tags: Vec::new(),
             depends_on: deps.into_iter().map(String::from).collect(),
-            parent: None,
             assignee: String::new(),
             attempts: None,
+            legacy_parent: None,
             body: String::new(),
         }
     }
@@ -650,27 +650,27 @@ mod tests {
 
     #[test]
     fn test_ready_with_epic_filter() {
-        let mut t1 = make_task("a", Status::Open, Priority::P1, vec![]);
-        t1.parent = Some("epic1".into());
-        let mut t2 = make_task("b", Status::Open, Priority::P1, vec![]);
-        t2.parent = Some("epic2".into());
+        let t1 = make_task("epic1.a", Status::Open, Priority::P1, vec![]);
+        let t2 = make_task("epic2.b", Status::Open, Priority::P1, vec![]);
         let t3 = make_task("c", Status::Open, Priority::P1, vec![]);
-        let tasks = make_tasks(vec![t1, t2, t3]);
+        // A grandchild is not a direct child of epic1.
+        let t4 = make_task("epic1.x.d", Status::Open, Priority::P1, vec![]);
+        let tasks = make_tasks(vec![t1, t2, t3, t4]);
         let graph = Graph::build(&tasks);
 
-        // Filter to epic1 — only task "a"
+        // Filter to epic1 — only task "epic1.a"
         let ready = graph.ready(&tasks, None, None, Some("epic1"));
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].id, "a");
+        assert_eq!(ready[0].id, "epic1.a");
 
-        // Filter to epic2 — only task "b"
+        // Filter to epic2 — only task "epic2.b"
         let ready = graph.ready(&tasks, None, None, Some("epic2"));
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].id, "b");
+        assert_eq!(ready[0].id, "epic2.b");
 
-        // No filter — all three
+        // No filter — all four
         let ready = graph.ready(&tasks, None, None, None);
-        assert_eq!(ready.len(), 3);
+        assert_eq!(ready.len(), 4);
     }
 
     // --- is_task_ready predicate tests -------------------------------------------
