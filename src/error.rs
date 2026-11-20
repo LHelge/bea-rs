@@ -21,6 +21,15 @@ pub enum Error {
     #[error("parent {0} is not an epic — only epics can have child tasks")]
     ParentNotEpic(String),
 
+    /// A task's parent was asked to change. The parent is part of a task's ID,
+    /// so moving a task means renaming it and its subtree, which is not
+    /// supported yet.
+    #[error("cannot move task {id} {}: changing a task's parent is not supported yet", match .parent {
+        Some(p) => format!("under {p}"),
+        None => "to the top level".to_string(),
+    })]
+    ReparentUnsupported { id: String, parent: Option<String> },
+
     #[error("adding dependency would create a cycle: {from} -> {to}")]
     CycleDetected { from: String, to: String },
 

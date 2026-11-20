@@ -1652,92 +1652,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_reparent_set_and_clear() {
+    async fn test_tool_parent_derived_and_reparent_rejected() {
         let (_tmp, mcp) = setup();
-
-        // Create an epic
-        let epic = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "My Epic".into(),
+        let create = |title: &str, parent: Option<String>, task_type: Option<TaskType>| {
+            let params = CreateTaskParams {
+                title: title.into(),
                 priority: None,
                 tags: None,
                 depends_on: None,
-                parent: None,
+                parent,
                 body: None,
-                task_type: Some(TaskType::Epic),
-            }))
-            .await
-            .unwrap();
-        let epic_id = extract_json(&epic)["id"].as_str().unwrap().to_string();
-
-        // Create a task without a parent
-        let task = mcp
-            .create_task(Parameters(CreateTaskParams {
-                title: "Child Task".into(),
-                priority: None,
-                tags: None,
-                depends_on: None,
-                parent: None,
-                body: None,
-                task_type: None,
-            }))
-            .await
-            .unwrap();
-        let task_id = extract_json(&task)["id"].as_str().unwrap().to_string();
-
-        // Set parent to the epic
-        let updated = mcp
-            .update_task(Parameters(UpdateTaskParams {
-                id: task_id.clone(),
+                task_type,
+            };
+            mcp.create_task(Parameters(params))
+        };
+        let update_parent = |id: &str, parent: &str| {
+            mcp.update_task(Parameters(UpdateTaskParams {
+                id: id.into(),
                 title: None,
                 status: None,
                 priority: None,
                 tags: None,
                 assignee: None,
                 body: None,
-                parent: Some(epic_id.clone()),
+                parent: Some(parent.into()),
             }))
+        };
+
+        let epic = create("My Epic", None, Some(TaskType::Epic)).await.unwrap();
+        let epic_id = extract_json(&epic)["id"].as_str().unwrap().to_string();
+        let child = create("Child Task", Some(epic_id.clone()), None)
             .await
             .unwrap();
-        let json = extract_json(&updated);
-        assert_eq!(json["id"], task_id);
+        let child_id = extract_json(&child)["id"].as_str().unwrap().to_string();
+        assert!(
+            child_id.starts_with(&format!("{epic_id}.")),
+            "{child_id} should be under {epic_id}"
+        );
+        let root = create("Root Task", None, None).await.unwrap();
+        let root_id = extract_json(&root)["id"].as_str().unwrap().to_string();
 
-        // Confirm the parent is set via get_task
+        // get_task reports the parent derived from the ID.
         let detail = mcp
             .get_task(Parameters(TaskIdParams {
-                id: task_id.clone(),
+                id: child_id.clone(),
             }))
             .await
             .unwrap();
         assert_eq!(extract_json(&detail)["parent"], epic_id);
 
-        // Clear parent with empty string
-        let cleared = mcp
-            .update_task(Parameters(UpdateTaskParams {
-                id: task_id.clone(),
-                title: None,
-                status: None,
-                priority: None,
-                tags: None,
-                assignee: None,
-                body: None,
-                parent: Some("".into()),
-            }))
-            .await
-            .unwrap();
-        assert!(!cleared.is_error.unwrap_or(false));
+        // Naming the current parent changes nothing and succeeds.
+        let same = update_parent(&child_id, &epic_id).await.unwrap();
+        assert!(!same.is_error.unwrap_or(false), "{}", extract_text(&same));
+        assert_eq!(extract_json(&same)["id"], child_id);
 
-        // Confirm parent is cleared
-        let detail2 = mcp
-            .get_task(Parameters(TaskIdParams {
-                id: task_id.clone(),
-            }))
+        // Detaching or attaching a task is a reparent: a tool-level error.
+        for (id, parent) in [(&child_id, ""), (&root_id, epic_id.as_str())] {
+            let result = update_parent(id, parent).await.unwrap();
+            assert_eq!(result.is_error, Some(true), "{id} -> {parent:?}");
+            assert!(
+                extract_text(&result).contains("not supported"),
+                "{}",
+                extract_text(&result)
+            );
+        }
+        let detail = mcp
+            .get_task(Parameters(TaskIdParams { id: root_id }))
             .await
             .unwrap();
-        assert!(
-            extract_json(&detail2)["parent"].is_null(),
-            "parent should be null after clearing"
-        );
+        assert!(extract_json(&detail)["parent"].is_null());
     }
 
     #[tokio::test]

@@ -443,7 +443,7 @@ pub fn cmd_show_archived(task: &Task, _plan: bool, json: bool) -> Result<()> {
                     .join(", ")
             );
         }
-        if let Some(ref parent) = task.parent {
+        if let Some(parent) = task.parent() {
             println!(
                 "{} {}",
                 "Parent:  ".if_supports_color(Stdout, |t| t.bold()),
@@ -540,7 +540,7 @@ pub fn cmd_show(tasks: &HashMap<String, Task>, id: &str, plan: bool, json: bool)
                     .join(", ")
             );
         }
-        if let Some(ref parent) = t.parent {
+        if let Some(parent) = t.parent() {
             println!(
                 "{} {}",
                 "Parent:  ".if_supports_color(Stdout, |t| t.bold()),

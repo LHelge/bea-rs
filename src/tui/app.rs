@@ -500,14 +500,13 @@ mod tests {
         let mut app = App::new(vec![], HashMap::new(), std::path::PathBuf::from("."));
         let mut epic = Task::new("ep".into(), "Epic".into(), Priority::P1);
         epic.task_type = TaskType::Epic;
-        let mut child = Task::new("ch".into(), "Child".into(), Priority::P2);
-        child.parent = Some("ep".into());
+        let mut child = Task::new("ep.ch".into(), "Child".into(), Priority::P2);
         child.status = Status::Done;
         app.archived_tasks = vec![epic, child];
 
         let map = app.detail_task_map();
         assert!(
-            map.contains_key("ep") && map.contains_key("ch"),
+            map.contains_key("ep") && map.contains_key("ep.ch"),
             "detail map must include archived tasks so an archived epic resolves its children"
         );
     }

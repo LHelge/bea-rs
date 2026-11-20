@@ -879,6 +879,71 @@ fn test_epic_auto_close_when_all_children_done() {
     assert_eq!(get_task_status(&tmp, &epic_id), "done");
 }
 
+/// A child's ID is its parent's ID plus a segment; the file has no `parent:`
+/// key, and `show` still reports the parent.
+#[test]
+fn test_create_child_gets_hierarchical_id() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "My epic");
+    let child = create_child_task(&tmp, "Child", &epic_id);
+    let (parent, leaf) = child.rsplit_once('.').expect("dotted child ID");
+    assert_eq!(parent, epic_id);
+    assert_eq!(leaf.len(), 2, "{child}");
+
+    let file = std::fs::read_dir(tmp.path().join(".bears"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{child}-"))
+        })
+        .expect("child file");
+    let content = std::fs::read_to_string(file).unwrap();
+    assert!(!content.contains("parent"), "{content}");
+
+    let out = bea(&tmp).args(["--json", "show", &child]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["parent"], epic_id.as_str());
+    bea(&tmp)
+        .args(["show", &child])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parent:"));
+}
+
+/// Changing a task's parent is refused until reparenting is implemented.
+#[test]
+fn test_update_parent_change_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let epic_id = create_epic(&tmp, "My epic");
+    let child = create_child_task(&tmp, "Child", &epic_id);
+    let root = create_task(&tmp, "Root");
+
+    for (id, parent) in [(&child, ""), (&root, epic_id.as_str())] {
+        bea(&tmp)
+            .args(["update", id, "--parent", parent, "--title", "Renamed"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not supported"));
+    }
+    // The current parent is accepted.
+    bea(&tmp)
+        .args(["update", &child, "--parent", &epic_id, "--priority", "P0"])
+        .assert()
+        .success();
+    bea(&tmp)
+        .args(["show", &root])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Renamed").not());
+}
+
 #[test]
 fn test_epic_not_in_ready() {
     let tmp = TempDir::new().unwrap();
