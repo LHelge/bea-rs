@@ -281,18 +281,9 @@ pub fn build(
 
     let work: Vec<&Task> = active.values().filter(|t| t.task_type.is_task()).collect();
 
-    let mut ready = service::list_ready(active, None, None, None);
-    // `list_ready` orders by effective priority and creation date; break the
-    // ties it leaves to the map's iteration order.
-    ready.sort_by(|a, b| {
-        eff_of(a, &eff)
-            .cmp(&eff_of(b, &eff))
-            .then(a.created.cmp(&b.created))
-            .then(a.id.cmp(&b.id))
-    });
-    let mut review = service::list_review(active, None, None, None);
-    review.sort_by(canonical);
-    let mut in_progress = service::list_tasks(
+    let ready = service::list_ready(active, None, None, None);
+    let review = service::list_review(active, None, None, None);
+    let in_progress = service::list_tasks(
         active,
         Some(Status::InProgress),
         None,
@@ -301,7 +292,6 @@ pub fn build(
         false,
         None,
     );
-    in_progress.sort_by(canonical);
 
     let board: Vec<BoardColumn> = STATUS_ORDER
         .iter()
@@ -312,7 +302,7 @@ pub fn build(
                 .copied()
                 .filter(|t| t.status == status)
                 .collect();
-            tasks.sort_by(|a, b| canonical(a, b));
+            tasks.sort_by(|a, b| task::canonical_order(a, b));
             BoardColumn {
                 status,
                 tasks: tasks.into_iter().map(entry).collect(),
@@ -373,19 +363,6 @@ fn is_settled(status: Status) -> bool {
     matches!(status, Status::Done | Status::Cancelled)
 }
 
-/// Priority, creation date, then ID: the canonical list order with its ties
-/// broken.
-fn canonical(a: &Task, b: &Task) -> std::cmp::Ordering {
-    a.priority
-        .cmp(&b.priority)
-        .then(a.created.cmp(&b.created))
-        .then(a.id.cmp(&b.id))
-}
-
-fn eff_of(t: &Task, eff: &HashMap<String, Priority>) -> Priority {
-    eff.get(&t.id).copied().unwrap_or(t.priority)
-}
-
 fn count_statuses<'a>(tasks: impl Iterator<Item = &'a Task> + Clone) -> Vec<StatusCount> {
     STATUS_ORDER
         .iter()
@@ -433,7 +410,7 @@ fn epic_entries(active: &HashMap<String, Task>, include_all: bool) -> Vec<EpicEn
         .values()
         .filter(|t| t.task_type.is_epic() && (include_all || task::is_active(t)))
         .collect();
-    epics.sort_by(|a, b| canonical(a, b));
+    epics.sort_by(|a, b| task::canonical_order(a, b));
     let ids: HashSet<&str> = epics.iter().map(|t| t.id.as_str()).collect();
 
     // Children of each shown epic, in sibling order; `None` holds the top.
@@ -612,7 +589,7 @@ fn layered_graph(
                 (None, Some(_)) => std::cmp::Ordering::Greater,
             };
             bary.then_with(|| a.1.cmp(&b.1))
-                .then_with(|| canonical(a.2, b.2))
+                .then_with(|| task::canonical_order(a.2, b.2))
         });
         *ids = keyed.iter().map(|(_, _, t)| t.id.clone()).collect();
         for (p, id) in ids.iter().enumerate() {
