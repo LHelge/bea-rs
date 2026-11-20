@@ -162,17 +162,32 @@ impl serde_saphyr::MessageFormatter for FileMessages {
                 "string scalar" => Cow::Borrowed("expected a single value, not a list or mapping"),
                 _ => fallback(),
             },
-            E::InvalidScalar { ty, .. } => match *ty {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
-                    Cow::Borrowed("expected a whole number of 0 or more")
+            E::InvalidScalar { ty, .. } => {
+                // The range is part of the message, so it is also true of a
+                // whole number too large (or too small) for the field.
+                let range = |min: i128, max: u128| {
+                    Cow::Owned(format!("expected a whole number from {min} to {max}"))
+                };
+                match *ty {
+                    "u8" => range(0, u8::MAX.into()),
+                    "u16" => range(0, u16::MAX.into()),
+                    "u32" => range(0, u32::MAX.into()),
+                    "u64" => range(0, u64::MAX.into()),
+                    "i8" => range(i8::MIN.into(), i8::MAX as u128),
+                    "i16" => range(i16::MIN.into(), i16::MAX as u128),
+                    "i32" => range(i32::MIN.into(), i32::MAX as u128),
+                    "i64" => range(i64::MIN.into(), i64::MAX as u128),
+                    "f32" | "f64" => Cow::Borrowed("expected a number"),
+                    "bool" => Cow::Borrowed("expected true or false"),
+                    _ => fallback(),
                 }
-                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
-                    Cow::Borrowed("expected a whole number")
-                }
-                "f32" | "f64" => Cow::Borrowed("expected a number"),
-                "bool" => Cow::Borrowed("expected true or false"),
-                _ => fallback(),
-            },
+            }
+            // A list or mapping given for a field with a fixed set of values
+            // (`status: [open]`, `priority: {P1: x}`).
+            E::ExternallyTaggedEnumExpectedScalarOrMapping { .. }
+            | E::UnexpectedValueForUnitEnumVariant { .. } => {
+                Cow::Borrowed("expected a single value, not a list or mapping")
+            }
             E::SerdeUnknownVariant {
                 variant, expected, ..
             } => Cow::Owned(format!(

@@ -1459,6 +1459,23 @@ updated: 2026-03-15T10:30:00Z
                 "assignee: [alice]",
                 "expected a single value, not a list or mapping at line 7, column 11",
             ),
+            // A list or mapping for a field with a fixed set of values.
+            (
+                "priority: [P1]",
+                "expected a single value, not a list or mapping at line 6, column 11",
+            ),
+            (
+                "status: [open]",
+                "expected a single value, not a list or mapping at line 6, column 9",
+            ),
+            (
+                "status: {open: x}",
+                "expected a single value, not a list or mapping at line 6, column 16",
+            ),
+            (
+                "type: {epic: x}",
+                "expected a single value, not a list or mapping at line 7, column 14",
+            ),
             // Unknown status, priority and type values.
             (
                 "status: started",
@@ -1476,11 +1493,15 @@ updated: 2026-03-15T10:30:00Z
             // A number field that is not a number.
             (
                 "attempts: lots",
-                "expected a whole number of 0 or more at line 7, column 11",
+                "expected a whole number from 0 to 4294967295 at line 7, column 11",
             ),
             (
                 "attempts: -1",
-                "expected a whole number of 0 or more at line 7, column 11",
+                "expected a whole number from 0 to 4294967295 at line 7, column 11",
+            ),
+            (
+                "attempts: 99999999999",
+                "expected a whole number from 0 to 4294967295 at line 7, column 11",
             ),
             // A bad or empty timestamp.
             (
