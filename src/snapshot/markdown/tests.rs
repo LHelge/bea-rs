@@ -776,3 +776,181 @@ fn the_default_bounds_respect_github_limits() {
     }
     const { assert!(DEFAULT_MAX_GRAPH_EDGES < 500) };
 }
+
+#[test]
+fn a_part_left_out_for_the_document_budget_shortens_the_document() {
+    let s = two_epics(5);
+    let bounds = MarkdownOptions {
+        max_graph_nodes: 6,
+        ..MarkdownOptions::default()
+    };
+    let full = render_with(&s, &bounds).len();
+    let mut seen = 0;
+    for budget in (full / 2..full).step_by(7) {
+        let options = MarkdownOptions {
+            max_document_chars: budget,
+            ..bounds
+        };
+        let md = render_with(&s, &options);
+        assert!(md.len() <= budget);
+        assert_well_formed(&md);
+        if section(&md, "Dependency graph").contains("no room left to draw them here") {
+            seen += 1;
+            assert!(md.contains("**Shortened.**"), "{md}");
+        }
+    }
+    assert!(seen > 0, "no budget left a part out");
+}
+
+#[test]
+fn the_graphs_own_text_bound_does_not_shorten_the_document() {
+    // As `the_text_budget_covers_every_diagram`: the parts left out are for
+    // `max_graph_chars`, which the intro and the notes already state.
+    let s = two_epics(5);
+    let one = mermaid_blocks(&render(&s))[0].len();
+    let options = MarkdownOptions {
+        max_graph_chars: one / 2,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(md.contains("no room left to draw them here"));
+    assert!(!md.contains("**Shortened.**"), "{md}");
+}
+
+/// An epic `e` with two nested epics of four chained tasks each, two tasks
+/// of its own depending on both chains, and a root task depending on one of
+/// those.
+fn nested_epics() -> Snapshot {
+    let mut tasks = vec![epic("e", 0), epic("e.a", 1), epic("e.b", 2)];
+    for nested in ["e.a", "e.b"] {
+        for i in 0..4u32 {
+            let dep = format!("{nested}.t{}", i.wrapping_sub(1));
+            let deps: Vec<&str> = if i == 0 { vec![] } else { vec![dep.as_str()] };
+            tasks.push(make(&format!("{nested}.t{i}"), Status::Open, 3 + i, &deps));
+        }
+    }
+    tasks.push(make("e.d1", Status::Open, 10, &["e.a.t3"]));
+    tasks.push(make("e.d2", Status::Open, 11, &["e.b.t3"]));
+    tasks.push(make("z", Status::Open, 12, &["e.d1"]));
+    snap(tasks)
+}
+
+#[test]
+fn an_epic_over_the_bounds_is_split_per_nested_epic() {
+    let s = nested_epics();
+    assert_eq!(s.graph.nodes.len(), 11);
+    let options = MarkdownOptions {
+        max_graph_nodes: 6,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    let graph = section(&md, "Dependency graph");
+    assert!(graph.contains("drawn per top-level epic"), "{graph}");
+    assert!(graph.contains("An epic still too large for one diagram is drawn per nested epic."));
+    // `e.a.t3 → e.d1`, `e.b.t3 → e.d2` and `e.d1 → z` cross parts.
+    assert!(graph.contains("3 dependencies between tasks of different parts are not drawn."));
+    let headings: Vec<&str> = graph.lines().filter(|l| l.starts_with("### ")).collect();
+    assert_eq!(
+        headings,
+        [
+            "### `e.a` Epic e.a",
+            "### `e.b` Epic e.b",
+            "### `e` Epic e, not in a nested epic",
+            "### Not in an epic",
+        ]
+    );
+    let blocks = mermaid_blocks(graph);
+    assert_eq!(blocks.len(), 4);
+    let nodes: Vec<usize> = blocks
+        .iter()
+        .map(|b| b.lines().filter(|l| l.contains(":::")).count())
+        .collect();
+    assert_eq!(nodes, [4, 4, 2, 1]);
+    assert!(!graph.contains("too large to draw here"));
+    assert!(!md.contains("**Shortened.**"));
+    assert_well_formed(&md);
+
+    // Within the bounds the nested epics stay in one part each, unsplit.
+    let options = MarkdownOptions {
+        max_graph_nodes: 10,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(!md.contains("drawn per nested epic"));
+    assert_eq!(mermaid_blocks(&md).len(), 2);
+}
+
+#[test]
+fn an_epic_without_nested_epics_stays_a_note() {
+    // The two epics of `two_epics` have no nested epics to split into.
+    let s = two_epics(5);
+    let options = MarkdownOptions {
+        max_graph_nodes: 4,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(!md.contains("drawn per nested epic"));
+    assert_eq!(
+        md.matches("_5 tasks and 4 dependencies: too large to draw here._")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn fair_share_gives_small_sections_all_they_want() {
+    assert_eq!(fair_share(&[], 100), 0);
+    assert_eq!(fair_share(&[10, 20], 100), 10);
+    assert_eq!(fair_share(&[500, 20], 100), 80);
+    assert_eq!(fair_share(&[500, 500], 100), 50);
+    assert_eq!(fair_share(&[10, 500, 500], 100), 10);
+    assert_eq!(fair_share(&[500, 10, 500], 100), 45);
+    assert_eq!(fair_share(&[500], 0), 0);
+    // Taken in turn, the shares never add up to more than what there is.
+    let wanted = [7, 300, 2, 90, 1000, 45];
+    for avail in [0, 1, 50, 100, 500, 2000] {
+        let mut left = avail;
+        for i in 0..wanted.len() {
+            let share = fair_share(&wanted[i..], left);
+            assert!(share <= left);
+            left -= share;
+        }
+    }
+}
+
+#[test]
+fn a_long_ready_table_cannot_crowd_out_the_board() {
+    let mut tasks: Vec<Task> = (0..200)
+        .map(|i| make(&format!("t{i:03}"), Status::Open, i % 60, &[]))
+        .collect();
+    let mut wip = make("w", Status::InProgress, 0, &[]);
+    wip.assignee = "alice".into();
+    tasks.push(wip);
+    let s = snap(tasks);
+    let options = MarkdownOptions {
+        max_document_chars: 9_000,
+        ..MarkdownOptions::default()
+    };
+    let md = render_with(&s, &options);
+    assert!(md.len() <= options.max_document_chars);
+    assert_well_formed(&md);
+    assert!(md.contains("**Shortened.**"));
+    let rows = |name: &str| {
+        section(&md, name)
+            .lines()
+            .filter(|l| l.starts_with("| `t"))
+            .count()
+    };
+    let (ready, board) = (rows("Ready"), rows("Board"));
+    // Both are cut, to about the same number of rows (their rows are about
+    // as long), where the ready table used to take all it wanted first.
+    assert!(ready < 200 && board < 200, "{ready} {board}");
+    assert!(board > 0);
+    assert!(
+        ready.abs_diff(board) <= ready / 10,
+        "{ready} ready, {board} on the board"
+    );
+    // A short section is not cut at all.
+    assert!(section(&md, "In progress").contains("| `w` |"));
+    assert!(section(&md, "Board").contains("in_progress (1)"));
+}
