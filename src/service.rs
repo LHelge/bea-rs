@@ -1338,8 +1338,17 @@ pub enum Finding {
         reason: String,
     },
     /// Two or more files, active or archived, carry the same ID. `files`
-    /// lists the one that keeps the ID first.
-    DuplicateId { id: String, files: Vec<PathBuf> },
+    /// lists the one that keeps the ID first, and `titles` the title in each
+    /// file, in the same order. `dependents` (tasks whose `depends_on` names
+    /// the ID) and `descendants` (tasks below the ID) cannot tell the copies
+    /// apart; a repair leaves them all with the first.
+    DuplicateId {
+        id: String,
+        files: Vec<PathBuf>,
+        titles: Vec<String>,
+        dependents: Vec<String>,
+        descendants: Vec<String>,
+    },
     /// A file whose name does not start with its task's ID, so lookups by ID
     /// cannot find it. `expected` is where the task belongs.
     FilenameMismatch {
@@ -1389,8 +1398,23 @@ impl std::fmt::Display for Finding {
             Finding::MalformedId { id, file, reason } => {
                 write!(f, "malformed ID {id} in {}: {reason}", file.display())
             }
-            Finding::DuplicateId { id, files } => {
-                write!(f, "duplicate ID {id} in {}", list(files))
+            Finding::DuplicateId {
+                id,
+                files,
+                titles,
+                dependents,
+                descendants,
+            } => {
+                let copies: Vec<String> = files
+                    .iter()
+                    .zip(titles)
+                    .map(|(p, t)| format!("{} ({t:?})", p.display()))
+                    .collect();
+                write!(f, "duplicate ID {id} in {}", copies.join(", "))?;
+                if let Some(attached) = describe_attached(dependents, descendants) {
+                    write!(f, "; {attached} (these cannot tell the copies apart)")?;
+                }
+                Ok(())
             }
             Finding::FilenameMismatch { id, file, expected } => write!(
                 f,
@@ -1414,7 +1438,24 @@ impl std::fmt::Display for Finding {
     }
 }
 
+/// "below it: a.b, a.c; depends on it: x", or `None` when both are empty.
+fn describe_attached(dependents: &[String], descendants: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if !descendants.is_empty() {
+        parts.push(format!("below it: {}", descendants.join(", ")));
+    }
+    if !dependents.is_empty() {
+        parts.push(format!("depends on it: {}", dependents.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
 /// A duplicate that [`repair_store`] gave a fresh ID.
+///
+/// References to the duplicated ID are not rewritten: nothing on disk says
+/// which copy they meant. `dependents` and `descendants` are the tasks that
+/// therefore stay attached to the copy that kept the ID (`kept_file`), and
+/// that the user should check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Renumbered {
     /// The duplicated ID, which the other file keeps.
@@ -1423,6 +1464,29 @@ pub struct Renumbered {
     pub to: String,
     /// The file the task now lives in, relative to the base.
     pub file: PathBuf,
+    /// This task's title.
+    pub title: String,
+    /// The file of the copy that kept the ID, relative to the base.
+    pub kept_file: PathBuf,
+    /// The title of the copy that kept the ID.
+    pub kept_title: String,
+    /// Tasks whose `depends_on` names the ID and still points at the kept copy.
+    pub dependents: Vec<String>,
+    /// Tasks below the ID, which stay below the kept copy.
+    pub descendants: Vec<String>,
+}
+
+impl Renumbered {
+    /// Whether any task stayed attached to the kept copy and needs checking.
+    pub fn has_attached(&self) -> bool {
+        !self.dependents.is_empty() || !self.descendants.is_empty()
+    }
+
+    /// A description of the attached tasks ("below it: …; depends on it: …"),
+    /// or `None` when there are none.
+    pub fn describe_attached(&self) -> Option<String> {
+        describe_attached(&self.dependents, &self.descendants)
+    }
 }
 
 /// A file [`repair_store`] renamed to match its task's ID.
@@ -1479,9 +1543,14 @@ pub fn check_store(base: &Path) -> Result<StoreReport> {
 /// first by path (the file a lookup by that ID already finds). Every other
 /// copy gets a fresh ID at the same place in the hierarchy (a child ID under
 /// the same parent, or a root ID), keeping its title, body and `updated`.
-/// References to the duplicated ID are ambiguous and stay with the task that
-/// keeps it, as do any tasks below that ID. Duplicates of a malformed ID are
-/// left alone.
+///
+/// References are deliberately **not** rewritten: a `depends_on` naming the
+/// duplicated ID, or a task below it, records only the ID, so nothing says
+/// which copy it meant, and guessing would silently move it. They all stay
+/// with the copy that keeps the ID, and each [`Renumbered`] lists them
+/// (`dependents`, `descendants`) beside both copies' files and titles, so the
+/// user can check them and move any that belong to the renumbered copy.
+/// Duplicates of a malformed ID are left alone.
 ///
 /// A file whose name does not match its ID is renamed to `{id}-{slug}.md`,
 /// unless another file is already there.
@@ -1538,17 +1607,14 @@ pub fn repair_store(base: &Path) -> Result<StoreReport> {
         plan.push((i, t.clone()));
     }
 
-    let mut renamed = Vec::new();
+    let mut written: HashMap<usize, PathBuf> = HashMap::new();
+    let mut renamed_files = Vec::new();
     let mut moved = Vec::new();
     for (i, t) in plan {
         let from = &files[i].path;
         let to = store::rewrite_task_file(from, &t)?;
         if renumbered.contains(&i) {
-            renamed.push(Renumbered {
-                from: scan.task(i).id.clone(),
-                to: t.id,
-                file: relative(base, &to),
-            });
+            renamed_files.push((i, t.id));
         } else {
             moved.push(MovedFile {
                 id: t.id,
@@ -1556,7 +1622,27 @@ pub fn repair_store(base: &Path) -> Result<StoreReport> {
                 to: relative(base, &to),
             });
         }
+        written.insert(i, to);
     }
+    let final_path = |i: usize| relative(base, written.get(&i).unwrap_or(&files[i].path));
+    let renamed = renamed_files
+        .into_iter()
+        .map(|(i, to)| {
+            let old = scan.task(i);
+            let kept = scan.by_id[old.id.as_str()][0];
+            let (dependents, descendants) = scan.attached(&old.id);
+            Renumbered {
+                from: old.id.clone(),
+                to,
+                file: final_path(i),
+                title: old.title.clone(),
+                kept_file: final_path(kept),
+                kept_title: scan.task(kept).title.clone(),
+                dependents,
+                descendants,
+            }
+        })
+        .collect();
 
     let mut report = check_store(base)?;
     report.renamed = renamed;
@@ -1624,6 +1710,27 @@ impl<'a> StoreScan<'a> {
             .expect("indexed files are parsed")
     }
 
+    /// The tasks that refer to `id` without saying which copy they mean:
+    /// those whose `depends_on` names it, and those below it. Both sorted,
+    /// `id` itself excluded.
+    fn attached(&self, id: &str) -> (Vec<String>, Vec<String>) {
+        let dependents: std::collections::BTreeSet<&str> = self
+            .parsed()
+            .filter(|(_, t)| t.id != id && t.depends_on.iter().any(|d| d == id))
+            .map(|(_, t)| t.id.as_str())
+            .collect();
+        let descendants = self
+            .by_id
+            .keys()
+            .filter(|k| task::is_descendant(k, id))
+            .map(|k| k.to_string())
+            .collect();
+        (
+            dependents.into_iter().map(String::from).collect(),
+            descendants,
+        )
+    }
+
     /// Every parsed file, by index.
     fn parsed(&self) -> impl Iterator<Item = (usize, &'a Task)> + '_ {
         self.files
@@ -1660,9 +1767,13 @@ impl<'a> StoreScan<'a> {
         }
         for (id, group) in &self.by_id {
             if group.len() > 1 {
+                let (dependents, descendants) = self.attached(id);
                 findings.push(Finding::DuplicateId {
                     id: id.to_string(),
                     files: group.iter().map(|&i| path(i)).collect(),
+                    titles: group.iter().map(|&i| self.task(i).title.clone()).collect(),
+                    dependents,
+                    descendants,
                 });
             }
         }
@@ -4381,6 +4492,9 @@ mod tests {
                     PathBuf::from(".bears/ccc-one.md"),
                     PathBuf::from(".bears/archive/ccc-two.md"),
                 ],
+                titles: vec!["Task ccc".into(), "Task ccc".into()],
+                dependents: vec![],
+                descendants: vec![],
             },
             "the active copy is listed first, as the one that keeps the ID"
         );
@@ -4449,9 +4563,10 @@ mod tests {
     async fn test_repair_store_renumbers_duplicates_and_keeps_references() {
         let tmp = doctor_store();
         let base = tmp.path();
-        let mut first = make_task("aaa", Status::Open);
+        let mut first = make_epic("aaa");
         first.title = "First".into();
-        let mut second = make_task("aaa", Status::InProgress);
+        let mut second = make_epic("aaa");
+        second.status = Status::InProgress;
         second.title = "Second".into();
         second.body = "second body".into();
         write_raw(base, "aaa-first.md", &first, false);
@@ -4459,18 +4574,37 @@ mod tests {
         let mut dependent = make_task("bbb", Status::Open);
         dependent.depends_on = vec!["aaa".into()];
         store::save(base, &dependent).unwrap();
+        store::save(base, &make_child("x1", "aaa", Status::Open)).unwrap();
+
+        // The check already names what cannot tell the copies apart.
+        let check = check_store(base).unwrap();
+        assert!(matches!(
+            &check.findings[0],
+            Finding::DuplicateId { titles, dependents, descendants, .. }
+                if titles == &["First", "Second"]
+                    && dependents == &["bbb"]
+                    && descendants == &["aaa.x1"]
+        ));
+        assert!(check.findings[0].to_string().contains("below it: aaa.x1"));
 
         let report = repair_store(base).unwrap();
-        assert!(report.is_healthy(), "{:?}", report.findings);
         assert!(report.moved.is_empty());
         assert_eq!(report.renamed.len(), 1);
         let r = &report.renamed[0];
         assert_eq!(r.from, "aaa");
         assert_eq!(task::id_depth(&r.to), 0, "a root duplicate stays a root");
         assert_eq!(r.file, PathBuf::from(format!(".bears/{}-second.md", r.to)));
+        assert_eq!(r.title, "Second");
+        assert_eq!(r.kept_file, PathBuf::from(".bears/aaa-first.md"));
+        assert_eq!(r.kept_title, "First");
+        assert_eq!(r.dependents, vec!["bbb"]);
+        assert_eq!(r.descendants, vec!["aaa.x1"]);
+        assert!(r.has_attached());
+        assert!(report.is_healthy(), "{:?}", report.findings);
 
         let tasks = store::load_all(base).await.unwrap();
-        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks.len(), 4);
+        assert!(tasks.contains_key("aaa.x1"), "children are not moved");
         assert_eq!(tasks["aaa"].title, "First", "the first file keeps the ID");
         let moved = &tasks[&r.to];
         assert_eq!(moved.title, "Second");
@@ -4478,6 +4612,71 @@ mod tests {
         assert_eq!(moved.updated, second.updated, "updated is kept");
         assert_eq!(tasks["bbb"].depends_on, vec!["aaa"], "references stay put");
         assert!(!store::tasks_dir(base).join("aaa-second.md").exists());
+    }
+
+    /// `rewrite_task_file` rewrites in place before renaming, so a repair
+    /// interrupted between the two leaves the renumbered task under its old
+    /// filename. The next repair only moves that file: no second new ID.
+    #[tokio::test]
+    async fn test_repair_store_finishes_an_interrupted_renumbering() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        let mut first = make_task("aaa", Status::Open);
+        first.title = "First".into();
+        write_raw(base, "aaa-first.md", &first, false);
+        // The duplicate already rewritten as `bcd`, not yet renamed.
+        let mut second = make_task("bcd", Status::Open);
+        second.title = "Second".into();
+        write_raw(base, "aaa-second.md", &second, false);
+
+        let report = repair_store(base).unwrap();
+        assert!(report.is_healthy(), "{:?}", report.findings);
+        assert!(report.renamed.is_empty(), "no new ID: {:?}", report.renamed);
+        assert_eq!(
+            report.moved,
+            vec![MovedFile {
+                id: "bcd".into(),
+                from: PathBuf::from(".bears/aaa-second.md"),
+                to: PathBuf::from(".bears/bcd-second.md"),
+            }]
+        );
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks["bcd"].title, "Second");
+    }
+
+    #[test]
+    fn test_rewrite_task_file_leaves_one_file() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        let mut t = make_task("aaa", Status::Open);
+        write_raw(base, "zzz-old.md", &t, false);
+        t.id = "bcd".into();
+        let old = store::tasks_dir(base).join("zzz-old.md");
+        let new = store::rewrite_task_file(&old, &t).unwrap();
+        assert_eq!(new, store::tasks_dir(base).join("bcd-task-aaa.md"));
+        let names: Vec<_> = std::fs::read_dir(store::tasks_dir(base))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("bcd-task-aaa.md")]);
+        // An occupied target is refused before anything is written.
+        write_raw(base, "zzz-other.md", &make_task("ccc", Status::Open), false);
+        let other = store::tasks_dir(base).join("zzz-other.md");
+        let mut clash = t.clone();
+        clash.body = "changed".into();
+        assert!(matches!(
+            store::rewrite_task_file(&other, &clash),
+            Err(Error::IdTaken(_))
+        ));
+        assert!(
+            task::parse_task(&std::fs::read_to_string(&other).unwrap())
+                .unwrap()
+                .id
+                == "ccc"
+        );
     }
 
     #[tokio::test]

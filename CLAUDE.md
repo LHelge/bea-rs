@@ -360,7 +360,8 @@ file, parse errors included, prints nothing), so it sees them.
   `Finding` is an enum serialized with a kebab-case `kind` tag, reported in this order: `legacy-store`
   (any `parent:` key: reported **alone**, nothing else is checked, `bea migrate` is the fix),
   `unreadable-file`, `malformed-id` (`validate_id`), `duplicate-id` (across active and archive; the
-  copy that keeps the ID listed first), `filename-mismatch` (the filename's ID differs from the
+  copy that keeps the ID listed first, with each copy's title, and the `dependents` / `descendants`
+  that refer to the ID), `filename-mismatch` (the filename's ID differs from the
   task's; a stale slug is not a finding), `dangling-dependency` (names no task, active or archived),
   `missing-parent`, `parent-not-epic`, `dependency-cycle`. Paths are relative to the base.
 - `service::repair_store(base)` fixes the two `Finding::is_fixable()` kinds, then checks again and
@@ -369,14 +370,21 @@ file, parse errors included, prints nothing), so it sees them.
   `find_task_path` already finds); every other copy gets a fresh ID at the same place in the
   hierarchy (child ID under the same parent, or a root ID), in its own directory, keeping title,
   body and `updated` (`store::rewrite_task_file`, path-addressed, since `rename_ids` cannot tell two
-  files with one ID apart). References are ambiguous and stay with the kept task, as do any tasks
-  below the ID; each renumbering is reported as `Renumbered { from, to, file }`. Duplicates of a
+  files with one ID apart). **References are deliberately not rewritten:** a `depends_on` naming
+  the ID, or a task below it, records only the ID, so nothing says which copy it meant, and a guess
+  would silently move it. They all stay with the kept copy, and each
+  `Renumbered { from, to, file, title, kept_file, kept_title, dependents, descendants }` lists
+  them so the user can check them and move any that belong to the renumbered copy. Duplicates of a
   malformed ID are left alone. **Filenames:** a misnamed file is renamed to `{id}-{slug}.md`
   (`MovedFile { id, from, to }`) unless a file is already there. A legacy store is not touched.
-  Everything else is report-only.
-- `bea doctor [--fix]` prints the findings (with `--fix`, first `  renamed <old> → <new> (<file>)`
-  and `  moved <from> → <to>` lines) and **exits 1 when problems are found** — after `--fix`, only
-  when problems remain — so it can gate CI. `--json` prints the report plus `ok`; with `--fix`,
+  Everything else is report-only. `rewrite_task_file` rewrites the content in place first and
+  renames second, so an interrupted repair leaves at worst one misnamed file (which the next run
+  just moves), never a second copy that would be renumbered into another task.
+- `bea doctor [--fix]` prints the findings (with `--fix`, first `  renamed <old> → <new> (<file>,
+  "<title>")` lines, each followed by the kept copy and the tasks left attached to it, and
+  `  moved <from> → <to>` lines) and **exits 1 when problems are found** — after `--fix`, only
+  when problems remain — so it can gate CI. A fix that left tasks attached to a kept copy still
+  exits 0 (the store is consistent) but ends by telling the user to review them. `--json` prints the report plus `ok`; with `--fix`,
   `renamed` (a list, since one old ID can have several copies) and `moved` are always present. It
   runs before `load_all`, so it works on a legacy store. The MCP `doctor` tool returns
   `{ ok, files, findings }` and has no fix parameter.

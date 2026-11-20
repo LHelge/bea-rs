@@ -1224,16 +1224,41 @@ pub fn cmd_doctor(base: &Path, fix: bool, json: bool) -> Result<()> {
     } else {
         for r in &report.renamed {
             println!(
-                "  renamed {} → {} ({})",
+                "  renamed {} → {} ({}, {:?})",
                 r.from,
                 color_id(&r.to),
-                r.file.display()
+                r.file.display(),
+                r.title
             );
+            println!(
+                "    {} stays with {} ({:?})",
+                r.from,
+                r.kept_file.display(),
+                r.kept_title
+            );
+            if let Some(attached) = r.describe_attached() {
+                println!(
+                    "    check these still belong to that copy, not to {}: {attached}",
+                    r.to
+                );
+                println!(
+                    "    (move a task with `bea update <id> --parent {}`, a dependency with `bea dep`)",
+                    r.to
+                );
+            }
         }
         for m in &report.moved {
             println!("  moved {} → {}", m.from.display(), m.to.display());
         }
-        if report.is_healthy() {
+        let to_check = report.renamed.iter().filter(|r| r.has_attached()).count();
+        if report.is_healthy() && to_check > 0 {
+            println!(
+                "Checked {} task file(s): no problems remain, but tasks referring to \
+                 {to_check} renumbered ID(s) were left with the copy that kept the ID; review \
+                 the tasks listed above.",
+                report.files
+            );
+        } else if report.is_healthy() {
             println!("Checked {} task file(s): no problems found.", report.files);
         } else {
             println!(
