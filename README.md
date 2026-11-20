@@ -478,6 +478,11 @@ cargo fmt
 
 All three of `fmt`, `clippy`, and `test` must pass cleanly before committing.
 
+CI also runs [`cargo audit`](https://crates.io/crates/cargo-audit) against `Cargo.lock`, on every
+push and pull request and weekly on a schedule. It fails on vulnerable, unmaintained, unsound or
+yanked crates; accepted advisories are listed, each with its reason, in `.cargo/audit.toml`. Run it
+locally with `cargo install --locked cargo-audit && cargo audit`.
+
 ---
 
 ## Project layout

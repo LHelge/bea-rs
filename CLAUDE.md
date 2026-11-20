@@ -40,6 +40,20 @@ cargo fmt && cargo clippy && cargo test
 
 All three must pass cleanly before considering a task done.
 
+### CI
+
+`.github/workflows/push.yml` runs on pushes and pull requests that touch Rust sources, `Cargo.toml`,
+`Cargo.lock`, `.cargo/audit.toml` or the CI workflows themselves, weekly on a schedule (Monday 06:17
+UTC), and on manual dispatch. It calls the reusable `quality-checks.yml`, which `release.yml` also
+runs before building a tag. That workflow has two jobs:
+
+- **Format, Lint, and Test** — `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
+- **Dependency advisories** — `cargo audit` (pinned cargo-audit, installed with
+  `taiki-e/install-action`) against `Cargo.lock`. `.cargo/audit.toml` sets `deny = ["warnings"]`, so
+  unmaintained, unsound and yanked crates fail as well as vulnerabilities. An advisory may only be
+  ignored there by its id, with a comment giving the reason; never add a blanket ignore. Run
+  `cargo audit` locally after changing dependencies.
+
 ## Commit style
 
 Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`. Common types: `feat`, `fix`, `ci`, `docs`, `chore`, `refactor`, `test`. Release notes are generated from commit messages, so keep them accurate and descriptive.
