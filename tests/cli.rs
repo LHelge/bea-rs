@@ -2622,3 +2622,164 @@ fn test_broken_pipe_exits_quietly() {
         "process should not exit with the panic status"
     );
 }
+
+// -- Legacy stores and `bea migrate` ------------------------------------------
+
+/// Write a task file in the pre-0.10 format, with a `parent:` key when
+/// `parent` is not empty, into `.bears/` or `.bears/archive/`.
+fn write_legacy_task(dir: &TempDir, id: &str, kind: &str, parent: &str, archived: bool) {
+    let mut path = dir.path().join(".bears");
+    if archived {
+        path = path.join("archive");
+    }
+    let parent_line = if parent.is_empty() {
+        String::new()
+    } else {
+        format!("parent: {parent}\n")
+    };
+    let content = format!(
+        "---\nid: {id}\ntitle: Task {id}\nstatus: open\npriority: P2\ntype: {kind}\n\
+         created: \"2026-01-01T00:00:00Z\"\nupdated: \"2026-01-01T00:00:00Z\"\n{parent_line}---\n\nBody of {id}.\n"
+    );
+    std::fs::write(path.join(format!("{id}-task-{id}.md")), content).unwrap();
+}
+
+fn legacy_cli_store(dir: &TempDir) {
+    bea(dir).arg("init").assert().success();
+    write_legacy_task(dir, "ep", "epic", "", false);
+    write_legacy_task(dir, "ch", "task", "ep", false);
+    write_legacy_task(dir, "ac", "task", "ep", true);
+}
+
+fn bears_snapshot(dir: &TempDir) -> Vec<(std::path::PathBuf, String)> {
+    let root = dir.path().join(".bears");
+    let mut files = Vec::new();
+    for d in [root.clone(), root.join("archive")] {
+        for entry in std::fs::read_dir(d).unwrap().flatten() {
+            if entry.path().is_file() {
+                files.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Every command that loads the store refuses a legacy one, before writing,
+/// and points at `bea migrate`.
+#[test]
+fn test_legacy_store_is_refused_with_migrate_hint() {
+    let tmp = TempDir::new().unwrap();
+    legacy_cli_store(&tmp);
+    let before = bears_snapshot(&tmp);
+
+    for args in [
+        vec!["list"],
+        vec!["show", "ch"],
+        vec!["done", "ch"],
+        vec!["update", "ch", "--title", "Changed"],
+        vec!["log"],
+        vec!["restore", "ac"],
+        vec!["archive"],
+    ] {
+        bea(&tmp)
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("predates hierarchical IDs"))
+            .stderr(predicate::str::contains("hint: run `bea migrate`"));
+    }
+    assert_eq!(bears_snapshot(&tmp), before, "a refused command wrote");
+}
+
+#[test]
+fn test_migrate_dry_run_then_migrate() {
+    let tmp = TempDir::new().unwrap();
+    legacy_cli_store(&tmp);
+    let before = bears_snapshot(&tmp);
+
+    let out = bea(&tmp).args(["migrate", "--dry-run"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("renamed ch → ep."), "{stdout}");
+    assert!(stdout.contains("renamed ac → ep."), "{stdout}");
+    assert!(stdout.contains("nothing was written"), "{stdout}");
+    assert_eq!(bears_snapshot(&tmp), before);
+
+    let out = bea(&tmp)
+        .args(["--json", "migrate", "--dry-run"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["legacy_files"], 2);
+    assert_eq!(bears_snapshot(&tmp), before);
+
+    let out = bea(&tmp).args(["--json", "migrate"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dry_run"], false);
+    assert_eq!(v["orphaned"], serde_json::json!([]));
+    let child = v["renamed"]["ch"].as_str().unwrap().to_string();
+    let archived = v["renamed"]["ac"].as_str().unwrap().to_string();
+    assert!(child.starts_with("ep."), "{child}");
+
+    // The store loads again, with the links kept in the IDs.
+    let out = bea(&tmp).args(["--json", "show", &child]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["parent"], "ep");
+    bea(&tmp)
+        .args(["show", &archived])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Body of ac."));
+    for (path, content) in bears_snapshot(&tmp) {
+        assert!(!content.contains("parent:"), "{}", path.display());
+    }
+
+    // Running it again does nothing and succeeds.
+    let after = bears_snapshot(&tmp);
+    bea(&tmp)
+        .arg("migrate")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing to migrate"));
+    let out = bea(&tmp).args(["--json", "migrate"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["renamed"], serde_json::json!({}));
+    assert_eq!(bears_snapshot(&tmp), after);
+}
+
+/// A `parent:` that cannot become part of an ID is dropped and reported; the
+/// task keeps its ID.
+#[test]
+fn test_migrate_reports_orphaned_parents() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    write_legacy_task(&tmp, "nt", "task", "", false);
+    write_legacy_task(&tmp, "mp", "task", "gone", false);
+    write_legacy_task(&tmp, "np", "task", "nt", false);
+
+    let out = bea(&tmp).arg("migrate").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("kept mp as is: its parent gone does not exist"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("its parent nt is not an epic"), "{stdout}");
+    bea(&tmp).args(["show", "mp"]).assert().success();
+    bea(&tmp).args(["show", "np"]).assert().success();
+}
+
+#[test]
+fn test_migrate_not_initialized() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .arg("migrate")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not initialized"));
+}
