@@ -464,7 +464,8 @@ log only with `include_all`.
 
 `snapshot::html::render(&Snapshot) -> String` turns a snapshot into one self-contained HTML page. It is
 pure and deterministic (no store, no clock; the time shown is `generated_at`) and builds without the
-`cli` feature.
+`cli` feature. Its title ("Bears snapshot") and time line (`Generated YYYY-MM-DD HH:MM UTC.`) are
+those of the Markdown header.
 
 - **Template.** `templates/snapshot/snapshot.html` (embedded as `snapshot::html::TEMPLATE`) holds the
   document and all CSS; `render` fills its `{{generated}}` and `{{sections}}` placeholders in one pass,
@@ -678,7 +679,7 @@ Keep the dependency tree small. Compilation should be fast.
   zero budget leaving the summary and the note, a sweep of budgets never exceeded nor breaking a row,
   `<details>` block or fence, a cut table ending on a whole row with its count, titles cut in tables)
 - Unit tests in `snapshot/html/tests.rs`: escaping, one-pass template filling, deterministic output,
-  generated time, light/dark CSS, no external references (no URL, `src`/`href`, script, link, event
+  generated time and title as in the Markdown header, light/dark CSS, no external references (no URL, `src`/`href`, script, link, event
   handler, only in-document `url(#…)`), hostile titles/tags/assignees/IDs escaped in text, attributes
   and the SVG, sections (archive only with `include_all`, empty archive), header counts, epic progress
   bar widths, queues, board columns and cards, graph nodes placed at their layer and position with

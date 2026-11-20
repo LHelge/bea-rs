@@ -18,8 +18,6 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use chrono::SecondsFormat;
-
 use super::{BoardColumn, EpicEntry, Snapshot, SnapshotGraph, SnapshotTask};
 use crate::task::{Status, TaskType};
 
@@ -53,10 +51,8 @@ macro_rules! w {
 /// Render `snapshot` as a complete HTML document.
 pub fn render(snapshot: &Snapshot) -> String {
     let generated = match snapshot.generated_at {
-        Some(at) => format!(
-            "Generated {}",
-            escape(&at.to_rfc3339_opts(SecondsFormat::Secs, true))
-        ),
+        // Worded and formatted as in the Markdown header.
+        Some(at) => format!("Generated {}.", at.format("%Y-%m-%d %H:%M UTC")),
         None => String::from("A point-in-time picture of the task store."),
     };
 
