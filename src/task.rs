@@ -389,8 +389,11 @@ pub const CHILD_SPACE_FILL_LIMIT: f64 = 0.25;
 /// Check that `id` is a well-formed task ID: one or more non-empty segments
 /// of lowercase ASCII letters and digits, separated by [`ID_SEPARATOR`].
 ///
-/// This accepts every ID earlier versions of bears generated or allowed
-/// (single-segment IDs), not only those drawn from the generator's charset.
+/// This accepts every generated ID, flat or dotted, and any hand-made ID of
+/// lowercase letters and digits, not only those drawn from the generator's
+/// charset. Earlier versions never validated IDs, so a hand-edited file may
+/// carry one this rejects (`Foo_1`); loaders must warn about such a task
+/// rather than silently drop it.
 pub fn validate_id(id: &str) -> Result<()> {
     let invalid = |reason: &str| Error::InvalidId {
         id: id.into(),
@@ -813,14 +816,21 @@ mod tests {
 
     #[test]
     fn test_child_segment_growth_keeps_existing_lengths() {
-        // Once grown, new children stay at the longer length while the
-        // shorter space stays past the limit; existing ones are untouched.
+        // Past the limit, children of both lengths coexist: the two-char
+        // siblings keep counting against the two-char space, so every new
+        // child keeps the longer segment instead of dropping back to two
+        // chars, and none of them collides with a sibling of either length.
         let children = all_two_char_children("a1b");
         let mut existing: HashSet<String> = children[..241].iter().cloned().collect();
-        let new = generate_child_id("a1b", &existing, &Config::default());
-        existing.insert(new.clone());
-        assert_eq!(child_segment_length("a1b", &existing, 2), 3);
-        assert!(children[..241].iter().all(|c| existing.contains(c)));
+        for _ in 0..100 {
+            let id = generate_child_id("a1b", &existing, &Config::default());
+            assert_eq!(leaf_segment(&id).len(), 3, "{id}");
+            assert!(existing.insert(id.clone()), "collided with {id}");
+        }
+        let lengths: HashSet<usize> = direct_children("a1b", &existing)
+            .map(|id| leaf_segment(id).len())
+            .collect();
+        assert_eq!(lengths, [2, 3].into(), "both lengths remain");
     }
 
     #[test]
