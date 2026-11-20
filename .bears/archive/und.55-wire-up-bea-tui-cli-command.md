@@ -1,0 +1,19 @@
+---
+id: und.55
+title: Wire up bea tui CLI command
+status: done
+priority: P1
+created: "2026-03-16T21:49:49.076650196Z"
+updated: "2026-03-17T09:44:18.907841Z"
+tags:
+  - feature
+  - tui
+depends_on:
+  - und.fh
+---
+
+Add the `bea tui` CLI subcommand that launches the TUI.
+
+- Add `Tui` variant to the CLI command enum in cli.rs
+- Call the TUI entry point from the handler
+- Ensure it works with or without a `.bears/` directory (show init prompt if missing)

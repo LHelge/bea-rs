@@ -1,0 +1,19 @@
+---
+id: hza.b6
+title: "CLI display: style epics in list/show output"
+status: done
+priority: P2
+created: "2026-03-16T21:40:22.223452312Z"
+updated: "2026-03-16T23:10:48.039360697Z"
+tags:
+  - feature
+  - epic
+depends_on:
+  - hza.e8
+  - hza.sa
+---
+
+Style epics distinctly in CLI list/show output:
+- Prefix title with "Epic: " in bright/bold color
+- Show progress `[done/total]` next to epic entries in any list that includes them
+- Keep the styling minimal and readable
