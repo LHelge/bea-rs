@@ -1,11 +1,11 @@
 ---
-id: "8ph"
+id: 8ph
 title: Hierarchical IDs (0.10.0, breaking)
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-20T12:52:25.707376031Z"
-updated: "2026-11-20T12:52:25.707376031Z"
+updated: "2026-11-20T20:25:06.618960540Z"
 tags:
   - ids
   - breaking
