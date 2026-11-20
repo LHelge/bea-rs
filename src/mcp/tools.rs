@@ -591,7 +591,9 @@ impl ServerHandler for BeaMcp {
                 `renamed` map of old ID to new ID — use the new IDs and do not reuse old ones. \
                 Completed or cancelled tasks can be archived with archive_task to keep the active \
                 list clean. Use list_archived to browse the archive and restore_task to bring a \
-                task back to active."
+                task back to active. If every tool fails because the store predates \
+                hierarchical IDs, the store must be converted once by running `bea migrate` in a \
+                shell (`bea migrate --dry-run` previews it)."
                     .to_string(),
             )
     }

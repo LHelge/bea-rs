@@ -2,7 +2,7 @@
 
 Use these commands when the Bears MCP tools (`bears/*`) are not available. Always pass `--json` for structured output.
 
-Task IDs are hierarchical: a task created with `--parent <epic-id>` gets an ID under the epic's (`a1b` → `a1b.c2`). Commands that move or detach tasks report the new IDs in a `renamed` map of old ID → new ID; use the new IDs afterwards.
+Task IDs are hierarchical: a task created with `--parent <epic-id>` gets an ID under the epic's (`a1b` → `a1b.c2`). Commands that move or detach tasks report the new IDs in a `renamed` map of old ID → new ID; use the new IDs afterwards. If bears refuses to load the store because it predates hierarchical IDs, run `bea migrate` once (`bea migrate --dry-run` previews it).
 
 ## Task Creation
 

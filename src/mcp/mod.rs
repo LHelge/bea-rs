@@ -33,8 +33,30 @@ fn ok_json(value: serde_json::Value) -> Result<CallToolResult, Error> {
 /// never reach the tool body — they are rejected at the schema/deserialize
 /// layer because the parameter structs use the typed enums directly; rmcp
 /// surfaces those as tool-level errors too.
+///
+/// Errors an agent cannot recover from with another tool call get a
+/// remediation appended here, since the library's messages carry none.
 fn tool_ok(r: Result<CallToolResult, Error>) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(r.unwrap_or_else(|e| CallToolResult::error(vec![ContentBlock::text(e.to_string())])))
+    Ok(r.unwrap_or_else(|e| {
+        let mut text = e.to_string();
+        if let Some(hint) = hint_for(&e) {
+            text.push_str(". ");
+            text.push_str(hint);
+        }
+        CallToolResult::error(vec![ContentBlock::text(text)])
+    }))
+}
+
+/// MCP-specific remediation for an error, appended to the tool error text.
+fn hint_for(e: &Error) -> Option<&'static str> {
+    match e {
+        Error::LegacyStore { .. } => Some(
+            "No bears tool works until the store is converted: the user (or you, through a \
+             shell) must run `bea migrate` once in the project root; `bea migrate --dry-run` \
+             previews which tasks get renamed",
+        ),
+        _ => None,
+    }
 }
 
 pub async fn run(base: &Path) -> bears::error::Result<()> {
