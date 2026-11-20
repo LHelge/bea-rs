@@ -625,7 +625,8 @@ pub fn cmd_update(
     parent: Option<String>,
     json: bool,
 ) -> Result<()> {
-    // Map CLI parent arg: None = unchanged, "" = clear, "id" = set
+    // Map CLI parent arg: None = unchanged, "" = root, "id" = under that epic.
+    // The service refuses any value other than the current parent.
     let parent_update: Option<Option<String>> =
         parent.map(|p| if p.is_empty() { None } else { Some(p) });
     let t = service::update_task(
