@@ -83,8 +83,9 @@ pub struct UpdateTaskParams {
     pub assignee: Option<String>,
     /// New body (markdown)
     pub body: Option<String>,
-    /// Parent epic ID (empty string "" for none). Must match the current
-    /// parent: changing a task's parent is not supported yet
+    /// Move the task under this epic ("" for the top level). The task and
+    /// everything below it get new IDs, references to them are rewritten, and
+    /// the result carries a `renamed` map of old ID to new ID
     pub parent: Option<String>,
 }
 

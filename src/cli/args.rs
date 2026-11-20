@@ -181,8 +181,8 @@ pub enum Command {
         #[arg(long)]
         title: Option<String>,
 
-        /// Parent epic ID (empty string "" for none). Must match the current
-        /// parent: changing a task's parent is not supported yet
+        /// Move the task under this epic ("" for the top level). The task and
+        /// everything below it get new IDs, and references to them are rewritten
         #[arg(long)]
         parent: Option<String>,
     },

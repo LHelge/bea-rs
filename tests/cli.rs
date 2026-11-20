@@ -915,33 +915,79 @@ fn test_create_child_gets_hierarchical_id() {
         .stdout(predicate::str::contains("Parent:"));
 }
 
-/// Changing a task's parent is refused until reparenting is implemented.
+/// `update --parent` moves a task: it and its subtree are renamed, references
+/// to them are rewritten (in the archive too), and the renames are reported.
 #[test]
-fn test_update_parent_change_is_refused() {
+fn test_update_parent_moves_and_renames() {
     let tmp = TempDir::new().unwrap();
     bea(&tmp).arg("init").assert().success();
 
     let epic_id = create_epic(&tmp, "My epic");
+    let other_epic = create_epic(&tmp, "Other epic");
     let child = create_child_task(&tmp, "Child", &epic_id);
     let root = create_task(&tmp, "Root");
-
-    for (id, parent) in [(&child, ""), (&root, epic_id.as_str())] {
-        bea(&tmp)
-            .args(["update", id, "--parent", parent, "--title", "Renamed"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("not supported"));
-    }
-    // The current parent is accepted.
+    // An archived task that depends on the child.
+    let archived = create_task(&tmp, "Archived user");
     bea(&tmp)
-        .args(["update", &child, "--parent", &epic_id, "--priority", "P0"])
+        .args(["dep", "add", &archived, &child])
         .assert()
         .success();
+    bea(&tmp).args(["done", &archived]).assert().success();
+    bea(&tmp).args(["archive", &archived]).assert().success();
+
+    // --json reports the task under its new ID and the rename map.
+    let out = bea(&tmp)
+        .args(["--json", "update", &child, "--parent", &other_epic])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let moved = v["id"].as_str().unwrap().to_string();
+    assert!(moved.starts_with(&format!("{other_epic}.")), "{moved}");
+    assert_eq!(v["renamed"][&child], moved.as_str());
+    bea(&tmp).args(["show", &child]).assert().failure();
+    let archive_dir = tmp.path().join(".bears").join("archive");
+    let archived_file = std::fs::read_dir(&archive_dir)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with(&archived))
+        .unwrap();
+    let content = std::fs::read_to_string(archived_file.path()).unwrap();
+    assert!(content.contains(&moved), "{content}");
+
+    // Human output names the old and new IDs.
+    let out = bea(&tmp)
+        .args(["update", &root, "--parent", &epic_id, "--title", "Renamed"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains(&format!("renamed {root} → {epic_id}.")),
+        "{stdout}"
+    );
+
+    // Detaching gives a fresh root ID; the current parent is a no-op.
+    let out = bea(&tmp)
+        .args(["--json", "update", &moved, "--parent", ""])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!v["id"].as_str().unwrap().contains('.'), "{v}");
+    let out = bea(&tmp)
+        .args(["--json", "update", &epic_id, "--parent", ""])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["id"], epic_id.as_str());
+    assert!(v.get("renamed").is_none(), "{v}");
+
+    // A task cannot move under itself.
     bea(&tmp)
-        .args(["show", &root])
+        .args(["update", &epic_id, "--parent", &epic_id])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Renamed").not());
+        .failure()
+        .stderr(predicate::str::contains("lies below it"));
 }
 
 #[test]

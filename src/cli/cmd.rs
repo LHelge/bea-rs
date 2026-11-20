@@ -626,10 +626,10 @@ pub fn cmd_update(
     json: bool,
 ) -> Result<()> {
     // Map CLI parent arg: None = unchanged, "" = root, "id" = under that epic.
-    // The service refuses any value other than the current parent.
+    // A new parent moves the task, renaming it and everything below it.
     let parent_update: Option<Option<String>> =
         parent.map(|p| if p.is_empty() { None } else { Some(p) });
-    let t = service::update_task(
+    let service::UpdatedTask { task: t, renamed } = service::update_task(
         base,
         tasks,
         id,
@@ -643,9 +643,19 @@ pub fn cmd_update(
     )?;
 
     if json {
-        output(&t.summary(None))?;
+        // The task summary, plus the old → new ID map when the task moved.
+        let mut value = serde_json::to_value(t.summary(None))?;
+        if !renamed.is_empty()
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.insert("renamed".into(), serde_json::to_value(&renamed)?);
+        }
+        output(&value)?;
     } else {
         println!("Updated task {} — {}", t.id, t.title);
+        for (old, new) in &renamed {
+            println!("  renamed {} → {}", old, color_id(new));
+        }
     }
     Ok(())
 }
