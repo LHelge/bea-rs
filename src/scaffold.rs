@@ -419,6 +419,41 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Every scaffolded template tells agents that IDs are hierarchical and that
+    /// moves report a `renamed` map, and none still describes a `parent:`
+    /// frontmatter field or CLI spellings that do not exist.
+    #[test]
+    fn test_templates_describe_hierarchical_ids() {
+        let templates = [
+            ("claude/CLAUDE.md", CLAUDE_MD),
+            ("claude SKILL.md", CLAUDE_SKILL_MD),
+            ("claude cli-fallback.md", CLAUDE_SKILL_CLI_FALLBACK),
+            ("claude planner.md", CLAUDE_AGENT_PLANNER),
+            ("copilot-instructions.md", COPILOT_MD),
+            ("copilot SKILL.md", COPILOT_SKILL_MD),
+            ("copilot cli-fallback.md", COPILOT_SKILL_CLI_FALLBACK),
+            ("copilot planner.agent.md", COPILOT_AGENT_PLANNER),
+            ("codex/AGENTS.md", CODEX_MD),
+        ];
+        for (name, text) in templates {
+            assert!(text.contains("a1b.c2"), "{name} must show a dotted ID");
+            assert!(
+                text.contains("renamed"),
+                "{name} must mention the renamed map"
+            );
+            assert!(!text.contains("parent:"), "{name} mentions a parent: key");
+            assert!(
+                !text.contains("`parent`, etc."),
+                "{name} lists parent as a field"
+            );
+            assert!(!text.contains("--type epic"), "{name}: the flag is --epic");
+            assert!(
+                !text.contains("dep rm "),
+                "{name}: the command is dep remove"
+            );
+        }
+    }
+
     /// Merging preserves other servers already present in the file.
     #[test]
     fn test_merge_mcp_json_preserves_other_servers() {

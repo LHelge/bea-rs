@@ -32,6 +32,16 @@ If MCP tools are not loaded or fail, **fall back to the `bea` CLI** with `--json
 | List epics | `list_epics()` | `bea epics --json` |
 | Get task | `get_task(id)` | `bea show <id> --json` |
 | Search tasks | `search_tasks(query)` | `bea search "query" --json` |
+| Move a task | `update_task(id, parent)` | `bea update <id> --parent <epic-id> --json` |
+
+### Task IDs
+
+IDs are hierarchical: a task created under an epic gets the epic's ID plus a segment (epic `a1b`, child
+`a1b.c2`, grandchild `a1b.c2.d7`), so the ID itself names the parent. Moving a task to another epic
+(`update_task(id, parent=...)`, or `parent=""` for the top level) gives it and everything below it new
+IDs and rewrites every `depends_on` that pointed at them; deleting an epic gives its children new
+top-level IDs. Those calls return a `renamed` map of old ID → new ID — use the new IDs from then on and
+never reuse an ID you noted before the move.
 
 ## Planning Procedure
 
@@ -64,20 +74,22 @@ create_task(
   priority="P1",
   body="## Scope\n\nWhat this epic covers.\n\n## Acceptance Criteria\n\n- [ ] Criterion 1\n- [ ] Criterion 2"
 )
+  → returns id "a1b"
 ```
 
 ### 4. Create sub-tasks with dependencies
 
-Create tasks in dependency order. Link each to the epic via `parent` and to predecessor tasks via `depends_on`:
+Create tasks in dependency order. Pass the epic as `parent` (the new ID is created under it) and link predecessor tasks via `depends_on`:
 
 ```
-create_task(title="Step 1: Data model", priority="P1", parent="<epic-id>", tags=["core"])
-  → returns id "abc"
+create_task(title="Step 1: Data model", priority="P1", parent="a1b", tags=["core"])
+  → returns id "a1b.c2"
 
-create_task(title="Step 2: Service logic", priority="P1", parent="<epic-id>", depends_on=["abc"])
-  → returns id "def"
+create_task(title="Step 2: Service logic", priority="P1", parent="a1b", depends_on=["a1b.c2"])
+  → returns id "a1b.k7"
 
-create_task(title="Step 3: CLI command", priority="P2", parent="<epic-id>", depends_on=["def"])
+create_task(title="Step 3: CLI command", priority="P2", parent="a1b", depends_on=["a1b.k7"])
+  → returns id "a1b.x4"
 ```
 
 ### 5. Enrich task bodies
@@ -110,7 +122,7 @@ One-paragraph description of what this task accomplishes and why.
 
 After creating a task, update its body with detailed content using `update_task(id, body=...)` or by editing the `.bears/*.md` file directly.
 
-> **Direct file editing**: Task files are plain Markdown with YAML frontmatter at `.bears/{id}-{slug}.md`. You can read and edit them with normal file tools — this is often easier than passing long body text through MCP or CLI arguments. Use file editing to add multi-line descriptions, acceptance criteria, and implementation notes. The frontmatter fields (`status`, `priority`, `tags`, `depends_on`, `parent`, etc.) can also be edited directly.
+> **Direct file editing**: Task files are plain Markdown with YAML frontmatter at `.bears/{id}-{slug}.md`. You can read and edit them with normal file tools — this is often easier than passing long body text through MCP or CLI arguments. Use file editing to add multi-line descriptions, acceptance criteria, and implementation notes. The frontmatter fields (`status`, `priority`, `tags`, `depends_on`, etc.) can also be edited directly. There is no `parent` field: the parent is part of the ID and the filename, so never edit `id` or rename a file by hand — move a task with `update_task(id, parent=...)`, which renames it and its subtree and rewrites the references.
 
 ### 6. Verify and present the plan
 
@@ -123,9 +135,9 @@ Epic: <title> (<id>)
 
 | # | Task | ID | Priority | Depends On |
 |---|------|----|----------|------------|
-| 1 | Data model changes | abc | P1 | — |
-| 2 | Service logic | def | P1 | abc |
-| 3 | CLI command | ghi | P2 | def |
+| 1 | Data model changes | a1b.c2 | P1 | — |
+| 2 | Service logic | a1b.k7 | P1 | a1b.c2 |
+| 3 | CLI command | a1b.x4 | P2 | a1b.k7 |
 ```
 
 ## Priority Guidelines
@@ -144,4 +156,5 @@ Epic: <title> (<id>)
 - **Dependencies encode ordering**, not just tracking — use them to ensure correct execution order
 - **Epics auto-close** when all children complete — no need to manually complete them
 - **Check for cycles** — Bears rejects dependency edges that would create circular dependencies
+- **IDs follow the epic** — moving a task or deleting its epic renames it; take the new IDs from the `renamed` map in the result
 - **Edit files directly** — `.bears/*.md` files are plain Markdown; for long bodies or bulk edits, reading and editing the files is faster than repeated MCP/CLI calls
