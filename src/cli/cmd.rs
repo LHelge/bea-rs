@@ -1197,3 +1197,74 @@ pub fn cmd_edit(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool
     }
     Ok(())
 }
+
+/// `bea doctor [--fix]` — check the store for inconsistencies, and with
+/// `--fix` repair duplicate IDs and misnamed files first.
+///
+/// Prints the report and exits with status 1 when problems are found (after
+/// `--fix`, when problems remain), so it can gate CI.
+pub fn cmd_doctor(base: &Path, fix: bool, json: bool) -> Result<()> {
+    let report = if fix {
+        service::repair_store(base)?
+    } else {
+        service::check_store(base)?
+    };
+
+    if json {
+        let mut value = serde_json::to_value(&report)?;
+        value["ok"] = report.is_healthy().into();
+        if fix {
+            for key in ["renamed", "moved"] {
+                if value.get(key).is_none() {
+                    value[key] = serde_json::json!([]);
+                }
+            }
+        }
+        output(&value)?;
+    } else {
+        for r in &report.renamed {
+            println!(
+                "  renamed {} → {} ({})",
+                r.from,
+                color_id(&r.to),
+                r.file.display()
+            );
+        }
+        for m in &report.moved {
+            println!("  moved {} → {}", m.from.display(), m.to.display());
+        }
+        if report.is_healthy() {
+            println!("Checked {} task file(s): no problems found.", report.files);
+        } else {
+            println!(
+                "Found {} problem(s) in {} task file(s):",
+                report.findings.len(),
+                report.files
+            );
+            for f in &report.findings {
+                println!("  {f}");
+            }
+            if report
+                .findings
+                .iter()
+                .any(|f| matches!(f, service::Finding::LegacyStore { .. }))
+            {
+                eprintln!(
+                    "hint: run `bea migrate` to give child tasks hierarchical IDs, then `bea doctor` again"
+                );
+            } else {
+                let fixable = report.findings.iter().filter(|f| f.is_fixable()).count();
+                if !fix && fixable > 0 {
+                    eprintln!("hint: `bea doctor --fix` repairs {fixable} of them");
+                }
+            }
+        }
+    }
+
+    if !report.is_healthy() {
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        std::process::exit(1);
+    }
+    Ok(())
+}

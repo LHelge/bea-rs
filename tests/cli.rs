@@ -2784,6 +2784,173 @@ fn test_broken_pipe_exits_quietly() {
     );
 }
 
+// -- `bea doctor` --------------------------------------------------------------
+
+/// Create a task and return its ID and file path.
+fn doctor_task(dir: &TempDir, title: &str) -> (String, std::path::PathBuf) {
+    let out = bea(dir).args(["--json", "create", title]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+    let path = std::fs::read_dir(dir.path().join(".bears"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{id}-"))
+        })
+        .unwrap();
+    (id, path)
+}
+
+fn doctor_json(dir: &TempDir, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let out = bea(dir).arg("--json").args(args).output().unwrap();
+    (
+        out.status.code(),
+        serde_json::from_slice(&out.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn test_doctor_healthy_store_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    doctor_task(&tmp, "One");
+    bea(&tmp)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Checked 1 task file(s): no problems found.",
+        ));
+
+    let (code, v) = doctor_json(&tmp, &["doctor"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["files"], 1);
+    assert_eq!(v["findings"], serde_json::json!([]));
+}
+
+/// A duplicate ID (as a git merge of two branches leaves it) fails the
+/// check; `--fix` renumbers the copy, keeps the references on the original,
+/// and the store passes afterwards.
+#[test]
+fn test_doctor_fix_renumbers_a_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let (id, path) = doctor_task(&tmp, "Original");
+    let (dependent, _) = doctor_task(&tmp, "Dependent");
+    bea(&tmp)
+        .args(["dep", "add", &dependent, &id])
+        .assert()
+        .success();
+    let copy = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("title: Original", "title: Copy");
+    // Both files are named after the ID, so the first by path keeps it:
+    // `-original` sorts before `-the-copy`.
+    let copy_path = tmp.path().join(format!(".bears/{id}-the-copy.md"));
+    std::fs::write(&copy_path, copy).unwrap();
+
+    bea(&tmp)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(format!("duplicate ID {id}")))
+        .stderr(predicate::str::contains("bea doctor --fix"));
+    let (code, v) = doctor_json(&tmp, &["doctor"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["findings"][0]["kind"], "duplicate-id");
+    assert_eq!(v["findings"][0]["id"], id.as_str());
+
+    let (code, v) = doctor_json(&tmp, &["doctor", "--fix"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["moved"], serde_json::json!([]));
+    let renamed = v["renamed"].as_array().unwrap();
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0]["from"], id.as_str());
+    let new_id = renamed[0]["to"].as_str().unwrap();
+    assert!(!copy_path.exists());
+
+    let (_, shown) = doctor_json(&tmp, &["show", new_id]);
+    assert_eq!(shown["title"], "Copy");
+    let (_, shown) = doctor_json(&tmp, &["show", &dependent]);
+    assert_eq!(shown["depends_on"], serde_json::json!([id]));
+    bea(&tmp).arg("doctor").assert().success();
+}
+
+#[test]
+fn test_doctor_fix_renames_a_misnamed_file_and_prints_it() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let (id, path) = doctor_task(&tmp, "Misnamed");
+    let wrong = tmp.path().join(".bears/zzz-wrong.md");
+    std::fs::rename(&path, &wrong).unwrap();
+
+    bea(&tmp)
+        .args(["doctor", "--fix"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "moved .bears/zzz-wrong.md → .bears/{id}-misnamed.md"
+        )))
+        .stdout(predicate::str::contains("no problems found"));
+    assert!(path.exists());
+}
+
+/// Problems `--fix` does not repair keep the exit status non-zero.
+#[test]
+fn test_doctor_fix_fails_while_problems_remain() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let (id, path) = doctor_task(&tmp, "Dangling");
+    let content = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("priority: P2\n", "priority: P2\ndepends_on:\n  - gone\n");
+    std::fs::write(&path, content).unwrap();
+
+    bea(&tmp)
+        .args(["doctor", "--fix"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "{id} depends on gone, which does not exist"
+        )));
+}
+
+#[test]
+fn test_doctor_reports_a_legacy_store_with_migrate_hint() {
+    let tmp = TempDir::new().unwrap();
+    legacy_cli_store(&tmp);
+    let before = bears_snapshot(&tmp);
+    bea(&tmp)
+        .args(["doctor", "--fix"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("legacy parent: key"))
+        .stderr(predicate::str::contains("bea migrate"));
+    assert_eq!(bears_snapshot(&tmp), before, "doctor must not touch it");
+
+    let (code, v) = doctor_json(&tmp, &["doctor"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(v["findings"][0]["kind"], "legacy-store");
+    assert_eq!(v["findings"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn test_doctor_not_initialized() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not initialized"));
+}
+
 // -- Legacy stores and `bea migrate` ------------------------------------------
 
 /// Write a task file in the pre-0.10 format, with a `parent:` key when
