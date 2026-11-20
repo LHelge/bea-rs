@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::Serialize;
@@ -1314,6 +1314,420 @@ pub fn plan_epic<'a>(tasks: &'a HashMap<String, Task>, parent_id: &str) -> Resul
         tasks: topo.sorted,
         cyclic: topo.cyclic,
     })
+}
+
+// ── Store check and repair (`bea doctor`) ──────────────────────────
+
+/// One inconsistency [`check_store`] found. Paths are relative to the base
+/// directory (`.bears/…`, `.bears/archive/…`).
+///
+/// Serialized with a `kind` tag in kebab case (`"kind": "duplicate-id"`) and
+/// the variant's fields alongside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Finding {
+    /// Task files still carry a legacy `parent:` key. Nothing else is
+    /// checked until the store is migrated.
+    LegacyStore { files: Vec<PathBuf> },
+    /// A task file that cannot be read or parsed; every loader skips it.
+    UnreadableFile { file: PathBuf, reason: String },
+    /// A task ID that [`task::validate_id`] rejects.
+    MalformedId {
+        id: String,
+        file: PathBuf,
+        reason: String,
+    },
+    /// Two or more files, active or archived, carry the same ID. `files`
+    /// lists the one that keeps the ID first.
+    DuplicateId { id: String, files: Vec<PathBuf> },
+    /// A file whose name does not start with its task's ID, so lookups by ID
+    /// cannot find it. `expected` is where the task belongs.
+    FilenameMismatch {
+        id: String,
+        file: PathBuf,
+        expected: PathBuf,
+    },
+    /// A `depends_on` entry naming no task, active or archived.
+    DanglingDependency { id: String, depends_on: String },
+    /// A task whose ID puts it under a parent that does not exist.
+    MissingParent { id: String, parent: String },
+    /// A task whose ID puts it under a task that is not an epic.
+    ParentNotEpic { id: String, parent: String },
+    /// Tasks that depend on each other in a cycle, sorted by ID.
+    DependencyCycle { ids: Vec<String> },
+}
+
+impl Finding {
+    /// Whether [`repair_store`] repairs this kind of finding.
+    pub fn is_fixable(&self) -> bool {
+        matches!(
+            self,
+            Finding::DuplicateId { .. } | Finding::FilenameMismatch { .. }
+        )
+    }
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Finding::LegacyStore { files } => write!(
+                f,
+                "{} task file(s) carry a legacy parent: key: {}",
+                files.len(),
+                list(files)
+            ),
+            Finding::UnreadableFile { file, reason } => {
+                write!(f, "cannot read {}: {reason}", file.display())
+            }
+            Finding::MalformedId { id, file, reason } => {
+                write!(f, "malformed ID {id} in {}: {reason}", file.display())
+            }
+            Finding::DuplicateId { id, files } => {
+                write!(f, "duplicate ID {id} in {}", list(files))
+            }
+            Finding::FilenameMismatch { id, file, expected } => write!(
+                f,
+                "{} holds task {id} but should be {}",
+                file.display(),
+                expected.display()
+            ),
+            Finding::DanglingDependency { id, depends_on } => {
+                write!(f, "{id} depends on {depends_on}, which does not exist")
+            }
+            Finding::MissingParent { id, parent } => {
+                write!(f, "{id} is under {parent}, which does not exist")
+            }
+            Finding::ParentNotEpic { id, parent } => {
+                write!(f, "{id} is under {parent}, which is not an epic")
+            }
+            Finding::DependencyCycle { ids } => {
+                write!(f, "dependency cycle: {}", ids.join(" ↔ "))
+            }
+        }
+    }
+}
+
+/// A duplicate that [`repair_store`] gave a fresh ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Renumbered {
+    /// The duplicated ID, which the other file keeps.
+    pub from: String,
+    /// The new ID of this task.
+    pub to: String,
+    /// The file the task now lives in, relative to the base.
+    pub file: PathBuf,
+}
+
+/// A file [`repair_store`] renamed to match its task's ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MovedFile {
+    pub id: String,
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// What [`check_store`] or [`repair_store`] found and did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StoreReport {
+    /// How many task files, active and archived, were checked.
+    pub files: usize,
+    /// The problems in the store; after a repair, those that remain.
+    pub findings: Vec<Finding>,
+    /// Duplicates given a fresh ID by a repair.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renamed: Vec<Renumbered>,
+    /// Files renamed to match their task's ID by a repair.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<MovedFile>,
+}
+
+impl StoreReport {
+    /// Whether no problems were found (or remain, after a repair).
+    pub fn is_healthy(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// Check the store, active and archive, for inconsistencies the loaders do
+/// not catch or silently paper over. Read-only.
+///
+/// Reports, in this order: a legacy store (and nothing else, since its IDs
+/// are about to change), files that cannot be parsed, malformed IDs,
+/// duplicate IDs, files whose name does not match their ID, dangling
+/// `depends_on` entries, tasks whose parent is missing or not an epic, and
+/// dependency cycles. Each kind is sorted by ID or path.
+pub fn check_store(base: &Path) -> Result<StoreReport> {
+    let files = store::scan_task_files(base)?;
+    Ok(StoreReport {
+        files: files.len(),
+        findings: StoreScan::new(&files).findings(base),
+        ..StoreReport::default()
+    })
+}
+
+/// Repair what can be repaired safely, then check the store again.
+///
+/// Of every set of files sharing an ID, one keeps it: the active file before
+/// an archived one, then the file whose name starts with the ID, then the
+/// first by path (the file a lookup by that ID already finds). Every other
+/// copy gets a fresh ID at the same place in the hierarchy (a child ID under
+/// the same parent, or a root ID), keeping its title, body and `updated`.
+/// References to the duplicated ID are ambiguous and stay with the task that
+/// keeps it, as do any tasks below that ID. Duplicates of a malformed ID are
+/// left alone.
+///
+/// A file whose name does not match its ID is renamed to `{id}-{slug}.md`,
+/// unless another file is already there.
+///
+/// Nothing else is changed: the returned report's findings are what remain.
+/// A legacy store is not touched at all.
+pub fn repair_store(base: &Path) -> Result<StoreReport> {
+    let files = store::scan_task_files(base)?;
+    let scan = StoreScan::new(&files);
+    if !scan.legacy.is_empty() {
+        return Ok(StoreReport {
+            files: files.len(),
+            findings: scan.findings(base),
+            ..StoreReport::default()
+        });
+    }
+    let config = config::load(base)?;
+
+    let mut pool = task::with_ancestors(scan.parsed().map(|(_, t)| t.id.as_str()).chain(
+        files.iter().filter_map(|f| {
+            f.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(task::id_from_filename)
+        }),
+    ));
+
+    // (file index, task to write there)
+    let mut plan: Vec<(usize, Task)> = Vec::new();
+    let mut renumbered = HashSet::new();
+    for (id, group) in &scan.by_id {
+        if group.len() < 2 || !task::is_valid_id(id) {
+            continue;
+        }
+        for &i in &group[1..] {
+            let new_id = match task::parent_of(id) {
+                Some(parent) => task::generate_child_id(parent, &pool, &config),
+                None => task::generate_id(&pool, config.id_length as usize),
+            };
+            pool.insert(new_id.clone());
+            let mut t = scan.task(i).clone();
+            t.id = new_id;
+            plan.push((i, t));
+            renumbered.insert(i);
+        }
+    }
+    for (i, t) in scan.parsed() {
+        if renumbered.contains(&i) || !task::is_valid_id(&t.id) || filename_matches(&files[i], t) {
+            continue;
+        }
+        if files[i].path.with_file_name(task::filename(t)).exists() {
+            continue;
+        }
+        plan.push((i, t.clone()));
+    }
+
+    let mut renamed = Vec::new();
+    let mut moved = Vec::new();
+    for (i, t) in plan {
+        let from = &files[i].path;
+        let to = store::rewrite_task_file(from, &t)?;
+        if renumbered.contains(&i) {
+            renamed.push(Renumbered {
+                from: scan.task(i).id.clone(),
+                to: t.id,
+                file: relative(base, &to),
+            });
+        } else {
+            moved.push(MovedFile {
+                id: t.id,
+                from: relative(base, from),
+                to: relative(base, &to),
+            });
+        }
+    }
+
+    let mut report = check_store(base)?;
+    report.renamed = renamed;
+    report.moved = moved;
+    Ok(report)
+}
+
+/// `path` relative to `base`, or unchanged when it is not under it.
+fn relative(base: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(base).unwrap_or(path).to_path_buf()
+}
+
+/// Whether the name of `file` starts with the ID of `t`, its parsed task.
+fn filename_matches(file: &store::TaskFile, t: &Task) -> bool {
+    file.path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(task::id_from_filename)
+        == Some(t.id.as_str())
+}
+
+/// The scanned task files of a store, indexed for [`check_store`] and
+/// [`repair_store`].
+struct StoreScan<'a> {
+    files: &'a [store::TaskFile],
+    /// Files carrying a legacy `parent:` key.
+    legacy: Vec<usize>,
+    /// ID → indices of the files carrying it, the one that keeps it first.
+    by_id: BTreeMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> StoreScan<'a> {
+    fn new(files: &'a [store::TaskFile]) -> Self {
+        let mut legacy = Vec::new();
+        let mut by_id: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (i, f) in files.iter().enumerate() {
+            if let Ok(t) = &f.task {
+                if t.legacy_parent.is_some() {
+                    legacy.push(i);
+                }
+                by_id.entry(t.id.as_str()).or_default().push(i);
+            }
+        }
+        // Files are active first, then by path; a file named after its ID
+        // goes before one that is not, within the same directory.
+        for group in by_id.values_mut() {
+            group.sort_by_key(|&i| {
+                let f = &files[i];
+                let named = f.task.as_ref().is_ok_and(|t| filename_matches(f, t));
+                (f.archived, !named, i)
+            });
+        }
+        StoreScan {
+            files,
+            legacy,
+            by_id,
+        }
+    }
+
+    /// The parsed task of file `i`, which must be one.
+    fn task(&self, i: usize) -> &'a Task {
+        self.files[i]
+            .task
+            .as_ref()
+            .expect("indexed files are parsed")
+    }
+
+    /// Every parsed file, by index.
+    fn parsed(&self) -> impl Iterator<Item = (usize, &'a Task)> + '_ {
+        self.files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.task.as_ref().ok().map(|t| (i, t)))
+    }
+
+    fn findings(&self, base: &Path) -> Vec<Finding> {
+        let path = |i: usize| relative(base, &self.files[i].path);
+        if !self.legacy.is_empty() {
+            return vec![Finding::LegacyStore {
+                files: self.legacy.iter().map(|&i| path(i)).collect(),
+            }];
+        }
+        let mut findings = Vec::new();
+
+        for (i, f) in self.files.iter().enumerate() {
+            if let Err(reason) = &f.task {
+                findings.push(Finding::UnreadableFile {
+                    file: path(i),
+                    reason: reason.clone(),
+                });
+            }
+        }
+        for (i, t) in self.parsed() {
+            if let Err(Error::InvalidId { reason, .. }) = task::validate_id(&t.id) {
+                findings.push(Finding::MalformedId {
+                    id: t.id.clone(),
+                    file: path(i),
+                    reason,
+                });
+            }
+        }
+        for (id, group) in &self.by_id {
+            if group.len() > 1 {
+                findings.push(Finding::DuplicateId {
+                    id: id.to_string(),
+                    files: group.iter().map(|&i| path(i)).collect(),
+                });
+            }
+        }
+        for (i, t) in self.parsed() {
+            if task::is_valid_id(&t.id) && !filename_matches(&self.files[i], t) {
+                findings.push(Finding::FilenameMismatch {
+                    id: t.id.clone(),
+                    file: path(i),
+                    expected: relative(base, &self.files[i].path.with_file_name(task::filename(t))),
+                });
+            }
+        }
+
+        // The graph checks see each ID once, as the task that keeps it.
+        let primary: HashMap<String, Task> = self
+            .by_id
+            .iter()
+            .map(|(id, group)| (id.to_string(), self.task(group[0]).clone()))
+            .collect();
+
+        let dangling: std::collections::BTreeSet<(&str, &str)> = self
+            .parsed()
+            .flat_map(|(_, t)| {
+                t.depends_on
+                    .iter()
+                    .filter(|d| !self.by_id.contains_key(d.as_str()))
+                    .map(|d| (t.id.as_str(), d.as_str()))
+            })
+            .collect();
+        findings.extend(
+            dangling
+                .into_iter()
+                .map(|(id, dep)| Finding::DanglingDependency {
+                    id: id.into(),
+                    depends_on: dep.into(),
+                }),
+        );
+
+        let mut not_epic = Vec::new();
+        for id in self.by_id.keys() {
+            let Some(parent) = task::parent_of(id) else {
+                continue;
+            };
+            match primary.get(parent) {
+                None => findings.push(Finding::MissingParent {
+                    id: id.to_string(),
+                    parent: parent.into(),
+                }),
+                Some(p) if !p.task_type.is_epic() => not_epic.push(Finding::ParentNotEpic {
+                    id: id.to_string(),
+                    parent: parent.into(),
+                }),
+                Some(_) => {}
+            }
+        }
+        findings.extend(not_epic);
+
+        findings.extend(
+            Graph::build(&primary)
+                .cycles()
+                .into_iter()
+                .map(|ids| Finding::DependencyCycle { ids }),
+        );
+        findings
+    }
 }
 
 #[cfg(test)]
@@ -3843,6 +4257,331 @@ mod tests {
             tasks["eee"].status,
             Status::Open,
             "an epic must not auto-close on unreviewed work"
+        );
+    }
+
+    // ── check_store / repair_store ──────────────────────────────────
+
+    /// Write `t` to `.bears/{name}` (or `.bears/archive/{name}`) as is,
+    /// whatever its ID says the filename should be.
+    fn write_raw(base: &Path, name: &str, t: &Task, archived: bool) {
+        let dir = if archived {
+            store::archive_dir(base)
+        } else {
+            store::tasks_dir(base)
+        };
+        std::fs::write(dir.join(name), task::render_task(t)).unwrap();
+    }
+
+    fn doctor_store() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        tmp
+    }
+
+    fn kinds(report: &StoreReport) -> Vec<String> {
+        report
+            .findings
+            .iter()
+            .map(|f| {
+                serde_json::to_value(f).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_check_store_healthy() {
+        let tmp = doctor_store();
+        store::save(tmp.path(), &make_epic("eee")).unwrap();
+        let mut child = make_child("x1", "eee", Status::Open);
+        child.depends_on = vec!["aaa".into()];
+        store::save(tmp.path(), &child).unwrap();
+        write_raw(
+            tmp.path(),
+            "aaa-task-aaa.md",
+            &make_task("aaa", Status::Done),
+            true,
+        );
+
+        let report = check_store(tmp.path()).unwrap();
+        assert!(report.is_healthy(), "{:?}", report.findings);
+        assert_eq!(report.files, 3);
+    }
+
+    #[test]
+    fn test_check_store_not_initialized() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(matches!(
+            check_store(tmp.path()),
+            Err(Error::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn test_check_store_reports_each_kind() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        // Graph problems.
+        let mut a = make_task("aaa", Status::Open);
+        a.depends_on = vec!["bbb".into(), "gone".into()];
+        let mut b = make_task("bbb", Status::Open);
+        b.depends_on = vec!["aaa".into()];
+        store::save(base, &a).unwrap();
+        store::save(base, &b).unwrap();
+        // Hierarchy problems.
+        store::save(base, &make_child("x1", "nop", Status::Open)).unwrap();
+        store::save(base, &make_child("y2", "aaa", Status::Open)).unwrap();
+        // File problems.
+        write_raw(base, "ccc-one.md", &make_task("ccc", Status::Open), false);
+        write_raw(base, "ccc-two.md", &make_task("ccc", Status::Done), true);
+        write_raw(
+            base,
+            "zzz-misnamed.md",
+            &make_task("ddd", Status::Open),
+            false,
+        );
+        write_raw(
+            base,
+            "Bad_1-bad.md",
+            &make_task("Bad_1", Status::Open),
+            false,
+        );
+        std::fs::write(store::tasks_dir(base).join("broken.md"), "no frontmatter").unwrap();
+
+        let report = check_store(base).unwrap();
+        assert_eq!(
+            kinds(&report),
+            vec![
+                "unreadable-file",
+                "malformed-id",
+                "duplicate-id",
+                "filename-mismatch",
+                "dangling-dependency",
+                "missing-parent",
+                "parent-not-epic",
+                "dependency-cycle",
+            ]
+        );
+        let f = &report.findings;
+        assert_eq!(
+            f[0],
+            Finding::UnreadableFile {
+                file: PathBuf::from(".bears/broken.md"),
+                reason: "missing opening --- delimiter".into(),
+            }
+        );
+        assert_eq!(
+            f[2],
+            Finding::DuplicateId {
+                id: "ccc".into(),
+                files: vec![
+                    PathBuf::from(".bears/ccc-one.md"),
+                    PathBuf::from(".bears/archive/ccc-two.md"),
+                ],
+            },
+            "the active copy is listed first, as the one that keeps the ID"
+        );
+        assert_eq!(
+            f[3],
+            Finding::FilenameMismatch {
+                id: "ddd".into(),
+                file: PathBuf::from(".bears/zzz-misnamed.md"),
+                expected: PathBuf::from(".bears/ddd-task-ddd.md"),
+            }
+        );
+        assert_eq!(
+            f[4],
+            Finding::DanglingDependency {
+                id: "aaa".into(),
+                depends_on: "gone".into(),
+            }
+        );
+        assert_eq!(
+            f[5],
+            Finding::MissingParent {
+                id: "nop.x1".into(),
+                parent: "nop".into(),
+            }
+        );
+        assert_eq!(
+            f[6],
+            Finding::ParentNotEpic {
+                id: "aaa.y2".into(),
+                parent: "aaa".into(),
+            }
+        );
+        assert_eq!(
+            f[7],
+            Finding::DependencyCycle {
+                ids: vec!["aaa".into(), "bbb".into()],
+            }
+        );
+        assert_eq!(f.iter().filter(|f| f.is_fixable()).count(), 2);
+    }
+
+    #[test]
+    fn test_check_store_legacy_store_reports_only_that() {
+        let tmp = doctor_store();
+        let mut legacy = make_task("aaa", Status::Open);
+        legacy.depends_on = vec!["gone".into()];
+        let content = task::render_task(&legacy).replacen("---\n", "---\nparent: eee\n", 1);
+        let path = store::tasks_dir(tmp.path()).join("aaa-task-aaa.md");
+        std::fs::write(&path, &content).unwrap();
+
+        let report = check_store(tmp.path()).unwrap();
+        assert_eq!(
+            report.findings,
+            vec![Finding::LegacyStore {
+                files: vec![PathBuf::from(".bears/aaa-task-aaa.md")],
+            }]
+        );
+        // A repair touches nothing.
+        let repaired = repair_store(tmp.path()).unwrap();
+        assert_eq!(repaired.findings, report.findings);
+        assert!(repaired.renamed.is_empty() && repaired.moved.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn test_repair_store_renumbers_duplicates_and_keeps_references() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        let mut first = make_task("aaa", Status::Open);
+        first.title = "First".into();
+        let mut second = make_task("aaa", Status::InProgress);
+        second.title = "Second".into();
+        second.body = "second body".into();
+        write_raw(base, "aaa-first.md", &first, false);
+        write_raw(base, "aaa-second.md", &second, false);
+        let mut dependent = make_task("bbb", Status::Open);
+        dependent.depends_on = vec!["aaa".into()];
+        store::save(base, &dependent).unwrap();
+
+        let report = repair_store(base).unwrap();
+        assert!(report.is_healthy(), "{:?}", report.findings);
+        assert!(report.moved.is_empty());
+        assert_eq!(report.renamed.len(), 1);
+        let r = &report.renamed[0];
+        assert_eq!(r.from, "aaa");
+        assert_eq!(task::id_depth(&r.to), 0, "a root duplicate stays a root");
+        assert_eq!(r.file, PathBuf::from(format!(".bears/{}-second.md", r.to)));
+
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks["aaa"].title, "First", "the first file keeps the ID");
+        let moved = &tasks[&r.to];
+        assert_eq!(moved.title, "Second");
+        assert_eq!(moved.body, "second body");
+        assert_eq!(moved.updated, second.updated, "updated is kept");
+        assert_eq!(tasks["bbb"].depends_on, vec!["aaa"], "references stay put");
+        assert!(!store::tasks_dir(base).join("aaa-second.md").exists());
+    }
+
+    #[tokio::test]
+    async fn test_repair_store_renumbers_a_child_under_its_parent() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        store::save(base, &make_epic("eee")).unwrap();
+        // The archived copy gives way to the active one, even though its
+        // path sorts first.
+        write_raw(
+            base,
+            "eee.x1-a.md",
+            &make_child("x1", "eee", Status::Done),
+            true,
+        );
+        write_raw(
+            base,
+            "eee.x1-b.md",
+            &make_child("x1", "eee", Status::Open),
+            false,
+        );
+
+        let report = repair_store(base).unwrap();
+        assert!(report.is_healthy(), "{:?}", report.findings);
+        let r = &report.renamed[0];
+        assert_eq!(task::parent_of(&r.to), Some("eee"));
+        assert!(r.file.starts_with(".bears/archive"));
+
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks["eee.x1"].status, Status::Open);
+        let archived = store::load_archived(base).await.unwrap();
+        assert_eq!(archived[&r.to].status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_repair_store_renames_misnamed_files() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        write_raw(
+            base,
+            "zzz-misnamed.md",
+            &make_task("ddd", Status::Open),
+            false,
+        );
+        // A duplicate pair where only the later file is named after its ID:
+        // that one keeps the ID, the other is renumbered.
+        let mut misnamed = make_task("fff", Status::Open);
+        misnamed.title = "Misnamed".into();
+        write_raw(base, "aaa-misnamed.md", &misnamed, false);
+        write_raw(
+            base,
+            "fff-task-fff.md",
+            &make_task("fff", Status::Open),
+            false,
+        );
+
+        let report = repair_store(base).unwrap();
+        assert!(report.is_healthy(), "{:?}", report.findings);
+        assert_eq!(
+            report.moved,
+            vec![MovedFile {
+                id: "ddd".into(),
+                from: PathBuf::from(".bears/zzz-misnamed.md"),
+                to: PathBuf::from(".bears/ddd-task-ddd.md"),
+            }]
+        );
+        assert_eq!(report.renamed.len(), 1);
+        assert_eq!(report.renamed[0].from, "fff");
+
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks["fff"].title, "Task fff");
+        assert_eq!(tasks[&report.renamed[0].to].title, "Misnamed");
+        assert!(store::find_task_path(base, "ddd").is_ok());
+    }
+
+    #[test]
+    fn test_repair_store_leaves_report_only_findings() {
+        let tmp = doctor_store();
+        let base = tmp.path();
+        let mut a = make_task("aaa", Status::Open);
+        a.depends_on = vec!["gone".into()];
+        store::save(base, &a).unwrap();
+        store::save(base, &make_child("x1", "nop", Status::Open)).unwrap();
+        // The target name is taken, so the misnamed file stays.
+        write_raw(
+            base,
+            "zzz-misnamed.md",
+            &make_task("ddd", Status::Open),
+            false,
+        );
+        std::fs::write(store::tasks_dir(base).join("ddd-task-ddd.md"), "garbage").unwrap();
+
+        let before = check_store(base).unwrap();
+        let report = repair_store(base).unwrap();
+        assert!(report.renamed.is_empty() && report.moved.is_empty());
+        assert_eq!(report.findings, before.findings);
+        assert_eq!(
+            kinds(&report),
+            vec![
+                "unreadable-file",
+                "filename-mismatch",
+                "dangling-dependency",
+                "missing-parent"
+            ]
         );
     }
 }
