@@ -124,6 +124,11 @@ cargo build                               # binary with all frontends
 - Re-parse the entire `.bears/` directory from scratch on every invocation — no caching, no daemon.
 - `--json` flag on all CLI commands outputs JSON instead of human text.
 - MCP tools return minimal structured data (id, title, priority, status, tags) — not full markdown bodies.
+- Frontends never assume an ID's length: dotted IDs (`a1b.c2.d7`) vary, so CLI list output (`list`,
+  `ready`, `review`, `epics`, `search`, `list --archived`, `log`) and the TUI task list pad each ID
+  to the longest one shown (`id_width` / `id_cell` in `cli/mod.rs`) so the next column lines up.
+  Lists sort by priority then creation date, never by ID; trees (`graph`, `dep tree`, the TUI
+  subtask tree) follow the dependency or parent structure.
 - Effective-priority and ready computation are single-pass O(V+E); dep-tree rendering expands each node once (DAG, not exponential). `get_graph` returns a *bounded* adjacency list (excludes done/cancelled and isolated nodes) to keep agent payloads small.
 
 ### `bea init` harness flags
@@ -171,11 +176,15 @@ id: x9k.a1
 title: Implement OAuth flow
 status: open          # proposed | open | in_progress | review | done | blocked | cancelled
 priority: P1          # P0 (critical) through P3
-type: task            # task (default) | epic
-created: 2026-03-15T10:30:00Z
-updated: 2026-03-15T10:30:00Z
-tags: [backend, auth]
-depends_on: [f4c9, b7e3]
+# type: epic          # only written for epics; absent means task
+created: "2026-03-15T10:30:00Z"
+updated: "2026-03-15T10:30:00Z"
+tags:
+  - backend
+  - auth
+depends_on:
+  - f4c
+  - x9k.b7
 assignee: alice
 attempts: 2
 ---
@@ -183,7 +192,7 @@ attempts: 2
 Markdown body here.
 ```
 
-Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read.
+Parse frontmatter by splitting on `---` delimiters, using `serde-saphyr` for the YAML portion, keeping the rest as the body string. All YAML goes through `task::from_yaml` / `task::to_yaml`, which fix the on-disk shape: fields in struct order, block lists indented under their key, timestamps double-quoted, strings a YAML 1.1 reader could take for a bool, number or null (`yes`, `nan`) double-quoted, long titles kept on one line, and parse errors on one line without a source snippet. String fields keep an unquoted scalar exactly as written (`title: 1.50` stays `1.50`), so files written by earlier versions — and hand edits — load unchanged. Optional fields (`tags`, `depends_on`, `assignee`, `attempts`) are skipped on write when empty, and default when absent on read; so is `type` when it is `task`.
 
 There is no `parent` field: a task's parent is derived from its ID (`Task::parent()`; `x9k.a1` above is a child of epic `x9k`). Files written before hierarchical IDs carry a `parent:` key. It still parses, into `Task::legacy_parent`, which is never written back and has no effect on the parent; it exists so that legacy stores can be detected and migrated. Any write of such a task drops the key — which is why a legacy store is refused outright (next section).
 
@@ -230,7 +239,7 @@ link was dropped` line per orphan, then a summary line. `--json` prints
 
 ### ID generation
 
-Generate a short lowercase alphanumeric ID (configurable length via `.bears.yml`, default 3 chars). Check for collisions against both active and archived tasks and their ancestors; regenerate if needed.
+Generate a short lowercase alphanumeric ID: a root ID of `id-length` chars (`.bears.yml`, default 3, range 2–8), a child ID of its parent's ID plus a `child-id-length` segment (below). Check for collisions against both active and archived tasks and their ancestors; regenerate if needed.
 
 **Hierarchical IDs.** An ID encodes its parent
 chain: `a1b` root, `a1b.c2` child, `a1b.c2.d7` grandchild — segments separated by `.`, each
@@ -298,7 +307,7 @@ otherwise, so a shortcut can never quietly undo unrelated state.
 | Verb | Edge |
 |------|------|
 | `review` | `in_progress` → `review` |
-| `reject` | `review` → `open` (assignee kept — rework routes back to the author) |
+| `reject` | `review` → `open` (assignee cleared — the rework goes back to the pool) |
 | `propose` | `open` → `proposed` |
 | `accept` | `proposed` → `open` |
 | `release` | `in_progress` → `open` (assignee cleared) |
@@ -332,6 +341,7 @@ who holds a task without a second lookup.
 |-----------|--------------------|
 | `bea start <id> [-a NAME]` / `start_task { id, assignee? }` | `Some(name)` sets it, `Some("")` clears it, `None` (flag omitted) leaves it unchanged |
 | `bea release <id>` / `release_task { id }` | cleared, and status goes back to `open` (`attempts` untouched) |
+| `bea reject <id>` / `reject_task { id }` | cleared, and status goes from `review` back to `open` |
 | `bea update <id> --assignee NAME` / `update_task` | set directly, independent of status |
 
 `service::release_task` is deliberately narrow: it **only** accepts tasks whose status is
@@ -499,7 +509,7 @@ Keep the dependency tree small. Compilation should be fast.
 ## Testing
 
 - Unit tests in `graph.rs`: cycle detection, topological sort, ready computation
-- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `all_known_ids`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
+- Unit tests in `task.rs`/`store.rs`: frontmatter parsing (valid, missing fields, extra fields, malformed); the exact on-disk frontmatter shape, and a render/parse round-trip over every file in this repository's own `.bears/` and `.bears/archive/` (unchanged except that a legacy `parent:` key is dropped); archive storage layer (`move_to_archive`, `move_from_archive`, `load_archived`, `archived_id_set`); `rename_ids` (active + archive, references rewritten, `updated` kept, untouched files left alone, swap/chain/identity maps refused, validation before any write); legacy stores (both loaders refuse a `parent:` key in either directory; the line pre-filter ignores `parent:` text in a body, block scalar or indented value, unusual valid spellings are still caught, and an unparsable file with a `parent:` line is never legacy for either loader) and `migrate` (nested epics, archived child of an active epic and the reverse, references and `updated`, missing/non-epic/cyclic parents kept as roots, dry run writes nothing, second run a no-op, resume from every interruption point incl. an already-removed epic, and a migrated copy of this repository's own `.bears/` loading with every former parent link as an ID prefix)
 - Store doctor: `graph.rs` (`cycles()`: one entry per component, self-loops, DAG, a 50 000-task chain);
   `service.rs` (`check_store`: healthy store, every finding kind in order, legacy store reported alone
   and untouched by a repair, not initialized; `repair_store`: root and child duplicates renumbered in
@@ -514,9 +524,9 @@ Keep the dependency tree small. Compilation should be fast.
 - Unit tests in `service.rs`: epic progress, auto-close (incl. cancelled children and nested cascade); child creation (hierarchical ID under the resolved parent, nested epics, `child-id-length`, archived-ID avoidance, ancestors of orphans reserved at root and child level); reparenting (subtree moved with archived descendants and active/archived dependants rewritten, detach to a fresh root ID, root task moved under an epic, auto-close at the new parent, self/descendant/non-epic/unknown parents refused before any write), unchanged parent accepted; delete/prune (dangling `depends_on` scrubbed, an epic's active and archived children detached to fresh roots with subtrees and references, prune detaching only survivors incl. a pruned task inside a detached subtree); start/release (assignee set/keep/clear, release rejects non-`in_progress`); attempts (counted on every path into `in_progress`, not on restart/release/other transitions); review/proposal workflow (edge preconditions, review not unblocking dependents or closing epics, proposals hidden from listings); archive service (`is_archivable`, `archive_task`, `archive_all`, `restore_task`, `list_archive`, `get_archived_task`, archived-ID collision avoidance)
 - Unit tests in `mcp/tools.rs`: tool create/list/start/complete/search/graph/plan_epic/delete/deps/validation; delete/prune of an epic (`renamed` map, `{ pruned, renamed }`); derived parent and reparenting (`renamed` map, detach, refusal under its own subtree); archive tools (archive/restore/list_archived); end-to-end archive visibility (hidden from list/search/graph/epics), integrity (dep add onto archived ID, prune never touches archive, no ID reuse)
 - Unit tests in `graph.rs`: effective-priority correctness, DAG dep-tree bounding, bounded adjacency, plus `#[ignore]`d coupled-graph perf benchmarks (run with `cargo test -- --ignored`)
-- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form)
-- Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
-- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard)
+- Unit tests in `scaffold.rs`: `.mcp.json` merge (preserve/idempotent/fresh) and harness scaffolding (claude/copilot/codex skill/agent files, `bea mcp` binary form); every template describes hierarchical IDs and the `renamed` map, and none mentions a `parent:` key or a CLI spelling that does not exist
+- Unit tests in `tui/`: input truncation (UTF-8 safety), ready-filter parity, task-list titles aligned across ID lengths, subtask tree expanding nested epics once, watcher (the watcher test is `#[ignore]`d as timing-sensitive)
+- Integration tests in `tests/cli.rs`: create a temp `.bears/` dir, run commands, verify file output; hierarchical child IDs and `update --parent` moves (renamed output and `--json` map, archived dependant rewritten, detach, no-op, self-parent refused); `delete`/`prune` of an epic (children detached, renamed lines, `--json` `renamed` map and `{ pruned, renamed }`); legacy store refused by every loading command with the `bea migrate` hint and nothing written; `bea migrate` (`--dry-run`, `--json` map, orphan report, idempotent re-run, not initialized); archive/restore/log/list-archived e2e; `bea init --claude/--copilot/--codex` scaffolding e2e (file presence, idempotency, MCP merge, `bea mcp` binary form, template packaging guard); list output aligned across dotted-ID lengths
 - E2E tests in `tests/mcp.rs`: spawn the real `bea mcp` binary and drive it over stdio with the
   rmcp client (dev-dependency features `client`, `transport-child-process`) — handshake, tool
   list/schemas, tool calls, protocol- vs tool-level error semantics, and a legacy store refused as a
