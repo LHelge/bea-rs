@@ -6,6 +6,13 @@
 //! status board, the dependency graph as an inline SVG laid out from
 //! [`SnapshotGraph::layers`], and the recent archive log.
 //!
+//! The graph is drawn whole, however large: the SVG grows with the number of
+//! layers and the size of the largest layer, and the panel holding it scrolls
+//! in both directions within at most 85% of the window's height (CSS in the
+//! template), so the sections after it stay a short scroll away. Unlike the
+//! Markdown renderer there is no size limit to keep, and a part left out
+//! would be a part nobody can see, so the page does not bound or split it.
+//!
 //! The page makes no external request of any kind: the CSS is inline, there
 //! are no fonts, images or scripts, and it needs no JavaScript. Light and dark
 //! themes follow `prefers-color-scheme`. Every piece of task content (IDs,
@@ -40,6 +47,16 @@ const LOOP_ROOM: i64 = 40;
 /// The most characters of a title shown in a graph node; the full title is
 /// in the node's tooltip.
 const NODE_TITLE_CHARS: usize = 28;
+/// The most characters of a node's `id · priority · status` line. The line
+/// is 11px monospace, whose characters are at most about 0.6em (6.6px) wide,
+/// so 30 of them take under 200px of the 204px inside the box. A longer ID is
+/// shortened from the front (see [`short_id`]); the full ID is in the tooltip.
+const NODE_ID_LINE_CHARS: usize = 30;
+const _: () = assert!(NODE_ID_LINE_CHARS as i64 * 66 / 10 <= NODE_W - 16);
+/// How far above and below the middle of a node's right side the two ends of
+/// a cyclic edge between two different nodes sit, so that `a → b` and
+/// `b → a` start and end at different points.
+const CYCLE_END_OFFSET: i64 = 5;
 
 /// Append formatted text to a `String` (infallible).
 macro_rules! w {
@@ -385,12 +402,127 @@ fn truncate(title: &str) -> String {
     }
 }
 
+/// `id` within `room` characters: as it is when it fits, else its last whole
+/// segments after `…` (`….d7.e4`, the leaf being what tells siblings apart),
+/// else, when not even the leaf segment fits, its last characters after `…`.
+fn short_id(id: &str, room: usize) -> String {
+    if id.chars().count() <= room {
+        return id.to_string();
+    }
+    let segments: Vec<&str> = id.split('.').collect();
+    for k in 1..segments.len() {
+        let tail = format!("….{}", segments[k..].join("."));
+        if tail.chars().count() <= room {
+            return tail;
+        }
+    }
+    let keep = room.saturating_sub(1);
+    let chars: Vec<char> = id.chars().collect();
+    let mut out = String::from("…");
+    out.extend(&chars[chars.len().saturating_sub(keep)..]);
+    out
+}
+
+/// A node's first line, `id · priority · status`, within
+/// [`NODE_ID_LINE_CHARS`] characters (unescaped).
+fn id_line(id: &str, priority: crate::task::Priority, status: Status) -> String {
+    let rest = format!(" · {priority} · {}", status_label(status));
+    let room = NODE_ID_LINE_CHARS.saturating_sub(rest.chars().count());
+    format!("{}{rest}", short_id(id, room))
+}
+
+/// Left edge of the nodes of `layer`.
+fn layer_x(layer: usize) -> i64 {
+    PAD + layer as i64 * (NODE_W + LAYER_GAP)
+}
+
+/// Top edge of the node at `position`.
+fn row_y(position: usize) -> i64 {
+    PAD + position as i64 * (NODE_H + ROW_GAP)
+}
+
 /// Top-left corner of the node at `layer`, `position`.
 fn node_xy(layer: usize, position: usize) -> (i64, i64) {
-    (
-        PAD + layer as i64 * (NODE_W + LAYER_GAP),
-        PAD + position as i64 * (NODE_H + ROW_GAP),
-    )
+    (layer_x(layer), row_y(position))
+}
+
+/// The middle of gap `gap` of a layer: 0 is above its first node, `g` the gap
+/// between nodes `g - 1` and `g`.
+fn gap_y(gap: usize) -> i64 {
+    row_y(gap) - ROW_GAP / 2
+}
+
+/// Where an edge crosses a layer of `len` nodes that it does not stop at: the
+/// gap between two nodes nearest to `target` (the height a straight line would
+/// cross at), or `target` itself when that is below the layer's last node.
+fn lane_y(len: usize, target: i64) -> i64 {
+    if target >= gap_y(len) {
+        return target;
+    }
+    (0..=len)
+        .map(gap_y)
+        .min_by_key(|y| ((y - target).abs(), *y))
+        .unwrap_or(target)
+}
+
+/// A cubic curve from `(x1, y1)` (the current point) to `(x2, y2)`, leaving
+/// and arriving horizontally; it stays between `x1` and `x2`.
+fn curve(d: &mut String, (x1, y1): (i64, i64), (x2, y2): (i64, i64)) {
+    let c = LAYER_GAP / 2;
+    w!(d, " C{},{y1} {},{y2} {x2},{y2}", x1 + c, x2 - c);
+}
+
+/// The path of a dependency from the node at `from` to the node at `to`
+/// (each `(layer, position)`), `to` in a later layer. An edge to the next
+/// layer is one curve. An edge that skips layers runs through each layer in
+/// between along a gap between its nodes ([`lane_y`]), horizontally across the
+/// layer and in curves through the space between layers, so it never passes
+/// behind a node box.
+fn edge_path(from: (usize, usize), to: (usize, usize), layers: &[Vec<String>]) -> String {
+    let mid = NODE_H / 2;
+    let (x1, y1) = (layer_x(from.0) + NODE_W, row_y(from.1) + mid);
+    let (x2, y2) = (layer_x(to.0), row_y(to.1) + mid);
+    let mut d = format!("M{x1},{y1}");
+    let mut at = (x1, y1);
+    let span = (to.0 - from.0) as i64;
+    for layer in from.0 + 1..to.0 {
+        let step = (layer - from.0) as i64;
+        let target = y1 + (y2 - y1) * step / span;
+        let lane = lane_y(layers.get(layer).map_or(0, Vec::len), target);
+        let left = layer_x(layer);
+        curve(&mut d, at, (left, lane));
+        w!(d, " L{},{lane}", left + NODE_W);
+        at = (left + NODE_W, lane);
+    }
+    curve(&mut d, at, (x2, y2));
+    d
+}
+
+/// The path of a cyclic edge, between two nodes of one layer or from a node
+/// to itself: a loop out of the right side and back into it. Between two
+/// different nodes it leaves above the middle of the dependency's side and
+/// arrives below the middle of the dependent's, and a loop running upwards
+/// bulges half as far as one running downwards, so two nodes that depend on
+/// each other get two distinct curves.
+fn cyclic_path(from: (i64, i64), to: (i64, i64), self_loop: bool) -> String {
+    let mid = NODE_H / 2;
+    let x = from.0 + NODE_W;
+    let (y1, y2, reach) = if self_loop {
+        (from.1 + mid - 8, from.1 + mid + 8, LOOP_ROOM - 4)
+    } else {
+        let reach = if from.1 < to.1 {
+            LOOP_ROOM - 4
+        } else {
+            LOOP_ROOM / 2
+        };
+        (
+            from.1 + mid - CYCLE_END_OFFSET,
+            to.1 + mid + CYCLE_END_OFFSET,
+            reach,
+        )
+    };
+    let bulge = x + reach;
+    format!("M{x},{y1} C{bulge},{y1} {bulge},{y2} {x},{y2}")
 }
 
 fn graph(out: &mut String, g: &SnapshotGraph) {
@@ -423,36 +555,23 @@ fn graph(out: &mut String, g: &SnapshotGraph) {
         "</defs>\n"
     ));
 
-    let at: HashMap<&str, (i64, i64)> = g
+    let place: HashMap<&str, (usize, usize)> = g
         .nodes
         .iter()
-        .map(|n| (n.task.id.as_str(), node_xy(n.layer, n.position)))
+        .map(|n| (n.task.id.as_str(), (n.layer, n.position)))
         .collect();
 
     // Edges first, so that the nodes are drawn over them.
     for e in &g.edges {
-        let (Some(&(fx, fy)), Some(&(tx, ty))) = (at.get(e.from.as_str()), at.get(e.to.as_str()))
+        let (Some(&from), Some(&to)) = (place.get(e.from.as_str()), place.get(e.to.as_str()))
         else {
             continue;
         };
-        let mid = NODE_H / 2;
-        let d = if e.cyclic {
-            // Same layer: a loop out of the right side and back into it.
-            let (x, y1, y2) = if e.from == e.to {
-                (fx + NODE_W, fy + mid - 8, fy + mid + 8)
-            } else {
-                (fx + NODE_W, fy + mid, ty + mid)
-            };
-            let bulge = x + LOOP_ROOM - 4;
-            format!("M{x},{y1} C{bulge},{y1} {bulge},{y2} {x},{y2}")
+        let d = if e.cyclic || to.0 <= from.0 {
+            // Same layer (an edge never points to an earlier one).
+            cyclic_path(node_xy(from.0, from.1), node_xy(to.0, to.1), e.from == e.to)
         } else {
-            let (x1, y1, x2, y2) = (fx + NODE_W, fy + mid, tx, ty + mid);
-            let c = LAYER_GAP / 2;
-            format!(
-                "M{x1},{y1} C{c1},{y1} {c2},{y2} {x2},{y2}",
-                c1 = x1 + c,
-                c2 = x2 - c
-            )
+            edge_path(from, to, &g.layers)
         };
         let (class, marker) = if e.cyclic {
             ("edge cyclic", "arrow-cyclic")
@@ -469,7 +588,7 @@ fn graph(out: &mut String, g: &SnapshotGraph) {
 
     for n in &g.nodes {
         let t = &n.task;
-        let (x, y) = at[t.id.as_str()];
+        let (x, y) = node_xy(n.layer, n.position);
         let mut class = format!("node s-{}", t.status);
         if t.task_type == TaskType::Epic {
             class.push_str(" epic");
@@ -490,13 +609,12 @@ fn graph(out: &mut String, g: &SnapshotGraph) {
         }
         w!(
             out,
-            "<g class=\"{class}\"><title>{tip}</title><rect x=\"{x}\" y=\"{y}\" width=\"{NODE_W}\" height=\"{NODE_H}\" rx=\"6\"/><text class=\"nid\" x=\"{tx}\" y=\"{y1}\">{id} · {p} · {status}</text><text class=\"ntitle\" x=\"{tx}\" y=\"{y2}\">{title}</text></g>\n",
+            "<g class=\"{class}\"><title>{tip}</title><rect x=\"{x}\" y=\"{y}\" width=\"{NODE_W}\" height=\"{NODE_H}\" rx=\"6\"/><text class=\"nid\" x=\"{tx}\" y=\"{y1}\">{id_line}</text><text class=\"ntitle\" x=\"{tx}\" y=\"{y2}\">{title}</text></g>\n",
             tip = escape(&tip),
             tx = x + 8,
             y1 = y + 17,
             y2 = y + 34,
-            id = escape(&t.id),
-            status = status_label(t.status),
+            id_line = escape(&id_line(&t.id, p, t.status)),
             title = escape(&truncate(&t.title)),
         );
     }

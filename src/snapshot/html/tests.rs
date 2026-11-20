@@ -378,3 +378,218 @@ fn long_titles_are_truncated_in_nodes_by_character() {
     assert!(html.contains(&format!("d4: {long}")));
     assert!(html.contains(&format!(">{cut}</text>")));
 }
+
+/// The `d` attribute of the edge drawn for "`to` depends on `from`".
+fn edge_d(svg: &str, from: &str, to: &str) -> String {
+    let title = format!("<title>{to} depends on {from}</title>");
+    let line = svg.lines().find(|l| l.contains(&title)).unwrap();
+    let start = line.find("d=\"").unwrap() + 3;
+    let end = start + line[start..].find('"').unwrap();
+    line[start..end].to_string()
+}
+
+fn svg_of(html: &str) -> &str {
+    &html[html.find("<svg").unwrap()..html.find("</svg>").unwrap()]
+}
+
+#[test]
+fn two_nodes_depending_on_each_other_get_two_distinct_curves() {
+    let s = snapshot(false);
+    let html = render(&s);
+    let svg = svg_of(&html);
+    let there = edge_d(svg, "x1", "x2");
+    let back = edge_d(svg, "x2", "x1");
+    assert_ne!(there, back);
+    // Not one curve drawn twice in opposite directions either: the two ends
+    // and the bulge differ.
+    let points = |d: &str| -> Vec<String> {
+        let mut p: Vec<String> = d
+            .split(['M', 'C', ' '])
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        p.sort();
+        p
+    };
+    assert_ne!(points(&there), points(&back));
+
+    let node = |id: &str| s.graph.nodes.iter().find(|n| n.task.id == id).unwrap();
+    let (a, b) = (node("x1"), node("x2"));
+    assert_eq!(a.layer, b.layer);
+    let (ax, ay) = node_xy(a.layer, a.position);
+    let (_, by) = node_xy(b.layer, b.position);
+    let mid = NODE_H / 2;
+    let x = ax + NODE_W;
+    // Each leaves above the middle of its dependency and arrives below the
+    // middle of its dependent.
+    assert!(there.starts_with(&format!("M{x},{} ", ay + mid - CYCLE_END_OFFSET)));
+    assert!(there.ends_with(&format!(" {x},{}", by + mid + CYCLE_END_OFFSET)));
+    assert!(back.starts_with(&format!("M{x},{} ", by + mid - CYCLE_END_OFFSET)));
+    assert!(back.ends_with(&format!(" {x},{}", ay + mid + CYCLE_END_OFFSET)));
+    // Every loop stays in the room right of its layer.
+    for d in [&there, &back] {
+        for p in points(d) {
+            let px: i64 = p.split(',').next().unwrap().parse().unwrap();
+            assert!(px >= x && px <= x + LOOP_ROOM, "{d}");
+        }
+    }
+}
+
+/// A store whose layers 1 and 2 are full of nodes that `a → d` and `a → e`
+/// skip.
+fn skipping_store() -> HashMap<String, Task> {
+    map(vec![
+        make("a", Status::Open, 0, &[]),
+        make("b", Status::Open, 1, &["a"]),
+        make("f1", Status::Open, 2, &["a"]),
+        make("f2", Status::Open, 3, &["a"]),
+        make("f3", Status::Open, 4, &["a"]),
+        make("c", Status::Open, 5, &["b"]),
+        make("g1", Status::Open, 6, &["f1"]),
+        make("g2", Status::Open, 7, &["f2"]),
+        make("g3", Status::Open, 8, &["f3"]),
+        make("d", Status::Open, 9, &["c", "a"]),
+        make("e", Status::Open, 10, &["g3", "a"]),
+    ])
+}
+
+/// A path's commands with their points: `('M', [p])`, `('C', [c1, c2, p])`,
+/// `('L', [p])`.
+fn commands(d: &str) -> Vec<(char, Vec<(i64, i64)>)> {
+    let mut out: Vec<(char, Vec<(i64, i64)>)> = Vec::new();
+    for word in d.split(' ') {
+        let rest = match word.chars().next() {
+            Some(c) if c.is_ascii_alphabetic() => {
+                out.push((c, Vec::new()));
+                &word[1..]
+            }
+            _ => word,
+        };
+        let (x, y) = rest.split_once(',').unwrap();
+        out.last_mut()
+            .unwrap()
+            .1
+            .push((x.parse().unwrap(), y.parse().unwrap()));
+    }
+    out
+}
+
+#[test]
+fn edges_skipping_layers_never_pass_behind_a_node() {
+    let s = build(&skipping_store(), &HashMap::new(), &options(false));
+    let node = |id: &str| s.graph.nodes.iter().find(|n| n.task.id == id).unwrap();
+    assert_eq!(
+        (node("a").layer, node("d").layer, node("e").layer),
+        (0, 3, 3)
+    );
+    assert!(s.graph.layers[1].len() >= 4 && s.graph.layers[2].len() >= 4);
+    let html = render(&s);
+    let svg = svg_of(&html);
+
+    let inside_a_box = |layer: usize, y: i64| {
+        (0..s.graph.layers[layer].len()).any(|p| {
+            let top = row_y(p);
+            y >= top && y <= top + NODE_H
+        })
+    };
+    // The space between layer `l` and `l + 1`, its edges included.
+    let gap_of = |x: i64| -> Option<usize> {
+        (0..s.graph.layers.len()).find(|&l| x >= layer_x(l) + NODE_W && x <= layer_x(l + 1))
+    };
+    for e in s.graph.edges.iter().filter(|e| !e.cyclic) {
+        let (from, to) = (node(&e.from), node(&e.to));
+        let d = edge_d(svg, &e.from, &e.to);
+        let cmds = commands(&d);
+        assert_eq!(cmds[0].0, 'M');
+        let mut at = cmds[0].1[0];
+        let mut crossed = Vec::new();
+        for (cmd, points) in &cmds[1..] {
+            match cmd {
+                // A curve lies within the hull of its points: all of them in
+                // one space between two layers.
+                'C' => {
+                    let gaps: Vec<_> = std::iter::once(at)
+                        .chain(points.iter().copied())
+                        .map(|(x, _)| gap_of(x))
+                        .collect();
+                    assert!(
+                        gaps[0].is_some() && gaps.iter().all(|g| *g == gaps[0]),
+                        "{d}"
+                    );
+                }
+                // A straight line across a layer, along a gap between nodes.
+                'L' => {
+                    let end = points[0];
+                    assert_eq!(at.1, end.1, "horizontal: {d}");
+                    let layer = (0..s.graph.layers.len())
+                        .find(|&l| at.0 == layer_x(l) && end.0 == layer_x(l) + NODE_W)
+                        .unwrap();
+                    assert!(!inside_a_box(layer, end.1), "{d}");
+                    crossed.push(layer);
+                }
+                _ => panic!("{d}"),
+            }
+            at = *points.last().unwrap();
+        }
+        let between: Vec<usize> = (from.layer + 1..to.layer).collect();
+        assert_eq!(crossed, between, "{} → {}: {d}", e.from, e.to);
+    }
+    // The skipping edges do cross layers.
+    assert!(edge_d(svg, "a", "d").contains(" L"));
+    assert!(edge_d(svg, "a", "e").contains(" L"));
+}
+
+#[test]
+fn a_lane_is_the_nearest_gap_or_below_the_layer() {
+    // Above the first node, between nodes, below the last.
+    assert_eq!(lane_y(3, 0), gap_y(0));
+    assert_eq!(lane_y(3, row_y(1) + NODE_H / 2 - 1), gap_y(1));
+    assert_eq!(lane_y(3, row_y(1) + NODE_H), gap_y(2));
+    assert_eq!(lane_y(3, gap_y(3)), gap_y(3));
+    assert_eq!(lane_y(3, gap_y(3) + 100), gap_y(3) + 100);
+    assert_eq!(lane_y(0, 40), 40, "an empty layer is free space");
+    // The middle of a gap is clear of the boxes on both sides.
+    assert!(gap_y(1) > row_y(0) + NODE_H && gap_y(1) < row_y(1));
+    assert!(gap_y(0) > 0);
+}
+
+#[test]
+fn deep_ids_are_shortened_from_the_front_to_fit_the_node() {
+    assert_eq!(short_id("a1b.c2", 10), "a1b.c2");
+    assert_eq!(short_id("abc.d1.e2.f3.g4.h5", 11), "….f3.g4.h5");
+    assert_eq!(short_id("abc.d1.e2", 4), "….e2");
+    // Not even the leaf fits: its last characters.
+    assert_eq!(short_id("abcdefghijkl", 5), "…ijkl");
+    assert_eq!(short_id("ab.cdefghijkl", 5), "…ijkl");
+
+    let deep = "abc.d1.e2.f3.g4.h5.i6";
+    let mut tasks = store();
+    let mut t = make(deep, Status::InProgress, 11, &[]);
+    t.title = "Deep".into();
+    tasks.insert(deep.into(), t);
+    let s = build(&tasks, &HashMap::new(), &options(false));
+    let html = render(&s);
+    let svg = svg_of(&html);
+    for line in svg.lines().filter(|l| l.contains("class=\"nid\"")) {
+        let text = &line[line.find("class=\"nid\"").unwrap()..];
+        let text = &text[text.find('>').unwrap() + 1..text.find("</text>").unwrap()];
+        assert!(
+            text.chars().count() <= NODE_ID_LINE_CHARS,
+            "{text} is {} characters",
+            text.chars().count()
+        );
+    }
+    assert!(
+        svg.contains(">….g4.h5.i6 · P2 · in progress</text>"),
+        "{svg}"
+    );
+    // The whole ID stays in the tooltip.
+    assert!(svg.contains(&format!("<title>{deep}: Deep")));
+    // Short IDs are left alone.
+    assert!(svg.contains(">c3 · P2 · open</text>"));
+}
+
+#[test]
+fn the_graph_scrolls_in_a_bounded_panel() {
+    assert!(TEMPLATE.contains(".graph { overflow: auto; max-height: 85vh; }"));
+}
