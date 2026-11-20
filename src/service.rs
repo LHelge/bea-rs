@@ -101,7 +101,7 @@ pub fn list_tasks(
         .filter(|t| status.as_ref().is_none_or(|s| t.status == *s))
         .filter(|t| priority.as_ref().is_none_or(|p| t.priority == *p))
         .filter(|t| task::matches_tag(t, tag))
-        .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
+        .filter(|t| task::in_epic(t, epic))
         .cloned()
         .collect();
     task::sort_by_priority_owned(&mut filtered);
@@ -135,7 +135,7 @@ pub fn list_review(
         .values()
         .filter(|t| t.status == Status::Review)
         .filter(|t| task::matches_tag(t, tag))
-        .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
+        .filter(|t| task::in_epic(t, epic))
         .cloned()
         .collect();
     task::sort_by_priority_owned(&mut queue);
@@ -2286,6 +2286,54 @@ mod tests {
         assert_eq!(p.total, 0);
     }
 
+    /// A store with a nested epic: `e1` holds the task `e1.a` and the epic
+    /// `e1.s`, which holds `e1.s.t`. `e1x.z` shares a string prefix with `e1`
+    /// but is not under it, and `zz` is a root task.
+    fn nested_epic_store(status: Status) -> HashMap<String, Task> {
+        task_map(vec![
+            make_epic("e1"),
+            make_child("a", "e1", status),
+            make_epic("e1.s"),
+            make_child("t", "e1.s", status),
+            make_task("e1x.z", status),
+            make_task("zz", status),
+        ])
+    }
+
+    fn ids(tasks: &[Task]) -> Vec<&str> {
+        let mut ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn test_epic_filters_match_every_descendant() {
+        let tasks = nested_epic_store(Status::Open);
+        let listed = list_tasks(&tasks, None, None, None, true, false, Some("e1"));
+        assert_eq!(ids(&listed), ["e1.a", "e1.s", "e1.s.t"]);
+
+        let ready = list_ready(&tasks, None, None, Some("e1"));
+        assert_eq!(ids(&ready), ["e1.a", "e1.s.t"], "epics are never ready");
+
+        let tasks = nested_epic_store(Status::Review);
+        let queue = list_review(&tasks, None, None, Some("e1"));
+        assert_eq!(ids(&queue), ["e1.a", "e1.s.t"]);
+
+        // The nested epic filters its own subtree only.
+        let ready = list_ready(&nested_epic_store(Status::Open), None, None, Some("e1.s"));
+        assert_eq!(ids(&ready), ["e1.s.t"]);
+    }
+
+    /// Progress counts direct children: the nested epic is one unit of work.
+    #[test]
+    fn test_epic_progress_counts_direct_children_only() {
+        let mut tasks = nested_epic_store(Status::Done);
+        tasks.get_mut("e1.s").unwrap().status = Status::Open;
+        tasks.insert("e1.s.u".into(), make_child("u", "e1.s", Status::Open));
+        let p = epic_progress(&tasks, "e1");
+        assert_eq!((p.done, p.total), (1, 2));
+    }
+
     #[test]
     fn test_epic_progress_mixed() {
         let tasks = task_map(vec![
@@ -2654,6 +2702,31 @@ mod tests {
             Status::Open,
             "epic must not close when re-completing an already-done child while another is open"
         );
+    }
+
+    /// Auto-close looks at direct children only: a nested epic that is itself
+    /// resolved counts as resolved, whatever is still open below it.
+    #[tokio::test]
+    async fn test_epic_auto_close_looks_at_direct_children_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        let mut sub = make_epic("e1.s");
+        sub.status = Status::Done;
+        for t in [
+            make_epic("e1"),
+            make_child("a", "e1", Status::Open),
+            sub,
+            make_child("t", "e1.s", Status::Open),
+        ] {
+            store::save(base, &t).unwrap();
+        }
+        let tasks = store::load_all(base).await.unwrap();
+
+        set_status(base, &tasks, "e1.a", Status::Done).unwrap();
+        let tasks = store::load_all(base).await.unwrap();
+        assert_eq!(tasks["e1"].status, Status::Done);
+        assert_eq!(tasks["e1.s.t"].status, Status::Open);
     }
 
     #[tokio::test]
@@ -3468,6 +3541,26 @@ mod tests {
 
         let active = store::load_all(tmp.path()).await.unwrap();
         assert!(active.is_empty());
+    }
+
+    /// Archiving an epic takes its settled direct children along, not the
+    /// tasks below a nested epic.
+    #[tokio::test]
+    async fn test_archive_task_epic_cascades_to_direct_children_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path();
+        store::init(base).unwrap();
+        for mut t in nested_epic_store(Status::Done).into_values() {
+            t.status = Status::Done;
+            store::save(base, &t).unwrap();
+        }
+        let tasks = store::load_all(base).await.unwrap();
+
+        let mut archived = archive_task(base, &tasks, "e1").unwrap();
+        archived.sort();
+        assert_eq!(archived, ["e1", "e1.a", "e1.s"]);
+        let active = store::load_all(base).await.unwrap();
+        assert!(active.contains_key("e1.s.t"));
     }
 
     #[tokio::test]

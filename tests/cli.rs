@@ -1301,6 +1301,50 @@ fn test_epic_list_with_epic_filter() {
         .stdout(predicate::str::contains("Child of Alpha"));
 }
 
+/// The `--epic` filters match the whole subtree: work under a nested epic is
+/// work in the outer epic. The nested epic is listed but never ready.
+#[test]
+fn test_epic_filters_match_nested_epics() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+
+    let outer = create_epic(&tmp, "Outer");
+    let out = bea(&tmp)
+        .args(["--json", "create", "--epic", "--parent", &outer, "Inner"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let inner: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let inner = inner["id"].as_str().unwrap().to_string();
+    let leaf = create_child_task(&tmp, "Deep work", &inner);
+    let reviewed = create_child_task(&tmp, "Deep review", &inner);
+    let other = create_epic(&tmp, "Other");
+    create_child_task(&tmp, "Elsewhere", &other);
+    bea(&tmp).args(["start", &reviewed]).assert().success();
+    bea(&tmp).args(["review", &reviewed]).assert().success();
+
+    let ids = |args: &[&str]| -> Vec<String> {
+        let out = bea(&tmp).arg("--json").args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut ids: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    assert_eq!(ids(&["ready", "--epic", &outer]), vec![leaf.clone()]);
+    let mut listed = vec![inner.clone(), leaf.clone(), reviewed.clone()];
+    listed.sort();
+    assert_eq!(ids(&["list", "--epic", &outer]), listed);
+    assert_eq!(ids(&["review", "--epic", &outer]), vec![reviewed.clone()]);
+    assert_eq!(ids(&["ready", "--epic", &inner]), [leaf]);
+}
+
 /// cs7: editing the id field in bea edit must not orphan the original file.
 #[test]
 fn test_edit_id_change_rejected_no_orphan() {

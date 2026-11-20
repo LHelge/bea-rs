@@ -75,7 +75,7 @@ impl Graph {
             .values()
             .filter(|t| is_task_ready(tasks, t))
             .filter(|t| task::matches_tag(t, tag))
-            .filter(|t| epic.is_none_or(|e| t.is_child_of(e)))
+            .filter(|t| task::in_epic(t, epic))
             .collect();
 
         // Sort by effective priority (P0 first), then by creation date (oldest first).
@@ -495,7 +495,7 @@ impl Graph {
     ///   the included set
     ///
     /// Optional filters:
-    /// - `epic`: include only children of the given epic ID (plus the epic itself)
+    /// - `epic`: include only the given epic and the tasks below it, at any depth
     /// - `limit`: cap the number of nodes in the output
     pub fn bounded_adjacency_list<'a>(
         &'a self,
@@ -514,9 +514,9 @@ impl Graph {
                 if !include_done && (t.status == Status::Done || t.status == Status::Cancelled) {
                     return false;
                 }
-                // Epic filter: if specified, include only direct children + the epic itself
+                // Epic filter: if specified, include the epic's subtree + the epic itself
                 if let Some(e) = epic {
-                    return t.id == e || t.is_child_of(e);
+                    return t.id == e || task::is_descendant(&t.id, e);
                 }
                 true
             })
@@ -740,24 +740,30 @@ mod tests {
         let t1 = make_task("epic1.a", Status::Open, Priority::P1, vec![]);
         let t2 = make_task("epic2.b", Status::Open, Priority::P1, vec![]);
         let t3 = make_task("c", Status::Open, Priority::P1, vec![]);
-        // A grandchild is not a direct child of epic1.
+        // A grandchild under a nested epic is in epic1's subtree.
         let t4 = make_task("epic1.x.d", Status::Open, Priority::P1, vec![]);
-        let tasks = make_tasks(vec![t1, t2, t3, t4]);
+        // A string prefix is not a parent: "epic1x" is not under "epic1".
+        let t5 = make_task("epic1x.e", Status::Open, Priority::P1, vec![]);
+        let tasks = make_tasks(vec![t1, t2, t3, t4, t5]);
         let graph = Graph::build(&tasks);
 
-        // Filter to epic1 — only task "epic1.a"
-        let ready = graph.ready(&tasks, None, None, Some("epic1"));
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].id, "epic1.a");
+        // Filter to epic1 — its child and its grandchild
+        let mut ready: Vec<&str> = graph
+            .ready(&tasks, None, None, Some("epic1"))
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        ready.sort();
+        assert_eq!(ready, ["epic1.a", "epic1.x.d"]);
 
         // Filter to epic2 — only task "epic2.b"
         let ready = graph.ready(&tasks, None, None, Some("epic2"));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, "epic2.b");
 
-        // No filter — all four
+        // No filter — all five
         let ready = graph.ready(&tasks, None, None, None);
-        assert_eq!(ready.len(), 4);
+        assert_eq!(ready.len(), 5);
     }
 
     // --- is_task_ready predicate tests -------------------------------------------
@@ -1006,6 +1012,25 @@ mod tests {
             !adj_all.contains_key("d"),
             "isolated open node d still excluded with include_done=true"
         );
+    }
+
+    #[test]
+    fn test_bounded_adjacency_list_epic_filter_spans_the_subtree() {
+        // e (epic) ← e.a → e.s.t (under the nested epic e.s); x.b → e.a is outside.
+        let mut epic = make_task("e", Status::Open, Priority::P1, vec![]);
+        epic.task_type = TaskType::Epic;
+        let tasks = make_tasks(vec![
+            epic,
+            make_task("e.a", Status::Open, Priority::P1, vec!["e.s.t"]),
+            make_task("e.s.t", Status::Open, Priority::P1, vec![]),
+            make_task("x.b", Status::Open, Priority::P1, vec!["e.a"]),
+        ]);
+        let graph = Graph::build(&tasks);
+
+        let adj = graph.bounded_adjacency_list(&tasks, false, Some("e"), None);
+        let mut nodes: Vec<&str> = adj.keys().copied().collect();
+        nodes.sort();
+        assert_eq!(nodes, ["e.a", "e.s.t"]);
     }
 
     #[test]
