@@ -1390,7 +1390,7 @@ fn test_epic_filters_resolve_prefixes() {
 }
 
 /// An epic that lives only in the archive still filters its active children,
-/// by its ID or a prefix.
+/// by its ID or a prefix, also when there are several of them.
 #[test]
 fn test_epic_filter_on_an_archived_epic() {
     let tmp = TempDir::new().unwrap();
@@ -1398,6 +1398,7 @@ fn test_epic_filter_on_an_archived_epic() {
 
     let epic = create_epic(&tmp, "Archived epic");
     let child = create_child_task(&tmp, "Left behind", &epic);
+    let sibling = create_child_task(&tmp, "Also left behind", &epic);
     bea(&tmp).args(["done", &epic]).assert().success();
     bea(&tmp).args(["archive", &epic]).assert().success();
 
@@ -1406,7 +1407,8 @@ fn test_epic_filter_on_an_archived_epic() {
             .args(["--json", "ready", "--epic", value])
             .assert()
             .success()
-            .stdout(predicate::str::contains(&child));
+            .stdout(predicate::str::contains(&child))
+            .stdout(predicate::str::contains(&sibling));
     }
 }
 
