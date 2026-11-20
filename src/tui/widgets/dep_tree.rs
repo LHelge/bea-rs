@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -81,7 +81,8 @@ impl<'a> DepTreeWidget<'a> {
 }
 
 /// Shows an epic's subtasks as a parent → child tree, recursing into nested
-/// epics. Because each task has at most one parent, every task appears once.
+/// epics. A task's parent is the prefix of its ID, so every task appears once
+/// and each level of recursion is a strictly longer ID: rendering terminates.
 pub(in crate::tui) struct SubtaskGraphWidget<'a> {
     task: &'a Task,
     task_map: &'a HashMap<String, Task>,
@@ -103,18 +104,7 @@ impl<'a> SubtaskGraphWidget<'a> {
         }
 
         let mut body = Vec::new();
-        // `seen` guards against pathological parent cycles (parent edges aren't
-        // cycle-checked) so rendering always terminates.
-        let mut seen: HashSet<&str> = HashSet::new();
-        seen.insert(self.task.id.as_str());
-        render_children(
-            &self.task.id,
-            self.task_map,
-            "",
-            self.theme,
-            &mut seen,
-            &mut body,
-        );
+        render_children(&self.task.id, self.task_map, "", self.theme, &mut body);
 
         if body.is_empty() {
             return Vec::new();
@@ -133,12 +123,11 @@ impl<'a> SubtaskGraphWidget<'a> {
 
 /// Recursively render the children of `parent_id` (sorted by priority then
 /// creation date), expanding nested epics.
-fn render_children<'a>(
+fn render_children(
     parent_id: &str,
-    task_map: &'a HashMap<String, Task>,
+    task_map: &HashMap<String, Task>,
     prefix: &str,
     theme: &Theme,
-    seen: &mut HashSet<&'a str>,
     lines: &mut Vec<Line<'static>>,
 ) {
     let mut children: Vec<&Task> = task_map
@@ -149,16 +138,13 @@ fn render_children<'a>(
 
     let count = children.len();
     for (i, child) in children.iter().copied().enumerate() {
-        if !seen.insert(child.id.as_str()) {
-            continue; // already rendered (corrupt parent cycle) — skip
-        }
         let last = i == count - 1;
         let connector = if last { "└─ " } else { "├─ " };
         lines.push(task_line(prefix, connector, child, theme));
 
         if child.task_type == TaskType::Epic {
             let child_prefix = format!("{prefix}{}  ", if last { " " } else { "│" });
-            render_children(&child.id, task_map, &child_prefix, theme, seen, lines);
+            render_children(&child.id, task_map, &child_prefix, theme, lines);
         }
     }
 }
