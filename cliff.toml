@@ -9,11 +9,11 @@
 # blank line), not from git-cliff's parsed `breaking_description`: the footer parser takes any
 # `word:` inside the paragraph (`Error::Yaml`) for the start of a new footer and cuts it short.
 # So end the footer with a blank line before any trailers (`Co-Authored-By:` …).
-
+#
+# Written for git-cliff 2.14.2, the version release.yml pins; check the output before
+# raising the pin.
 
 [changelog]
-# Used by `--prepend` to remove the previous header.
-header_marker = "<!-- git-cliff: end of header -->"
 # A Tera template to be rendered for each release in the changelog.
 # See https://keats.github.io/tera/#getting-started
 body = """
@@ -48,15 +48,6 @@ body = """
 trim = true
 # Render body even when there are no releases to process.
 render_always = true
-# An array of regex based postprocessors to modify the changelog.
-postprocessors = [
-    # Replace the placeholder <REPO> with a URL.
-    #{ pattern = '<REPO>', replace = "https://github.com/orhun/git-cliff" },
-]
-# render body even when there are no releases to process
-# render_always = true
-# output file path
-# output = "test.md"
 
 [git]
 # Parse commits according to the conventional commits specification.

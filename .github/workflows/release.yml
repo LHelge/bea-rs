@@ -80,7 +80,7 @@ jobs:
       - name: Install git-cliff
         uses: taiki-e/install-action@v2
         with:
-          tool: git-cliff
+          tool: git-cliff@2.14.2
 
       - name: Generate changelog
         run: git-cliff --latest --output RELEASE_NOTES.md

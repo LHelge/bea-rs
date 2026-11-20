@@ -68,7 +68,9 @@ checkout (the released binary may predate the renderers being changed), appends
 `bea` instead; keep the two in step when the snapshot flags change.
 
 **Release notes.** `release.yml` writes the GitHub release body with `git-cliff --latest`, configured
-by `cliff.toml` at the repository root (not packaged). Its release job checks out with
+by `cliff.toml` at the repository root (not packaged), with git-cliff pinned to the version the
+template was checked with (`git-cliff@2.14.2`, like cargo-audit; preview the notes before raising
+the pin). Its release job checks out with
 `fetch-depth: 0`, since git-cliff needs the history and tags back to the previous release. The
 notes start with a "Breaking changes" section: every breaking commit (`type!:` or a
 `BREAKING CHANGE:` footer), each followed by its footer's text, the upgrade step, as an indented
