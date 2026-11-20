@@ -84,8 +84,13 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// YAML could not be parsed (task frontmatter or `.bears.yml`).
     #[error(transparent)]
-    Yaml(#[from] serde_yml::Error),
+    Yaml(#[from] serde_saphyr::Error),
+
+    /// A value could not be written as YAML.
+    #[error(transparent)]
+    YamlSerialize(#[from] serde_saphyr::SerializeError),
 
     #[error(transparent)]
     Json(#[from] serde_json::Error),

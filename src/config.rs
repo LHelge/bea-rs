@@ -54,7 +54,7 @@ pub fn load(base: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     let content = fs::read_to_string(&path)?;
-    let config: Config = serde_yml::from_str(&content)?;
+    let config: Config = crate::task::from_yaml(&content)?;
     config.validate()?;
     Ok(config)
 }
@@ -67,7 +67,7 @@ pub fn create_default(base: &Path) -> Result<PathBuf> {
         return Ok(path);
     }
     let config = Config::default();
-    let content = serde_yml::to_string(&config)?;
+    let content = crate::task::to_yaml(&config)?;
     fs::write(&path, content)?;
     Ok(path)
 }
@@ -88,6 +88,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = load(tmp.path()).unwrap();
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn test_create_default_file_content() {
+        let tmp = TempDir::new().unwrap();
+        let path = create_default(tmp.path()).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "id-length: 3\n");
     }
 
     #[test]

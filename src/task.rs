@@ -149,10 +149,12 @@ pub struct Task {
 
 /// Accept any YAML scalar where a string is expected.
 ///
-/// serde_yml's emitter quotes most ambiguous strings ("234", "true") but not
-/// "nan", which YAML then resolves as a float — and hand-edited files may
-/// contain unquoted numbers or booleans in string positions. Rather than
-/// rejecting the whole task file, coerce the scalar back to its string form.
+/// Files written by older versions of bears may hold `nan` or `yes` unquoted,
+/// and hand-edited files may leave numbers or booleans unquoted in string
+/// positions. Rather than rejecting the whole task file, keep the scalar as
+/// text. The YAML deserializer is target-typed, so asking for a string yields
+/// the scalar exactly as written (`1.50` stays `1.50`); the bool and number
+/// arms only matter for a deserializer that resolves scalar types itself.
 fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
     struct V;
     impl serde::de::Visitor<'_> for V {
@@ -183,7 +185,7 @@ fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
             }
         }
     }
-    d.deserialize_any(V)
+    d.deserialize_string(V)
 }
 
 fn is_default_task_type(t: &TaskType) -> bool {
@@ -312,14 +314,41 @@ pub fn sort_by_priority_owned(tasks: &mut [Task]) {
 /// Excludes easily confused characters: 0/o, 1/l/i.
 const ID_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
-/// An ID is YAML-safe when its unquoted occurrence still parses as a string.
-/// "nan" parses as a float, which serde_yml's emitter does not protect against
-/// with quotes — such an ID would corrupt the frontmatter on the first save.
+/// An ID is YAML-safe when its unquoted occurrence reads as a string in any
+/// YAML reader, not as a number, boolean or null ("nan", "234", "yes"). YAML
+/// 1.1 and 1.2 resolvers disagree on some of these, and older versions of
+/// bears wrote `nan` unquoted, so the check is deliberately conservative and
+/// independent of the YAML crate in use.
 fn yaml_safe_id(id: &str) -> bool {
-    matches!(
-        serde_yml::from_str::<serde_yml::Value>(id),
-        Ok(serde_yml::Value::String(_))
-    )
+    const NON_STRING_WORDS: &[&str] = &[
+        "~", "null", "true", "false", "yes", "no", "y", "n", "on", "off",
+    ];
+    // Rust's float parser accepts every numeric form the ID charset can
+    // spell: integers, exponents ("2e5"), "nan", "inf" and "infinity".
+    id.parse::<f64>().is_err() && !NON_STRING_WORDS.contains(&id.to_ascii_lowercase().as_str())
+}
+
+/// Serializer settings that give task frontmatter its on-disk shape: block
+/// sequences indented under their key, and long titles kept on one line
+/// instead of folded into a block scalar.
+fn yaml_options() -> serde_saphyr::SerializerOptions {
+    let mut options = serde_saphyr::SerializerOptions::default();
+    options.compact_list_indent = false;
+    options.prefer_block_scalars = false;
+    options
+}
+
+/// Deserialize YAML, reporting errors on one line with their position (no
+/// source snippet), so they fit in a warning or an MCP error message.
+pub(crate) fn from_yaml<T: serde::de::DeserializeOwned>(yaml: &str) -> Result<T> {
+    let mut options = serde_saphyr::Options::default();
+    options.with_snippet = false;
+    Ok(serde_saphyr::from_str_with_options(yaml, options)?)
+}
+
+/// Serialize a value as YAML in the shape bears writes to disk.
+pub(crate) fn to_yaml<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_saphyr::to_string_with_options(value, yaml_options())?)
 }
 
 /// Generate a short alphanumeric ID, retrying on collision or YAML-unsafe IDs.
@@ -416,14 +445,14 @@ pub fn parse_task(content: &str) -> Result<Task> {
     let body_raw = remaining.join("\n");
     let body = body_raw.trim_start_matches('\n').to_string();
 
-    let mut task: Task = serde_yml::from_str(&yaml_str)?;
+    let mut task: Task = from_yaml(&yaml_str)?;
     task.body = body;
     Ok(task)
 }
 
 /// Render a task back to markdown with YAML frontmatter.
 pub fn render_task(task: &Task) -> String {
-    let mut yaml = serde_yml::to_string(task).expect("task serialization should not fail");
+    let mut yaml = to_yaml(task).expect("task serialization should not fail");
     // Some YAML serializers omit the trailing newline; the closing
     // delimiter must start on its own line.
     if !yaml.ends_with('\n') {
@@ -496,6 +525,18 @@ mod tests {
     }
 
     #[test]
+    fn test_yaml_safe_id_rejects_other_non_strings() {
+        for id in [
+            "234", "2e5", "inf", "infinity", "yes", "true", "off", "null", "NaN",
+        ] {
+            assert!(!yaml_safe_id(id), "{id} should be unsafe");
+        }
+        for id in ["8ph", "2j2", "yem", "nax", "e23"] {
+            assert!(yaml_safe_id(id), "{id} should be safe");
+        }
+    }
+
+    #[test]
     fn test_generate_id_never_yaml_ambiguous() {
         // With length 3 the generator could produce "nan" — ensure it is skipped.
         let existing = HashSet::new();
@@ -507,8 +548,8 @@ mod tests {
 
     #[test]
     fn test_parse_unquoted_nan_id_and_title() {
-        // serde_yml's emitter writes `nan` unquoted; the parser then sees a
-        // float. The lenient deserializer must coerce it back to a string.
+        // Older bears versions wrote `nan` unquoted, which YAML resolves as a
+        // float. The lenient deserializer must keep it as a string.
         let content = "---\nid: nan\ntitle: nan\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\n---\n";
         let task = parse_task(content).unwrap();
         assert_eq!(task.id, "nan");
@@ -945,6 +986,157 @@ updated: 2026-03-15T10:30:00Z
 
         let parsed = parse_task(&rendered).unwrap();
         assert_eq!(parsed.attempt_count(), 3);
+    }
+
+    /// Compare every persisted field, since `Task` has no `PartialEq`.
+    fn assert_same_task(a: &Task, b: &Task, context: &str) {
+        assert_eq!(a.id, b.id, "{context}");
+        assert_eq!(a.title, b.title, "{context}");
+        assert_eq!(a.task_type, b.task_type, "{context}");
+        assert_eq!(a.status, b.status, "{context}");
+        assert_eq!(a.priority, b.priority, "{context}");
+        assert_eq!(a.created, b.created, "{context}");
+        assert_eq!(a.updated, b.updated, "{context}");
+        assert_eq!(a.tags, b.tags, "{context}");
+        assert_eq!(a.depends_on, b.depends_on, "{context}");
+        assert_eq!(a.parent, b.parent, "{context}");
+        assert_eq!(a.assignee, b.assignee, "{context}");
+        assert_eq!(a.attempts, b.attempts, "{context}");
+        assert_eq!(a.body, b.body, "{context}");
+    }
+
+    #[test]
+    fn test_render_frontmatter_shape() {
+        // The exact on-disk shape: field order, indented block lists, quoted
+        // timestamps, and plain IDs even when they start with a digit.
+        let content = "---
+id: 8z2
+title: \"Shape: quoting, lists and order\"
+type: epic
+status: in_progress
+priority: P1
+created: \"2026-03-15T10:30:00Z\"
+updated: \"2026-03-15T10:30:00.123456789Z\"
+tags:
+  - backend
+  - auth
+depends_on:
+  - 2j2
+  - f4c
+parent: 8ph
+assignee: alice
+attempts: 2
+---
+
+Body text.
+";
+        let task = parse_task(content).unwrap();
+        assert_eq!(render_task(&task), content);
+    }
+
+    #[test]
+    fn test_render_long_title_stays_on_one_line() {
+        let title =
+            "A long title that runs well past the eighty characters where folding would start";
+        let t = Task::new("ab2".into(), title.into(), Priority::P2);
+        let rendered = render_task(&t);
+        assert!(
+            rendered.contains(&format!("title: {title}\n")),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_render_quotes_yaml_ambiguous_words() {
+        for word in ["yes", "no", "on", "off", "nan", "inf", "true", "null", "42"] {
+            let t = Task::new("ab2".into(), word.into(), Priority::P2);
+            let rendered = render_task(&t);
+            assert!(
+                rendered.contains(&format!("title: \"{word}\"\n")),
+                "{rendered}"
+            );
+            assert_eq!(parse_task(&rendered).unwrap().title, word);
+        }
+    }
+
+    #[test]
+    fn test_parse_unquoted_scalars_keep_their_text() {
+        // Older versions of bears wrote `yes` unquoted, and hand edits may
+        // leave any scalar unquoted: string fields keep it exactly as written.
+        for word in ["yes", "off", "true", "1.50", "0x1F", "2e5"] {
+            let content = format!(
+                "---\nid: ab2\ntitle: {word}\nstatus: open\npriority: P2\ncreated: 2026-03-15T10:30:00Z\nupdated: 2026-03-15T10:30:00Z\nassignee: {word}\n---\n"
+            );
+            let task = parse_task(&content).unwrap();
+            assert_eq!(task.title, word);
+            assert_eq!(task.assignee, word);
+        }
+    }
+
+    #[test]
+    fn test_parse_legacy_serde_yaml_shape() {
+        // Archived tasks written by early versions: unquoted timestamps,
+        // unindented lists, single-quoted titles.
+        let content = "---
+id: 2j2
+title: 'TUI app shell: event loop and terminal setup'
+status: done
+priority: P1
+created: 2026-03-16T21:49:49.049228511Z
+updated: 2026-03-17T09:32:08.887318Z
+tags:
+- feature
+- tui
+depends_on:
+- zdq
+---
+
+Body.
+";
+        let task = parse_task(content).unwrap();
+        assert_eq!(task.id, "2j2");
+        assert_eq!(task.title, "TUI app shell: event loop and terminal setup");
+        assert_eq!(task.tags, vec!["feature", "tui"]);
+        assert_eq!(task.depends_on, vec!["zdq"]);
+        assert_eq!(
+            task.updated
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            "2026-03-17T09:32:08.887318Z"
+        );
+        let reparsed = parse_task(&render_task(&task)).unwrap();
+        assert_same_task(&reparsed, &task, "legacy round-trip");
+    }
+
+    #[test]
+    fn test_repository_store_roundtrips() {
+        // Every task this repository tracks, active and archived, must load
+        // and survive a render/parse cycle unchanged. `.bears/` is not part
+        // of the published crate, so the test has nothing to check there.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".bears");
+        if !root.is_dir() {
+            return;
+        }
+        let mut checked = 0;
+        for dir in [root.clone(), root.join("archive")] {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.extension().is_none_or(|ext| ext != "md") {
+                    continue;
+                }
+                let context = path.display().to_string();
+                let content = std::fs::read_to_string(&path).unwrap();
+                let task = parse_task(&content).unwrap_or_else(|e| panic!("{context}: {e}"));
+                let rendered = render_task(&task);
+                let reparsed = parse_task(&rendered).unwrap_or_else(|e| panic!("{context}: {e}"));
+                assert_same_task(&reparsed, &task, &context);
+                assert_eq!(render_task(&reparsed), rendered, "{context}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no task files found under {}", root.display());
     }
 
     #[test]
