@@ -6,7 +6,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use bears::error::Error;
 use bears::service;
 use bears::store;
-use bears::task::{self, Priority, Status, Task};
+use bears::task::{self, Priority, Status};
 
 use super::params::*;
 use super::{BeaMcp, ok_json, tool_ok};
@@ -473,7 +473,9 @@ impl BeaMcp {
     }
 
     #[tool(
-        description = "Return the children of an epic in topological execution order (plan view)"
+        description = "Return an epic's direct children in topological execution order (plan view). \
+            A nested epic is one step, marked type \"epic\" with its progress { done, total }; \
+            call plan_epic on its ID for its own steps."
     )]
     async fn plan_epic(
         &self,
@@ -483,16 +485,20 @@ impl BeaMcp {
             async {
                 let tasks = store::load_all(&self.base).await?;
                 let plan = service::plan_epic(&tasks, &params.id)?;
-                // Cyclic children cannot be ordered; append them so nothing is lost.
-                let all: Vec<&Task> = plan
-                    .tasks
-                    .iter()
-                    .chain(plan.cyclic.iter())
-                    .copied()
-                    .collect();
+                // Cyclic children cannot be ordered; `steps` appends them so
+                // nothing is lost. A nested epic's step adds its progress.
                 let eff = service::effective_priorities(&tasks);
-                let summaries: Vec<_> = all.iter().map(|t| t.summary(eff.get(&t.id))).collect();
-                ok_json(serde_json::json!(summaries))
+                let steps = plan
+                    .steps()
+                    .map(|t| {
+                        let mut v = serde_json::to_value(t.summary(eff.get(&t.id)))?;
+                        if let Some(p) = plan.progress.get(&t.id) {
+                            v["progress"] = serde_json::to_value(p)?;
+                        }
+                        Ok(v)
+                    })
+                    .collect::<serde_json::Result<Vec<_>>>()?;
+                ok_json(serde_json::json!(steps))
             }
             .await,
         )
@@ -1759,6 +1765,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(non_epic_result.is_error, Some(true));
+    }
+
+    /// A nested epic is one step of its parent's plan, marked as an epic with
+    /// its progress; its tasks are not steps, and plain steps carry no progress.
+    #[tokio::test]
+    async fn test_tool_plan_epic_nested_epic_is_one_step() {
+        let (tmp, mcp) = setup();
+        for (id, epic, status, deps) in [
+            ("ep", true, Status::Open, vec![]),
+            ("ep.nn", true, Status::Open, vec![]),
+            ("ep.nn.aa", false, Status::Done, vec![]),
+            ("ep.nn.bb", false, Status::Open, vec![]),
+            ("ep.tt", false, Status::Open, vec!["ep.nn".to_string()]),
+        ] {
+            let mut t = bears::task::Task::new(id.into(), format!("Task {id}"), Priority::P2);
+            if epic {
+                t.task_type = TaskType::Epic;
+            }
+            t.status = status;
+            t.depends_on = deps;
+            store::save(tmp.path(), &t).unwrap();
+        }
+
+        let result = mcp
+            .plan_epic(Parameters(PlanEpicParams { id: "ep".into() }))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let json = extract_json(&result);
+        let steps = json.as_array().unwrap();
+        let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["ep.nn", "ep.tt"]);
+        assert_eq!(steps[0]["type"], "epic");
+        assert_eq!(
+            steps[0]["progress"],
+            serde_json::json!({ "done": 1, "total": 2 })
+        );
+        assert!(steps[1].get("type").is_none());
+        assert!(steps[1].get("progress").is_none());
     }
 
     #[tokio::test]
