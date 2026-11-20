@@ -3173,3 +3173,37 @@ fn test_migrate_not_initialized() {
         .failure()
         .stderr(predicate::str::contains("not initialized"));
 }
+
+/// Dotted IDs differ in length; list output pads them so the priority column
+/// starts at the same place on every row.
+#[test]
+fn test_list_aligns_dotted_ids() {
+    let tmp = TempDir::new().unwrap();
+    bea(&tmp).arg("init").assert().success();
+    let create = |args: &[&str]| -> String {
+        let out = bea(&tmp)
+            .args(["--json", "create"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["id"].as_str().unwrap().to_string()
+    };
+    let epic = create(&["Epic", "--epic"]);
+    let sub = create(&["Sub epic", "--epic", "--parent", &epic]);
+    let leaf = create(&["Leaf", "--parent", &sub]);
+    assert_eq!(leaf.matches('.').count(), 2, "{leaf}");
+
+    for cmd in [&["list"][..], &["epics"][..], &["search", "e"][..]] {
+        let out = bea(&tmp).args(cmd).output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let columns: Vec<usize> = stdout.lines().map(|l| l.find(" P2 ").unwrap()).collect();
+        assert!(columns.len() >= 2, "{stdout}");
+        assert!(
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "`bea {}` priority column not aligned:\n{stdout}",
+            cmd.join(" ")
+        );
+    }
+}

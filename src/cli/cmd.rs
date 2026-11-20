@@ -13,7 +13,9 @@ use bears::service;
 use bears::store;
 use bears::task::{self, Priority, Status, Task, TaskType};
 
-use super::{color_id, color_priority, color_status, color_tags, format_priority, output};
+use super::{
+    color_id, color_priority, color_status, color_tags, format_priority, id_cell, id_width, output,
+};
 
 /// Map an affirmative-prompt response to a boolean. Accepts `y`/`yes`
 /// (case-insensitive); anything else (including empty) is treated as No.
@@ -227,12 +229,13 @@ pub fn cmd_list(
         if filtered.is_empty() {
             println!("No tasks found.");
         } else {
+            let w = id_width(filtered.iter().map(|t| t.id.as_str()));
             for t in &filtered {
                 if t.task_type.is_epic() {
                     let p = service::epic_progress(tasks, &t.id);
                     println!(
-                        "[{}] {} {} {} {} [{}/{}] [{}]",
-                        color_id(&t.id),
+                        "{} {} {} {} {} [{}/{}] [{}]",
+                        id_cell(&t.id, w),
                         format_priority(&t.priority, eff.get(&t.id)),
                         color_status(&t.status),
                         "Epic:".if_supports_color(Stdout, |t| t.bright_magenta()),
@@ -243,8 +246,8 @@ pub fn cmd_list(
                     );
                 } else {
                     println!(
-                        "[{}] {} {} — {} [{}]",
-                        color_id(&t.id),
+                        "{} {} {} — {} [{}]",
+                        id_cell(&t.id, w),
                         format_priority(&t.priority, eff.get(&t.id)),
                         color_status(&t.status),
                         t.title,
@@ -274,10 +277,11 @@ pub fn cmd_ready(
         if ready.is_empty() {
             println!("No tasks ready.");
         } else {
+            let w = id_width(ready.iter().map(|t| t.id.as_str()));
             for t in &ready {
                 println!(
-                    "[{}] {} — {} [{}]",
-                    color_id(&t.id),
+                    "{} {} — {} [{}]",
+                    id_cell(&t.id, w),
                     format_priority(&t.priority, eff.get(&t.id)),
                     t.title,
                     color_tags(&t.tags)
@@ -305,6 +309,7 @@ pub fn cmd_review_queue(
     } else if queue.is_empty() {
         println!("Nothing awaiting review.");
     } else {
+        let w = id_width(queue.iter().map(|t| t.id.as_str()));
         for t in &queue {
             let who = if t.assignee.is_empty() {
                 String::new()
@@ -312,8 +317,8 @@ pub fn cmd_review_queue(
                 format!(" ({})", t.assignee)
             };
             println!(
-                "[{}] {} — {}{} [{}]",
-                color_id(&t.id),
+                "{} {} — {}{} [{}]",
+                id_cell(&t.id, w),
                 format_priority(&t.priority, eff.get(&t.id)),
                 t.title,
                 who,
@@ -374,14 +379,15 @@ pub fn cmd_epics(tasks: &HashMap<String, Task>, json: bool) -> Result<()> {
     } else if epics.is_empty() {
         println!("No epics found.");
     } else {
+        let w = id_width(epics.iter().map(|t| t.id.as_str()));
         for t in &epics {
             let p = service::epic_progress(tasks, &t.id);
             let prefix = "Epic:"
                 .if_supports_color(Stdout, |t| t.bright_magenta())
                 .to_string();
             println!(
-                "[{}] {} {} {} {} [{}/{}] [{}]",
-                color_id(&t.id),
+                "{} {} {} {} {} [{}/{}] [{}]",
+                id_cell(&t.id, w),
                 color_priority(&t.priority),
                 color_status(&t.status),
                 prefix,
@@ -988,10 +994,11 @@ pub fn cmd_search(tasks: &HashMap<String, Task>, query: &str, all: bool, json: b
         if results.is_empty() {
             println!("No tasks matching \"{query}\".");
         } else {
+            let w = id_width(results.iter().map(|t| t.id.as_str()));
             for t in &results {
                 println!(
-                    "[{}] {} {} — {} [{}]",
-                    color_id(&t.id),
+                    "{} {} {} — {} [{}]",
+                    id_cell(&t.id, w),
                     color_priority(&t.priority),
                     color_status(&t.status),
                     t.title,
@@ -1051,10 +1058,11 @@ pub async fn cmd_list_archived(base: &Path, json: bool) -> Result<()> {
     } else if archived.is_empty() {
         println!("No archived tasks.");
     } else {
+        let w = id_width(archived.iter().map(|t| t.id.as_str()));
         for t in &archived {
             println!(
-                "[{}] {} {} — {} [{}]",
-                color_id(&t.id),
+                "{} {} {} — {} [{}]",
+                id_cell(&t.id, w),
                 color_priority(&t.priority),
                 color_status(&t.status),
                 t.title,
@@ -1075,10 +1083,11 @@ pub async fn cmd_log(base: &Path, limit: Option<usize>, json: bool) -> Result<()
     } else if archived.is_empty() {
         println!("No archived tasks.");
     } else {
+        let w = id_width(archived.iter().map(|t| t.id.as_str()));
         for t in &archived {
             println!(
-                "[{}] {} {} — {} [{}]",
-                color_id(&t.id),
+                "{} {} {} — {} [{}]",
+                id_cell(&t.id, w),
                 color_priority(&t.priority),
                 color_status(&t.status),
                 t.title,

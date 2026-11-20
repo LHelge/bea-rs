@@ -255,6 +255,22 @@ fn color_id(id: &str) -> String {
     id.if_supports_color(Stdout, |t| t.dimmed()).to_string()
 }
 
+/// Width of the longest of `ids`, for [`id_cell`]. Dotted IDs (`a1b.c2.d7`)
+/// vary in length, so list output pads every ID to the longest one shown.
+fn id_width<'a>(ids: impl IntoIterator<Item = &'a str>) -> usize {
+    ids.into_iter()
+        .map(|id| id.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// `[id]` padded with trailing spaces to `width` ID characters, so the column
+/// after it lines up for every row of a list.
+fn id_cell(id: &str, width: usize) -> String {
+    let pad = width.saturating_sub(id.chars().count());
+    format!("[{}]{}", color_id(id), " ".repeat(pad))
+}
+
 fn color_tags(tags: &[String]) -> String {
     let joined = tags.join(", ");
     joined.if_supports_color(Stdout, |t| t.dimmed()).to_string()
@@ -263,4 +279,26 @@ fn color_tags(tags: &[String]) -> String {
 fn output<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_cells_pad_to_the_longest_id() {
+        let ids = ["a1b", "a1b.c2", "a1b.c2.d7"];
+        let width = id_width(ids);
+        assert_eq!(width, 9);
+        let cells: Vec<String> = ids.iter().map(|id| id_cell(id, width)).collect();
+        assert_eq!(cells[0], "[a1b]      ");
+        assert_eq!(cells[1], "[a1b.c2]   ");
+        assert_eq!(cells[2], "[a1b.c2.d7]");
+    }
+
+    #[test]
+    fn id_width_of_nothing_is_zero() {
+        assert_eq!(id_width(std::iter::empty()), 0);
+        assert_eq!(id_cell("a1b", 0), "[a1b]");
+    }
 }
