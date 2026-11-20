@@ -121,8 +121,8 @@ impl<'a> SubtaskGraphWidget<'a> {
     }
 }
 
-/// Recursively render the children of `parent_id` (sorted by priority then
-/// creation date), expanding nested epics.
+/// Recursively render the children of `parent_id` (sorted by priority,
+/// creation date, then ID), expanding nested epics.
 fn render_children(
     parent_id: &str,
     task_map: &HashMap<String, Task>,
@@ -134,7 +134,7 @@ fn render_children(
         .values()
         .filter(|t| t.is_child_of(parent_id))
         .collect();
-    children.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
+    children.sort_by(|a, b| bears::task::canonical_order(a, b));
 
     let count = children.len();
     for (i, child) in children.iter().copied().enumerate() {
@@ -225,6 +225,31 @@ mod tests {
             SubtaskGraphWidget::new(&t, &map, &Theme::default())
                 .lines()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn subtask_tree_breaks_exact_ties_by_id() {
+        let mut e = task("e", "Epic");
+        e.task_type = TaskType::Epic;
+        let mut map: HashMap<String, Task> = [("e".into(), e.clone())].into();
+        let ids = ["e.q", "e.d", "e.x", "e.b", "e.m", "e.f", "e.s", "e.k"];
+        for id in ids {
+            let mut c = task(id, "Tie");
+            c.created = e.created;
+            map.insert(id.into(), c);
+        }
+
+        let text = text_of(&SubtaskGraphWidget::new(&e, &map, &Theme::default()).lines());
+        let positions: Vec<usize> = ids
+            .iter()
+            .map(|id| text.find(&format!("[{id}]")).unwrap())
+            .collect();
+        let mut by_id: Vec<(&str, usize)> = ids.iter().copied().zip(positions).collect();
+        by_id.sort_by_key(|(id, _)| *id);
+        assert!(
+            by_id.windows(2).all(|w| w[0].1 < w[1].1),
+            "children must be listed by ID: {text}"
         );
     }
 
