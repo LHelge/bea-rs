@@ -140,7 +140,8 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
-                // Map MCP parent: None = unchanged, "" = clear, "id" = set
+                // Map MCP parent: None = unchanged, "" = root, "id" = under that
+                // epic. The service refuses any value other than the current parent.
                 let parent_update: Option<Option<String>> = params
                     .parent
                     .map(|p| if p.is_empty() { None } else { Some(p) });
