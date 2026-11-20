@@ -523,7 +523,7 @@ The package is `bea-rs`; the library is `bears`:
 
 ```toml
 [dependencies]
-bears = { package = "bea-rs", version = "0.8", default-features = false }
+bears = { package = "bea-rs", version = "0.10", default-features = false }
 ```
 
 `default-features = false` drops the CLI, TUI, and MCP frontends — the library
