@@ -141,8 +141,9 @@ fn create_task(app: &App, title: &str, terminal: &mut DefaultTerminal) -> Result
 fn delete_task(app: &mut App, id: &str) -> Result<()> {
     let (_, task_map) = load_tasks_sync(&app.base)?;
     let deleted = bears::service::delete_task(&app.base, &task_map, id)?;
-    reload(app)?;
+    // Before the reload: the renames are on disk even if the reload fails.
     app.show_renames(&deleted.renamed);
+    reload(app)?;
     Ok(())
 }
 

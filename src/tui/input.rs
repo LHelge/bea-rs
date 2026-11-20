@@ -277,6 +277,8 @@ impl App {
         let Mode::ShowRenames { scroll, .. } = &mut self.mode else {
             return Action::None;
         };
+        // The terminal may have grown since the last scroll, lowering `max`.
+        *scroll = (*scroll).min(max);
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.mode = Mode::Normal,
             KeyCode::Char('j') | KeyCode::Down => *scroll = (*scroll + 1).min(max),
@@ -575,6 +577,30 @@ mod tests {
         assert_eq!(renames_scroll(&app), 5);
         app.handle_key(make_key(KeyCode::Up));
         assert_eq!(renames_scroll(&app), 4);
+    }
+
+    #[test]
+    fn test_renames_modal_scroll_follows_a_grown_terminal() {
+        let mut app = make_app();
+        app.show_renames(&renames(30));
+        app.renames_max_scroll = 23;
+        app.handle_key(make_key(KeyCode::End));
+        assert_eq!(renames_scroll(&app), 23);
+
+        // The terminal grew so every row fits: the next key starts from 0,
+        // not from an offset the render no longer shows.
+        app.renames_max_scroll = 0;
+        for key in [KeyCode::Char('k'), KeyCode::Up, KeyCode::PageUp] {
+            app.handle_key(make_key(key));
+            assert_eq!(renames_scroll(&app), 0, "{key:?}");
+        }
+
+        // Shrunk again partway: scrolling up moves from the visible offset.
+        app.renames_max_scroll = 23;
+        app.handle_key(make_key(KeyCode::End));
+        app.renames_max_scroll = 10;
+        app.handle_key(make_key(KeyCode::Char('k')));
+        assert_eq!(renames_scroll(&app), 9);
     }
 
     #[test]
