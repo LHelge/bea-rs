@@ -940,13 +940,8 @@ pub fn cmd_prune(
     let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
-        // The pruned summaries; when surviving children were detached, an
-        // object that adds the old → new ID map next to them.
-        if renamed.is_empty() {
-            output(&summaries)?;
-        } else {
-            output(&serde_json::json!({ "pruned": summaries, "renamed": renamed }))?;
-        }
+        // Always the same shape: `renamed` is empty when nothing was detached.
+        output(&serde_json::json!({ "pruned": summaries, "renamed": renamed }))?;
     } else {
         if deleted.is_empty() {
             println!("No tasks to prune.");

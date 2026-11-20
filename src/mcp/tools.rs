@@ -384,9 +384,9 @@ impl BeaMcp {
         Prefer archive_task (no id → sweep) which moves settled tasks to the archive instead of \
         destroying them, keeping history recoverable via restore_task. \
         prune_tasks remains available for cases where permanent deletion is intentional. \
-        Surviving children of a pruned epic are detached to fresh root IDs; the result is then \
-        an object `{ pruned, renamed }` with the old ID to new ID map, otherwise the list of \
-        pruned tasks."
+        Surviving children of a pruned epic are detached to fresh root IDs. The result is \
+        always an object `{ pruned, renamed }`: `pruned` lists the deleted tasks, `renamed` maps \
+        each detached task's old ID to its new one (empty when nothing moved)."
     )]
     async fn prune_tasks(
         &self,
@@ -398,13 +398,8 @@ impl BeaMcp {
                 let include_done = params.include_done.unwrap_or(false);
                 let pruned = service::prune_tasks(&self.base, &tasks, include_done)?;
                 let summaries: Vec<_> = pruned.tasks.iter().map(|t| t.summary(None)).collect();
-                // When surviving children were detached, an object that adds
-                // the old → new ID map next to the pruned summaries.
-                if pruned.renamed.is_empty() {
-                    ok_json(serde_json::json!(summaries))
-                } else {
-                    ok_json(serde_json::json!({ "pruned": summaries, "renamed": pruned.renamed }))
-                }
+                // Always the same shape: `renamed` is empty when nothing was detached.
+                ok_json(serde_json::json!({ "pruned": summaries, "renamed": pruned.renamed }))
             }
             .await,
         )
@@ -2543,6 +2538,35 @@ mod tests {
         let renamed = pruned["renamed"].as_object().unwrap();
         assert_eq!(renamed.len(), 1, "only the survivor moves: {pruned}");
         assert!(!renamed[&keep].as_str().unwrap().contains('.'));
+    }
+
+    /// The result is `{ pruned, renamed }` even when nothing moved or
+    /// nothing was pruned.
+    #[tokio::test]
+    async fn test_tool_prune_always_returns_object() {
+        let (_tmp, mcp) = setup();
+        let lone = create_for_test(&mcp, "Lone", false, None).await;
+        mcp.cancel_task(Parameters(TaskIdParams { id: lone.clone() }))
+            .await
+            .unwrap();
+
+        let pruned = mcp
+            .prune_tasks(Parameters(PruneParams { include_done: None }))
+            .await
+            .unwrap();
+        let pruned = extract_json(&pruned);
+        assert_eq!(pruned["pruned"].as_array().unwrap().len(), 1, "{pruned}");
+        assert_eq!(pruned["pruned"][0]["id"], lone.as_str(), "{pruned}");
+        assert_eq!(pruned["renamed"], serde_json::json!({}), "{pruned}");
+
+        let empty = mcp
+            .prune_tasks(Parameters(PruneParams { include_done: None }))
+            .await
+            .unwrap();
+        assert_eq!(
+            extract_json(&empty),
+            serde_json::json!({ "pruned": [], "renamed": {} })
+        );
     }
 
     #[tokio::test]

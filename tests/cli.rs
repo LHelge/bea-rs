@@ -754,7 +754,8 @@ fn test_delete_epic_detaches_children() {
 }
 
 /// Pruning an epic detaches only the children that survive the prune; the
-/// `--json` output becomes `{ pruned, renamed }` when something moved.
+/// `--json` output is always `{ pruned, renamed }`, `renamed` empty when
+/// nothing moved.
 #[test]
 fn test_prune_epic_detaches_surviving_children() {
     let tmp = TempDir::new().unwrap();
@@ -790,7 +791,7 @@ fn test_prune_epic_detaches_surviving_children() {
         .success()
         .stdout(predicate::str::contains("Keep"));
 
-    // Text output, and a prune with nothing to detach keeps the plain list.
+    // Text output, and a prune with nothing to detach keeps the same shape.
     let epic = create_epic(&tmp, "Another epic");
     let keep = create_child_task(&tmp, "Keep again", &epic);
     bea(&tmp).args(["cancel", &epic]).assert().success();
@@ -806,7 +807,16 @@ fn test_prune_epic_detaches_surviving_children() {
     let out = bea(&tmp).args(["--json", "prune"]).output().unwrap();
     let v: serde_json::Value =
         serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["pruned"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["pruned"][0]["id"], lone.as_str(), "{v}");
+    assert_eq!(v["renamed"], serde_json::json!({}), "{v}");
+
+    // Nothing to prune: still the object, both members empty.
+    let out = bea(&tmp).args(["--json", "prune"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({ "pruned": [], "renamed": {} }));
 }
 
 /// Re-running `bea init` must not reset an existing .bears.yml.
