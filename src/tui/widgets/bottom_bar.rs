@@ -75,6 +75,7 @@ impl Widget for BottomBarWidget<'_> {
             Mode::CreateInput { .. } => vec![("Esc", "cancel"), ("Enter", "create")],
             Mode::FilterInput { .. } => vec![("Esc", "cancel"), ("Enter", "apply")],
             Mode::ConfirmDelete { .. } => vec![("y", "confirm delete"), ("any", "cancel")],
+            Mode::ShowRenames { .. } => vec![("Esc/Enter", "close"), ("j/k", "scroll")],
         };
 
         // Build hint spans, truncating when terminal width is exceeded

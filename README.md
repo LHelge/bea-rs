@@ -547,7 +547,7 @@ bea completions fish | source
 bea tui
 ```
 
-A full-screen terminal UI for browsing and managing tasks, with **live refresh** when `.bears/` changes on disk (e.g. while an AI agent edits tasks in the background). Press `m` to cycle the list view — **Open**, **Ready**, **Epics**, **Completed** (done/cancelled still in the active set), **Archive** (loaded from `.bears/archive/`), **All** — `/` to filter by text, and edit the selected task in your `$EDITOR`. The detail pane shows a task's direct dependencies, and for epics the full subtask tree.
+A full-screen terminal UI for browsing and managing tasks, with **live refresh** when `.bears/` changes on disk (e.g. while an AI agent edits tasks in the background). Press `m` to cycle the list view — **Open**, **Ready**, **Epics**, **Completed** (done/cancelled still in the active set), **Archive** (loaded from `.bears/archive/`), **All** — `/` to filter by text, and edit the selected task in your `$EDITOR`. The detail pane shows a task's direct dependencies, and for epics the full subtask tree. Deleting an epic (`d`) gives its children new root IDs; the TUI then lists every `old → new` ID in a dialog you scroll with `j`/`k` and close with `Esc` or `Enter`.
 
 ---
 

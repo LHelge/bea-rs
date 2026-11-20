@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use ratatui::Frame;
@@ -11,8 +11,8 @@ use bears::task::{Status, Task, TaskType};
 
 use super::style::Theme;
 use super::widgets::{
-    BottomBarWidget, DetailMetrics, InputModalWidget, InputPromptWidget, StatusModalWidget,
-    TaskDetailWidget, TaskListWidget,
+    BottomBarWidget, DetailMetrics, InputModalWidget, InputPromptWidget, RenamesModalWidget,
+    StatusModalWidget, TaskDetailWidget, TaskListWidget,
 };
 
 /// Action returned by handle_key for the event loop to process.
@@ -37,10 +37,26 @@ pub enum FocusPane {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
-    StatusSelect { task_id: String, selected: usize },
-    CreateInput { input: String },
-    FilterInput { input: String },
-    ConfirmDelete { task_id: String, title: String },
+    StatusSelect {
+        task_id: String,
+        selected: usize,
+    },
+    CreateInput {
+        input: String,
+    },
+    FilterInput {
+        input: String,
+    },
+    ConfirmDelete {
+        task_id: String,
+        title: String,
+    },
+    /// A dismissible list of the tasks an operation gave new IDs (old, new),
+    /// e.g. the children detached when their epic was deleted.
+    ShowRenames {
+        renamed: Vec<(String, String)>,
+        scroll: usize,
+    },
 }
 
 /// List filtering mode.
@@ -156,6 +172,8 @@ pub struct App {
     pub(super) detail_content_height: u16,
     pub(super) detail_visible_height: u16,
     pub(super) last_selected_id: Option<String>,
+    /// Largest scroll offset of the renames modal at the last render.
+    pub(super) renames_max_scroll: usize,
     pub(super) theme: Theme,
 }
 
@@ -188,6 +206,7 @@ impl App {
             detail_content_height: 0,
             detail_visible_height: 0,
             last_selected_id,
+            renames_max_scroll: 0,
             theme: Theme::default(),
         }
     }
@@ -306,6 +325,21 @@ impl App {
         self.list_state.select(new_idx);
     }
 
+    /// Show the renames an operation made (old ID → new ID) in a modal the
+    /// user dismisses. Does nothing when nothing was renamed.
+    pub(super) fn show_renames(&mut self, renamed: &BTreeMap<String, String>) {
+        if renamed.is_empty() {
+            return;
+        }
+        let renamed: Vec<(String, String)> = renamed
+            .iter()
+            .map(|(old, new)| (old.clone(), new.clone()))
+            .collect();
+        // Until the first render measures the modal, allow scrolling to any row.
+        self.renames_max_scroll = renamed.len().saturating_sub(1);
+        self.mode = Mode::ShowRenames { renamed, scroll: 0 };
+    }
+
     /// Reset detail scroll when the selected task changes.
     pub(super) fn check_scroll_reset(&mut self) {
         let current_id = self.selected_task().map(|t| t.id.clone());
@@ -402,6 +436,11 @@ impl App {
             Mode::ConfirmDelete { title, .. } => {
                 InputModalWidget::new(&format!(" Delete \"{title}\"? (y/N) "), "", &self.theme)
                     .render(area, frame.buffer_mut());
+            }
+            Mode::ShowRenames { renamed, scroll } => {
+                let widget = RenamesModalWidget::new(renamed, *scroll, &self.theme);
+                self.renames_max_scroll = widget.max_scroll(area);
+                widget.render(area, frame.buffer_mut());
             }
             Mode::Normal => {}
         }
