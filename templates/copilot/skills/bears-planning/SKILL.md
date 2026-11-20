@@ -127,7 +127,7 @@ After creating a task, update its body with detailed content using `update_task(
 
 ### 6. Verify and present the plan
 
-- Use `list_all_tasks(epic="<id>")` or `bea list --epic <id> --json` to review all tasks
+- Use `list_all_tasks(epic="<id>")` or `bea list --epic <id> --json` to review all tasks (the `epic` filter matches every task below the epic, nested epics and their tasks included)
 - Confirm dependency ordering makes sense — `list_ready(epic="<id>")` should show only the first unblocked task(s)
 - Present a summary table to the user:
 

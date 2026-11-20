@@ -42,7 +42,7 @@ bea list --json
 # List with filters
 bea list --status open --priority P1 --tag backend --json
 
-# List tasks under an epic
+# List tasks under an epic (every level: tasks under its nested epics too)
 bea list --epic <epic-id> --json
 
 # Show ready tasks (open, all deps done)

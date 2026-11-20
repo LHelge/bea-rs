@@ -1,10 +1,11 @@
 ---
 id: akg
 title: Epic filters match the whole subtree, not only direct children
-status: open
+status: done
 priority: P2
 created: "2026-11-20T18:31:07.852613372Z"
-updated: "2026-11-20T18:31:07.852613372Z"
+updated: "2026-11-20T18:37:06.451438672Z"
+attempts: 1
 ---
 
 With hierarchical IDs an epic can contain an epic (`a1b` → `a1b.c2` → `a1b.c2.d7`). The `epic` filters still match direct children only, so `bea ready --epic a1b` returns nothing for work under the nested epic `a1b.c2`: epics are never ready, and their children are not direct children of `a1b`. An agent told to work on `a1b` concludes there is nothing to do.

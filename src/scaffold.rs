@@ -454,6 +454,20 @@ mod tests {
         }
     }
 
+    /// The planning skill and CLI fallback, which use the `epic` filter, say
+    /// that it reaches the tasks under nested epics.
+    #[test]
+    fn test_templates_describe_epic_filter_subtree() {
+        for (name, text) in [
+            ("claude SKILL.md", CLAUDE_SKILL_MD),
+            ("claude cli-fallback.md", CLAUDE_SKILL_CLI_FALLBACK),
+            ("copilot SKILL.md", COPILOT_SKILL_MD),
+            ("copilot cli-fallback.md", COPILOT_SKILL_CLI_FALLBACK),
+        ] {
+            assert!(text.contains("nested epics"), "{name}");
+        }
+    }
+
     /// Merging preserves other servers already present in the file.
     #[test]
     fn test_merge_mcp_json_preserves_other_servers() {

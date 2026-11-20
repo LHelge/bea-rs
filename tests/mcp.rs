@@ -269,6 +269,87 @@ async fn test_invalid_priority_rejected_by_schema() {
     client.cancel().await.unwrap();
 }
 
+/// Every `epic` parameter matches the epic's whole subtree, nested epics
+/// included.
+#[tokio::test]
+async fn test_epic_filters_match_nested_epics_over_mcp() {
+    let tmp = TempDir::new().unwrap();
+    let client = connect(&tmp).await;
+    let id = |v: serde_json::Value| v["id"].as_str().unwrap().to_string();
+
+    let outer = id(create_task(
+        &client,
+        serde_json::json!({ "title": "Outer", "type": "epic" }),
+    )
+    .await);
+    let direct = id(create_task(
+        &client,
+        serde_json::json!({ "title": "Direct", "parent": outer }),
+    )
+    .await);
+    let inner = id(create_task(
+        &client,
+        serde_json::json!({ "title": "Inner", "type": "epic", "parent": outer }),
+    )
+    .await);
+    let deep = id(create_task(
+        &client,
+        serde_json::json!({ "title": "Deep", "parent": inner }),
+    )
+    .await);
+    let reviewed = id(create_task(
+        &client,
+        serde_json::json!({ "title": "Reviewed", "parent": inner, "depends_on": [direct] }),
+    )
+    .await);
+    create_task(&client, serde_json::json!({ "title": "Root" })).await;
+    for tool in ["start_task", "review_task"] {
+        let r = client
+            .call_tool(params(tool, serde_json::json!({ "id": reviewed })))
+            .await
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{tool}: {:?}", r.content);
+    }
+
+    let call = async |tool: &'static str| -> serde_json::Value {
+        let r = client
+            .call_tool(params(tool, serde_json::json!({ "epic": outer })))
+            .await
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{tool}: {:?}", r.content);
+        extract_json(&r)
+    };
+    let ids_of = |v: serde_json::Value| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| id(t.clone()))
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+
+    assert_eq!(
+        ids_of(call("list_ready").await),
+        sorted(vec![direct.clone(), deep.clone()])
+    );
+    assert_eq!(
+        ids_of(call("list_all_tasks").await),
+        sorted(vec![direct.clone(), inner, deep, reviewed.clone()])
+    );
+    assert_eq!(ids_of(call("list_review").await), vec![reviewed.clone()]);
+    let graph = call("get_graph").await;
+    let nodes: Vec<String> = sorted(graph.as_object().unwrap().keys().cloned().collect());
+    assert_eq!(nodes, sorted(vec![direct, reviewed]));
+
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_unknown_id_is_tool_error_not_protocol_error() {
     let tmp = TempDir::new().unwrap();

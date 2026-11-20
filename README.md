@@ -181,6 +181,9 @@ bea list --epic <epic-id>
 bea list --all
 ```
 
+`--epic` (here and on `ready` and `review`) matches every task below the epic: its children, and the
+tasks under any nested epic. The epic itself is not listed.
+
 ### `bea ready`
 Show tasks that are `open` and have all dependencies completed. Epics are excluded — only actionable tasks appear. This is the key command for agent workflows — always start here.
 

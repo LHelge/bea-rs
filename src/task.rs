@@ -323,6 +323,12 @@ pub fn matches_tag(task: &Task, tag: Option<&str>) -> bool {
     tag.is_none_or(|t| task.tags.iter().any(|tt| tt == t))
 }
 
+/// Whether a task matches the given epic filter (if any): it lies anywhere
+/// below the epic, nested epics included. The epic itself does not match.
+pub fn in_epic(task: &Task, epic: Option<&str>) -> bool {
+    epic.is_none_or(|e| is_descendant(&task.id, e))
+}
+
 /// Canonical sort: priority ascending (P0 first), then creation date ascending.
 pub fn sort_by_priority_owned(tasks: &mut [Task]) {
     tasks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.created.cmp(&b.created)));
@@ -1300,6 +1306,18 @@ updated: 2026-03-15T10:30:00Z
 
         t.status = Status::Blocked;
         assert!(is_active(&t));
+    }
+
+    #[test]
+    fn test_in_epic_matches_the_whole_subtree() {
+        let task = |id: &str| Task::new(id.into(), "T".into(), Priority::P2);
+        assert!(in_epic(&task("a1b.c2"), Some("a1b")));
+        assert!(in_epic(&task("a1b.c2.d7"), Some("a1b")));
+        assert!(in_epic(&task("a1b.c2.d7"), Some("a1b.c2")));
+        assert!(!in_epic(&task("a1b"), Some("a1b")), "the epic itself");
+        assert!(!in_epic(&task("a1bx.c2"), Some("a1b")), "whole segments");
+        assert!(!in_epic(&task("a1b.c2"), Some("a1b.c2.d7")));
+        assert!(in_epic(&task("zzz"), None));
     }
 
     #[test]

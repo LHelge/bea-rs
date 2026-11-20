@@ -9,7 +9,7 @@ pub struct ListReadyParams {
     pub limit: Option<u64>,
     /// Filter by tag
     pub tag: Option<String>,
-    /// Filter to the direct children of this epic ID
+    /// Filter to the tasks under this epic ID, nested epics included
     pub epic: Option<String>,
 }
 
@@ -19,7 +19,7 @@ pub struct ListReviewParams {
     pub limit: Option<u64>,
     /// Filter by tag
     pub tag: Option<String>,
-    /// Filter to the direct children of this epic ID
+    /// Filter to the tasks under this epic ID, nested epics included
     pub epic: Option<String>,
 }
 
@@ -31,7 +31,7 @@ pub struct ListTasksFilterParams {
     pub priority: Option<Priority>,
     /// Filter by tag
     pub tag: Option<String>,
-    /// Filter to the direct children of this epic ID
+    /// Filter to the tasks under this epic ID, nested epics included
     pub epic: Option<String>,
     /// Max number of results
     pub limit: Option<u64>,
@@ -132,7 +132,7 @@ pub struct PlanEpicParams {
 pub struct GetGraphParams {
     /// Include done and cancelled tasks (default: false)
     pub include_done: Option<bool>,
-    /// Filter to direct children of a given epic ID
+    /// Filter to this epic ID and the tasks under it, nested epics included
     pub epic: Option<String>,
     /// Max number of nodes to return
     pub limit: Option<u64>,
