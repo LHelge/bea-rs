@@ -380,7 +380,10 @@ impl BeaMcp {
         description = "DEPRECATED: Permanently hard-deletes cancelled (and optionally done) tasks. \
         Prefer archive_task (no id → sweep) which moves settled tasks to the archive instead of \
         destroying them, keeping history recoverable via restore_task. \
-        prune_tasks remains available for cases where permanent deletion is intentional."
+        prune_tasks remains available for cases where permanent deletion is intentional. \
+        Surviving children of a pruned epic are detached to fresh root IDs; the result is then \
+        an object `{ pruned, renamed }` with the old ID to new ID map, otherwise the list of \
+        pruned tasks."
     )]
     async fn prune_tasks(
         &self,
@@ -390,15 +393,24 @@ impl BeaMcp {
             async {
                 let tasks = store::load_all(&self.base).await?;
                 let include_done = params.include_done.unwrap_or(false);
-                let deleted = service::prune_tasks(&self.base, &tasks, include_done)?;
-                let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
-                ok_json(serde_json::json!(summaries))
+                let pruned = service::prune_tasks(&self.base, &tasks, include_done)?;
+                let summaries: Vec<_> = pruned.tasks.iter().map(|t| t.summary(None)).collect();
+                // When surviving children were detached, an object that adds
+                // the old → new ID map next to the pruned summaries.
+                if pruned.renamed.is_empty() {
+                    ok_json(serde_json::json!(summaries))
+                } else {
+                    ok_json(serde_json::json!({ "pruned": summaries, "renamed": pruned.renamed }))
+                }
             }
             .await,
         )
     }
 
-    #[tool(description = "Permanently delete a task by ID")]
+    #[tool(
+        description = "Permanently delete a task by ID. The children of a deleted epic \
+        are detached to fresh root IDs, returned as a `renamed` map of old ID to new ID"
+    )]
     async fn delete_task(
         &self,
         Parameters(params): Parameters<TaskIdParams>,
@@ -406,8 +418,17 @@ impl BeaMcp {
         tool_ok(
             async {
                 let tasks = store::load_all(&self.base).await?;
-                let t = service::delete_task(&self.base, &tasks, &params.id)?;
-                ok_json(serde_json::to_value(t.summary(None))?)
+                let service::DeletedTask { task: t, renamed } =
+                    service::delete_task(&self.base, &tasks, &params.id)?;
+                // The summary, plus the old → new ID map when children were
+                // detached.
+                let mut value = serde_json::to_value(t.summary(None))?;
+                if !renamed.is_empty()
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert("renamed".into(), serde_json::to_value(&renamed)?);
+                }
+                ok_json(value)
             }
             .await,
         )
@@ -1217,6 +1238,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(extract_json(&deleted)["id"], id);
+        assert!(extract_json(&deleted).get("renamed").is_none());
 
         // Should no longer be findable
         let not_found = mcp.get_task(Parameters(TaskIdParams { id })).await.unwrap();
@@ -2418,6 +2440,85 @@ mod tests {
     }
 
     /// prune_tasks hard-deletes from active store only — the archive is untouched.
+    /// Create a task through the tool, optionally as an epic or under a parent.
+    async fn create_for_test(
+        mcp: &BeaMcp,
+        title: &str,
+        epic: bool,
+        parent: Option<&str>,
+    ) -> String {
+        let created = mcp
+            .create_task(Parameters(CreateTaskParams {
+                title: title.into(),
+                priority: None,
+                tags: None,
+                depends_on: None,
+                parent: parent.map(str::to_string),
+                body: None,
+                task_type: epic.then_some(TaskType::Epic),
+            }))
+            .await
+            .unwrap();
+        extract_json(&created)["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn test_tool_delete_epic_detaches_children() {
+        let (_tmp, mcp) = setup();
+        let epic = create_for_test(&mcp, "Epic", true, None).await;
+        let child = create_for_test(&mcp, "Child", false, Some(&epic)).await;
+
+        let deleted = mcp
+            .delete_task(Parameters(TaskIdParams { id: epic.clone() }))
+            .await
+            .unwrap();
+        assert!(
+            !deleted.is_error.unwrap_or(false),
+            "{}",
+            extract_text(&deleted)
+        );
+        let deleted = extract_json(&deleted);
+        assert_eq!(deleted["id"], epic);
+        let new_id = deleted["renamed"][&child].as_str().unwrap().to_string();
+        assert!(!new_id.contains('.'), "{new_id}");
+
+        let detail = mcp
+            .get_task(Parameters(TaskIdParams { id: new_id }))
+            .await
+            .unwrap();
+        let detail = extract_json(&detail);
+        assert_eq!(detail["title"], "Child");
+        assert!(detail.get("parent").is_none_or(|p| p.is_null()), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn test_tool_prune_detaches_surviving_children() {
+        let (_tmp, mcp) = setup();
+        let epic = create_for_test(&mcp, "Epic", true, None).await;
+        let keep = create_for_test(&mcp, "Keep", false, Some(&epic)).await;
+        let drop = create_for_test(&mcp, "Drop", false, Some(&epic)).await;
+        for id in [&drop, &epic] {
+            mcp.cancel_task(Parameters(TaskIdParams { id: id.clone() }))
+                .await
+                .unwrap();
+        }
+
+        let pruned = mcp
+            .prune_tasks(Parameters(PruneParams { include_done: None }))
+            .await
+            .unwrap();
+        assert!(
+            !pruned.is_error.unwrap_or(false),
+            "{}",
+            extract_text(&pruned)
+        );
+        let pruned = extract_json(&pruned);
+        assert_eq!(pruned["pruned"].as_array().unwrap().len(), 2, "{pruned}");
+        let renamed = pruned["renamed"].as_object().unwrap();
+        assert_eq!(renamed.len(), 1, "only the survivor moves: {pruned}");
+        assert!(!renamed[&keep].as_str().unwrap().contains('.'));
+    }
+
     #[tokio::test]
     async fn test_tool_prune_never_touches_archive() {
         let (_tmp, mcp) = setup();

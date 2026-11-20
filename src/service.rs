@@ -379,7 +379,7 @@ fn plan_move(
         .keys()
         .chain(archived.iter())
         .filter(|old| old.as_str() == id || task::is_descendant(old, id))
-        .map(|old| (old.clone(), format!("{new_id}{}", &old[id.len()..])))
+        .map(|old| (old.clone(), rebase(old, id, &new_id)))
         .collect())
 }
 
@@ -842,43 +842,163 @@ pub fn search_tasks(tasks: &HashMap<String, Task>, query: &str, include_all: boo
     results
 }
 
-/// Delete a task by ID or prefix, returning the deleted task.
-/// References to the deleted task are removed from remaining tasks.
-pub fn delete_task(base: &Path, tasks: &HashMap<String, Task>, id_or_prefix: &str) -> Result<Task> {
-    let id = store::resolve_prefix(tasks, id_or_prefix)?;
-    let t = tasks[&id].clone();
-    store::delete(base, &id)?;
-    scrub_references(base, tasks, &HashSet::from([id]))?;
-    Ok(t)
+/// What [`delete_task`] did: the task it deleted, and the IDs it renamed to
+/// detach the task's children.
+#[derive(Debug, Clone)]
+pub struct DeletedTask {
+    /// The deleted task, as it was before the deletion.
+    pub task: Task,
+    /// Old ID → new ID for every task the deletion moved: each direct child
+    /// of the deleted task (active or archived) detached to a fresh root ID,
+    /// and everything below it. Empty when the task had no children.
+    pub renamed: BTreeMap<String, String>,
 }
 
-/// Prune cancelled (and optionally done) tasks, returning deleted tasks.
-/// References to pruned tasks are removed from remaining tasks.
+/// What [`prune_tasks`] did: the tasks it deleted, and the IDs it renamed to
+/// detach the children that survived.
+#[derive(Debug, Clone)]
+pub struct PrunedTasks {
+    /// The deleted tasks, under the IDs they had before the prune.
+    pub tasks: Vec<Task>,
+    /// Old ID → new ID for every surviving task the prune moved, as in
+    /// [`DeletedTask::renamed`]. Empty when no pruned task had a surviving
+    /// child.
+    pub renamed: BTreeMap<String, String>,
+}
+
+/// Delete a task by ID or prefix, returning the deleted task.
+///
+/// References to the deleted task are removed from remaining tasks. A
+/// child's parent is part of its ID, so the children of a deleted epic are
+/// first detached to fresh root IDs, subtrees and archived children
+/// included, as [`update_task`] detaches a task; the epic is deleted last.
+/// The move does not open or close any epic.
+pub fn delete_task(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    id_or_prefix: &str,
+) -> Result<DeletedTask> {
+    let id = store::resolve_prefix(tasks, id_or_prefix)?;
+    let t = tasks[&id].clone();
+    let renamed = delete_detaching(base, tasks, &HashSet::from([id]))?;
+    Ok(DeletedTask { task: t, renamed })
+}
+
+/// Prune cancelled (and optionally done) tasks, returning the deleted tasks.
+///
+/// References to pruned tasks are removed from remaining tasks, and the
+/// children that survive a pruned epic are detached to fresh root IDs as in
+/// [`delete_task`]. Children pruned together with their epic are deleted,
+/// not moved.
 pub fn prune_tasks(
     base: &Path,
     tasks: &HashMap<String, Task>,
     include_done: bool,
-) -> Result<Vec<Task>> {
+) -> Result<PrunedTasks> {
     let to_delete: Vec<Task> = tasks
         .values()
         .filter(|t| t.status == Status::Cancelled || (include_done && t.status == Status::Done))
         .cloned()
         .collect();
+    let deleted: HashSet<String> = to_delete.iter().map(|t| t.id.clone()).collect();
+    let renamed = delete_detaching(base, tasks, &deleted)?;
+    Ok(PrunedTasks {
+        tasks: to_delete,
+        renamed,
+    })
+}
 
-    for t in &to_delete {
-        store::delete(base, &t.id)?;
+/// Delete the active tasks in `deleted`, detaching the tasks that survive
+/// them first, and return the renames of the survivors.
+///
+/// Order matters for interruption safety: every rename happens first (a
+/// deleted task inside a detached subtree moves with it), then the tasks are
+/// deleted deepest first, so no state on the way has a task whose parent is
+/// gone.
+fn delete_detaching(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    deleted: &HashSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let renames = plan_detach(base, tasks, deleted)?;
+    store::rename_ids(base, &renames)?;
+
+    let mut now_deleted: Vec<String> = deleted
+        .iter()
+        .map(|id| renames.get(id).unwrap_or(id).clone())
+        .collect();
+    now_deleted.sort_by_key(|id| std::cmp::Reverse(task::ancestors(id).count()));
+    for id in &now_deleted {
+        store::delete(base, id)?;
     }
-    let deleted_ids: HashSet<String> = to_delete.iter().map(|t| t.id.clone()).collect();
-    scrub_references(base, tasks, &deleted_ids)?;
-    Ok(to_delete)
+    scrub_references(
+        base,
+        &apply_renames(tasks, &renames),
+        &now_deleted.into_iter().collect(),
+    )?;
+
+    Ok(renames
+        .into_iter()
+        .filter(|(old, _)| !deleted.contains(old))
+        .collect())
+}
+
+/// Work out the renames that detach every task, active or archived, whose
+/// parent is in `deleted` to a fresh root ID, its subtree moving with it.
+/// Writes nothing.
+///
+/// A task below a detached task keeps its segments under the new root. That
+/// includes tasks that are themselves in `deleted`, so they can still be
+/// deleted under their new ID; when a detached task lies below another one,
+/// the nearer one decides its new ID.
+fn plan_detach(
+    base: &Path,
+    tasks: &HashMap<String, Task>,
+    deleted: &HashSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let archived = store::archived_id_set(base);
+    let known: HashSet<&String> = tasks.keys().chain(archived.iter()).collect();
+    let mut detached: Vec<&String> = known
+        .iter()
+        .copied()
+        .filter(|id| !deleted.contains(*id))
+        .filter(|id| task::parent_of(id).is_some_and(|p| deleted.contains(p)))
+        .collect();
+    if detached.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    detached.sort();
+
+    let config = config::load(base)?;
+    let mut reserved = store::reserved_ids(base, tasks);
+    let new_roots: HashMap<&str, String> = detached
+        .into_iter()
+        .map(|id| {
+            let new = task::generate_id(&reserved, config.id_length as usize);
+            reserved.insert(new.clone());
+            (id.as_str(), new)
+        })
+        .collect();
+
+    Ok(known
+        .into_iter()
+        .filter_map(|id| {
+            std::iter::once(id.as_str())
+                .chain(task::ancestors(id))
+                .find_map(|a| new_roots.get(a).map(|new| (a, new)))
+                .map(|(a, new)| (id.clone(), rebase(id, a, new)))
+        })
+        .collect())
+}
+
+/// `id`, which is `from` or below it, with the `from` prefix replaced by `to`.
+fn rebase(id: &str, from: &str, to: &str) -> String {
+    format!("{to}{}", &id[from.len()..])
 }
 
 /// Remove dangling references to deleted tasks: drop deleted IDs from
 /// `depends_on` lists. Without this, dependents would silently never become
 /// ready.
-///
-/// A child's parent is part of its ID and is left as it is: deleting an epic
-/// leaves its children with a parent that no longer exists.
 ///
 /// Only applies to hard deletion (delete/prune) — archived tasks keep their
 /// IDs reserved and still resolve via the archive, so no scrubbing there.
@@ -1402,10 +1522,6 @@ mod tests {
         assert!(matches!(err, Error::FenceViolation { .. }));
     }
 
-    // Deleting an epic still leaves its children orphaned (their parent is
-    // part of their ID); detaching them to fresh root IDs on delete is its own
-    // task. This test only pins the dependency scrub and that the orphan's ID
-    // stays reserved.
     #[tokio::test]
     async fn test_delete_scrubs_dangling_references() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1422,18 +1538,128 @@ mod tests {
         store::save(tmp.path(), &c).unwrap();
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
-        delete_task(tmp.path(), &tasks, "aaa").unwrap();
+        let deleted = delete_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert_eq!(deleted.task.id, "aaa");
 
         let tasks = store::load_all(tmp.path()).await.unwrap();
         assert!(tasks["bbb"].depends_on.is_empty(), "dep should be scrubbed");
-        // Known interim state, not the intended end state: the child is
-        // orphaned under the deleted epic's ID, which stays reserved so that
-        // no new task can take it and adopt the child.
-        assert_eq!(tasks["aaa.cc"].parent(), Some("aaa"));
-        assert!(store::reserved_ids(tmp.path(), &tasks).contains("aaa"));
+        // The child is detached to a fresh root ID instead of being orphaned.
+        let new = &deleted.renamed["aaa.cc"];
+        assert_eq!(deleted.renamed.len(), 1);
+        assert!(!tasks.contains_key("aaa.cc"));
+        assert_eq!(tasks[new].parent(), None);
+        assert_eq!(tasks[new].title, "Task aaa.cc");
+        assert!(!tasks.contains_key("aaa"));
         // And the dependent is now ready instead of silently blocked.
         let ready = list_ready(&tasks, None, None, None);
         assert!(ready.iter().any(|t| t.id == "bbb"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_without_children_renames_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+        store::save(tmp.path(), &make_epic("aaa")).unwrap();
+        store::save(tmp.path(), &make_task("bbb", Status::Open)).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let deleted = delete_task(tmp.path(), &tasks, "aaa").unwrap();
+        assert!(deleted.renamed.is_empty());
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert_eq!(tasks.keys().collect::<Vec<_>>(), vec!["bbb"]);
+    }
+
+    #[tokio::test]
+    async fn test_delete_epic_detaches_subtrees_and_archived_children() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        store::save(tmp.path(), &make_epic("aaa")).unwrap();
+        let mut sub = make_child("ee", "aaa", Status::Open);
+        sub.task_type = TaskType::Epic;
+        store::save(tmp.path(), &sub).unwrap();
+        store::save(tmp.path(), &make_child("gg", "aaa.ee", Status::Open)).unwrap();
+        store::save(tmp.path(), &make_child("dd", "aaa", Status::Done)).unwrap();
+        store::move_to_archive(tmp.path(), "aaa.dd").unwrap();
+        // References from active and archived tasks into the moved subtrees.
+        let mut user = make_task("uuu", Status::Open);
+        user.depends_on = vec!["aaa.ee.gg".into(), "aaa.dd".into()];
+        store::save(tmp.path(), &user).unwrap();
+        let mut old = make_task("ooo", Status::Done);
+        old.depends_on = vec!["aaa.ee.gg".into()];
+        store::save(tmp.path(), &old).unwrap();
+        store::move_to_archive(tmp.path(), "ooo").unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let renamed = delete_task(tmp.path(), &tasks, "aaa").unwrap().renamed;
+
+        let ee = renamed["aaa.ee"].clone();
+        let dd = renamed["aaa.dd"].clone();
+        assert_eq!(renamed["aaa.ee.gg"], format!("{ee}.gg"));
+        assert_eq!(renamed.len(), 3, "{renamed:?}");
+        assert_ne!(ee, dd);
+        assert!(task::parent_of(&ee).is_none() && task::parent_of(&dd).is_none());
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        assert!(tasks[&ee].task_type.is_epic());
+        assert!(tasks.contains_key(&format!("{ee}.gg")));
+        assert!(!tasks.keys().any(|id| id.starts_with("aaa")));
+        assert_eq!(
+            tasks["uuu"].depends_on,
+            vec![format!("{ee}.gg"), dd.clone()]
+        );
+        let archived = store::load_archived(tmp.path()).await.unwrap();
+        assert!(
+            archived.contains_key(&dd),
+            "archived child renamed in place"
+        );
+        assert!(!archived.contains_key("aaa.dd"));
+        assert_eq!(archived["ooo"].depends_on, vec![format!("{ee}.gg")]);
+        // The detached epic's status is left alone.
+        assert_eq!(tasks[&ee].status, Status::Open);
+    }
+
+    #[tokio::test]
+    async fn test_prune_detaches_only_surviving_children() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        store::init(tmp.path()).unwrap();
+
+        let mut epic = make_epic("aaa");
+        epic.status = Status::Cancelled;
+        store::save(tmp.path(), &epic).unwrap();
+        store::save(tmp.path(), &make_child("xx", "aaa", Status::Cancelled)).unwrap();
+        store::save(tmp.path(), &make_child("kk", "aaa", Status::Open)).unwrap();
+        // A pruned task inside a surviving subtree, with a survivor below it.
+        store::save(tmp.path(), &make_child("pp", "aaa.kk", Status::Cancelled)).unwrap();
+        let mut deep = make_child("qq", "aaa.kk.pp", Status::Open);
+        deep.depends_on = vec!["aaa.kk.pp".into(), "aaa.kk".into()];
+        store::save(tmp.path(), &deep).unwrap();
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let pruned = prune_tasks(tmp.path(), &tasks, false).unwrap();
+
+        let mut gone: Vec<_> = pruned.tasks.iter().map(|t| t.id.as_str()).collect();
+        gone.sort();
+        assert_eq!(gone, vec!["aaa", "aaa.kk.pp", "aaa.xx"]);
+        // Only survivors appear in the mapping.
+        let mut moved: Vec<_> = pruned.renamed.keys().map(String::as_str).collect();
+        moved.sort();
+        assert_eq!(moved, vec!["aaa.kk", "aaa.kk.pp.qq"]);
+        let kk = &pruned.renamed["aaa.kk"];
+        let qq = &pruned.renamed["aaa.kk.pp.qq"];
+        assert!(task::parent_of(kk).is_none() && task::parent_of(qq).is_none());
+
+        let tasks = store::load_all(tmp.path()).await.unwrap();
+        let mut ids: Vec<_> = tasks.keys().cloned().collect();
+        ids.sort();
+        let mut expected = vec![kk.clone(), qq.clone()];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert_eq!(
+            tasks[qq].depends_on,
+            vec![kk.clone()],
+            "pruned dep scrubbed"
+        );
     }
 
     #[tokio::test]

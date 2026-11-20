@@ -927,11 +927,20 @@ pub fn cmd_prune(
     include_done: bool,
     json: bool,
 ) -> Result<()> {
-    let deleted = service::prune_tasks(base, tasks, include_done)?;
+    let service::PrunedTasks {
+        tasks: deleted,
+        renamed,
+    } = service::prune_tasks(base, tasks, include_done)?;
     let summaries: Vec<_> = deleted.iter().map(|t| t.summary(None)).collect();
 
     if json {
-        output(&summaries)?;
+        // The pruned summaries; when surviving children were detached, an
+        // object that adds the old → new ID map next to them.
+        if renamed.is_empty() {
+            output(&summaries)?;
+        } else {
+            output(&serde_json::json!({ "pruned": summaries, "renamed": renamed }))?;
+        }
     } else {
         if deleted.is_empty() {
             println!("No tasks to prune.");
@@ -940,17 +949,31 @@ pub fn cmd_prune(
                 println!("Pruned {} — {}", s.id, s.title);
             }
         }
+        for (old, new) in &renamed {
+            println!("  renamed {} → {}", old, color_id(new));
+        }
     }
     Ok(())
 }
 
 pub fn cmd_delete(base: &Path, tasks: &HashMap<String, Task>, id: &str, json: bool) -> Result<()> {
-    let t = service::delete_task(base, tasks, id)?;
+    let service::DeletedTask { task: t, renamed } = service::delete_task(base, tasks, id)?;
 
     if json {
-        output(&t.summary(None))?;
+        // The task summary, plus the old → new ID map when children were
+        // detached.
+        let mut value = serde_json::to_value(t.summary(None))?;
+        if !renamed.is_empty()
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.insert("renamed".into(), serde_json::to_value(&renamed)?);
+        }
+        output(&value)?;
     } else {
         println!("Deleted task {} — {}", t.id, t.title);
+        for (old, new) in &renamed {
+            println!("  renamed {} → {}", old, color_id(new));
+        }
     }
     Ok(())
 }
