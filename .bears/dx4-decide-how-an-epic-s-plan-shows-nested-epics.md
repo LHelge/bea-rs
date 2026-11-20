@@ -26,6 +26,7 @@ Options:
 - One option chosen and recorded here.
 - `bea show --plan`, `plan_epic`, `CLAUDE.md`, `README.md` and the templates agree on what a plan contains.
 - A test with a nested epic pins the behaviour.
+
 ## Decision
 
 Option 1: a plan orders the epic's direct children only, and a nested epic is one step of its parent's plan.
